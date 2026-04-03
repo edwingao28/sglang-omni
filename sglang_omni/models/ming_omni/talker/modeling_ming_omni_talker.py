@@ -271,7 +271,7 @@ class MingOmniTalker(nn.Module):
         self.initialized = None
         self.initial_lock = threading.Lock()
         self.registered_prompt: dict = {}
-        self.max_conc = 1
+        self.max_conc = config.max_conc
         self.executor = ThreadPoolExecutor(max_workers=self.max_conc)
         self.sampler_pool = CFMGraphExecutorPool(
             self.config,
