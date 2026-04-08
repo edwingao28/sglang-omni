@@ -516,9 +516,7 @@ class SGLangModelRunner:
         self.batch_planner = batch_planner
         self.device = torch.device(f"cuda:{model_worker.gpu_id}")
         self._tp_size = model_worker.tp_size
-        self._tp_cpu_group = (
-            model_worker.tp_cpu_group if self._tp_size > 1 else None
-        )
+        self._tp_cpu_group = model_worker.tp_cpu_group if self._tp_size > 1 else None
 
         model = model_worker.model_runner.model
         self._embed_tokens, self._inner_model = self._get_inner_model_components(model)
