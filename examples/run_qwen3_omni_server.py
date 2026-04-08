@@ -5,9 +5,7 @@ Usage::
 
     python examples/run_qwen3_omni_server.py \
         --model-id Qwen/Qwen3-Omni-30B-A3B-Instruct \
-        --thinker-device cuda:0 \
-        --image-device cuda:1 \
-        --audio-device cuda:1 \
+        --tp-size 2 \
         --port 8000
 
 Then test with::
@@ -28,7 +26,7 @@ import argparse
 import logging
 import os
 
-from sglang_omni.models.qwen3_omni import create_text_first_pipeline_config
+from sglang_omni.models.qwen3_omni.config import Qwen3OmniPipelineConfig
 from sglang_omni.serve import launch_server
 
 logging.basicConfig(
@@ -47,14 +45,25 @@ def parse_args() -> argparse.Namespace:
         default="Qwen/Qwen3-Omni-30B-A3B-Instruct",
         help="Hugging Face model id",
     )
-    parser.add_argument("--dtype", type=str, default="bfloat16")
-
-    # Device placement
-    parser.add_argument("--preprocessing-device", type=str, default="cpu")
-    parser.add_argument("--image-device", type=str, default="cuda:0")
-    parser.add_argument("--audio-device", type=str, default="cuda:0")
-    parser.add_argument("--thinker-device", type=str, default="cuda:0")
-    parser.add_argument("--thinker-max-seq-len", type=int, default=8192)
+    parser.add_argument("--thinker-max-seq-len", type=int, default=None)
+    parser.add_argument(
+        "--tp-size",
+        type=int,
+        default=1,
+        help="Tensor parallel size for thinker",
+    )
+    parser.add_argument(
+        "--cpu-offload-gb",
+        type=int,
+        default=0,
+        help="GB of model weights to offload to CPU",
+    )
+    parser.add_argument(
+        "--mem-fraction-static",
+        type=float,
+        default=None,
+        help="Fraction of GPU memory for KV cache",
+    )
 
     # Pipeline options
     parser.add_argument(
@@ -81,19 +90,28 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    # Build pipeline config
-    config = create_text_first_pipeline_config(
-        model_path=args.model_path,
-        preprocessing_device=args.preprocessing_device,
-        image_device=args.image_device,
-        audio_device=args.audio_device,
-        thinker_device=args.thinker_device,
-        thinker_max_seq_len=args.thinker_max_seq_len,
-        dtype=args.dtype,
-        relay_type=args.relay_type,
+    overrides = {}
+    if args.tp_size and args.tp_size > 1:
+        overrides["tp_size"] = args.tp_size
+    if args.cpu_offload_gb:
+        overrides["cpu_offload_gb"] = args.cpu_offload_gb
+    if args.mem_fraction_static is not None:
+        overrides["mem_fraction_static"] = args.mem_fraction_static
+
+    config = Qwen3OmniPipelineConfig(
+        model_path=args.model_id,
+        relay_backend=args.relay_type,
+        server_args_overrides=overrides or None,
     )
 
-    # Launch: compile pipeline + start stages + start OpenAI server
+    # Override thinker_max_seq_len in stage executor args if provided
+    if args.thinker_max_seq_len is not None:
+        for stage in config.stages:
+            if stage.name == "thinker":
+                if stage.executor.args is None:
+                    stage.executor.args = {}
+                stage.executor.args["thinker_max_seq_len"] = args.thinker_max_seq_len
+
     launch_server(
         config,
         host=args.host,
