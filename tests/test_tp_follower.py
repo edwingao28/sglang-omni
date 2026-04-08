@@ -95,13 +95,20 @@ class TestFollowerBatchFlow(unittest.TestCase):
 
         mock_sbi_cls = MagicMock()
         mock_sbi_cls.side_effect = lambda **kw: types.SimpleNamespace(**kw)
-        with patch(
-            "sglang_omni.engines.tp.follower.SamplingBatchInfo",
-            mock_sbi_cls,
-            create=True,
-        ), patch.dict(
-            sys.modules,
-            {"sglang.srt.sampling.sampling_batch_info": MagicMock(SamplingBatchInfo=mock_sbi_cls)},
+        with (
+            patch(
+                "sglang_omni.engines.tp.follower.SamplingBatchInfo",
+                mock_sbi_cls,
+                create=True,
+            ),
+            patch.dict(
+                sys.modules,
+                {
+                    "sglang.srt.sampling.sampling_batch_info": MagicMock(
+                        SamplingBatchInfo=mock_sbi_cls
+                    )
+                },
+            ),
         ):
             from sglang_omni.engines.tp.follower import patch_batch_for_follower
 

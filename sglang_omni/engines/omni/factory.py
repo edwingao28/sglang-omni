@@ -245,7 +245,9 @@ def create_sglang_ar_engine(
     follower_processes = []
 
     if tp_size > 1:
-        from sglang_omni.engines.ar.sglang_backend.model_worker import _resolve_nccl_port
+        from sglang_omni.engines.ar.sglang_backend.model_worker import (
+            _resolve_nccl_port,
+        )
         from sglang_omni.engines.tp.follower import spawn_followers
 
         nccl_port = _resolve_nccl_port()
