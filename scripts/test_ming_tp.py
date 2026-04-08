@@ -58,7 +58,9 @@ async def run_thinker(
     )
 
     runner = MultiProcessPipelineRunner(config)
-    logger.info("Starting pipeline with TP=%d, cpu_offload_gb=%d ...", tp_size, cpu_offload_gb)
+    logger.info(
+        "Starting pipeline with TP=%d, cpu_offload_gb=%d ...", tp_size, cpu_offload_gb
+    )
     await runner.start(timeout=600)
 
     results = []
@@ -155,7 +157,9 @@ def main():
 
     if args.cmd == "run":
         output = args.output or f"tp{args.tp}_results.json"
-        asyncio.run(run_thinker(args.tp, args.cpu_offload_gb, args.mem_fraction, output))
+        asyncio.run(
+            run_thinker(args.tp, args.cpu_offload_gb, args.mem_fraction, output)
+        )
     elif args.cmd == "compare":
         sys.exit(0 if compare_outputs(args.file1, args.file2) else 1)
     else:
