@@ -512,6 +512,10 @@ class SGLangModelRunner:
         self.output_processor = output_processor
         self.batch_planner = batch_planner
         self.device = torch.device(f"cuda:{model_worker.gpu_id}")
+        self._tp_size = model_worker.tp_size
+        self._tp_cpu_group = (
+            model_worker.tp_cpu_group if self._tp_size > 1 else None
+        )
 
         model = model_worker.model_runner.model
         self._embed_tokens, self._inner_model = self._get_inner_model_components(model)
@@ -526,6 +530,11 @@ class SGLangModelRunner:
         self._image_token_id = getattr(thinker_cfg, "image_token_id", None)
         self._video_token_id = getattr(thinker_cfg, "video_token_id", None)
         self._audio_token_id = getattr(thinker_cfg, "audio_token_id", None)
+
+    @property
+    def _tp_cpu_group_for_stop(self):
+        """Exposed for OmniEngine to send stop signal to followers."""
+        return self._tp_cpu_group
 
     @staticmethod
     def _get_inner_model_components(model):
@@ -955,6 +964,16 @@ class SGLangModelRunner:
         # Enable hidden state capture if output processor needs it
         if self.output_processor._capture_hidden:
             model_worker_batch.capture_hidden_mode = CaptureHiddenMode.LAST
+
+        # Broadcast batch to TP follower ranks so they can build ForwardBatch
+        # and participate in NCCL all-reduce during model.forward()
+        if self._tp_size > 1:
+            from sglang.srt.utils import broadcast_pyobj
+
+            from sglang_omni.engines.tp.serialization import make_follower_batch
+
+            follower_batch = make_follower_batch(model_worker_batch)
+            broadcast_pyobj([follower_batch], 0, self._tp_cpu_group, src=0)
 
         forward_batch = ForwardBatch.init_new(
             model_worker_batch, self.model_worker.model_runner
