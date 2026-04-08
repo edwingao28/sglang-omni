@@ -238,12 +238,38 @@ def create_sglang_ar_engine(
         logger.debug("Disabling overlap for feedback-enabled engine")
         enable_overlap = False
 
-    # Initialize model worker
-    model_worker = ModelWorker(
-        config=ModelWorkerConfig(
+    # --- TP follower spawning ---
+    # Must happen BEFORE rank 0's ModelWorker init because
+    # init_distributed_environment is a collective operation.
+    tp_size = server_args.tp_size
+    follower_processes = []
+
+    if tp_size > 1:
+        from sglang_omni.engines.ar.sglang_backend.model_worker import _resolve_nccl_port
+        from sglang_omni.engines.tp.follower import spawn_followers
+
+        nccl_port = _resolve_nccl_port()
+        follower_processes = spawn_followers(
+            server_args=server_args,
+            nccl_port=nccl_port,
+            base_gpu_id=gpu_id,
+            tp_size=tp_size,
+        )
+        # Inject nccl_port into config so rank 0 uses the same port
+        config = ModelWorkerConfig(
             model_arch_override=model_arch_override,
             weight_prefix=weight_prefix,
-        ),
+            nccl_port=nccl_port,
+        )
+    else:
+        config = ModelWorkerConfig(
+            model_arch_override=model_arch_override,
+            weight_prefix=weight_prefix,
+        )
+
+    # Initialize model worker
+    model_worker = ModelWorker(
+        config=config,
         server_args=server_args,
         gpu_id=gpu_id,
     )
@@ -326,4 +352,5 @@ def create_sglang_ar_engine(
         model_runner=sglang_model_runner,
         enable_overlap=enable_overlap,
         feedback_mailbox=feedback_mailbox,
+        follower_processes=follower_processes,
     )
