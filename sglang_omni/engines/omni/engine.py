@@ -148,9 +148,7 @@ class OmniEngine(Engine):
 
         # Stop TP follower processes
         if self._follower_processes:
-            tp_cpu_group = getattr(
-                self.model_runner, "_tp_cpu_group_for_stop", None
-            )
+            tp_cpu_group = getattr(self.model_runner, "_tp_cpu_group_for_stop", None)
             if tp_cpu_group is not None:
                 from sglang.srt.utils import broadcast_pyobj
 
