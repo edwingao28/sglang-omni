@@ -188,6 +188,60 @@ class TestFollowerBatchFlow(unittest.TestCase):
 
         assert pool.req_to_token.sum() == 0
 
+    def test_page_table_round_trip(self):
+        """Full round-trip: attach on rank 0 → pickle → unpickle → sync on follower."""
+        import pickle
+        import torch
+
+        from sglang_omni.engines.tp.follower import sync_page_table
+        from sglang_omni.engines.tp.serialization import (
+            attach_page_table_snapshot,
+            make_follower_batch,
+        )
+
+        # Rank 0's pool with known data
+        rank0_pool = types.SimpleNamespace()
+        rank0_pool.req_to_token = torch.zeros((4, 64), dtype=torch.int32)
+        rank0_pool.req_to_token[0, 0:4] = torch.tensor(
+            [100, 101, 102, 103], dtype=torch.int32
+        )
+        rank0_pool.req_to_token[1, 0:2] = torch.tensor([200, 201], dtype=torch.int32)
+
+        # Build batch like rank 0's scheduler would
+        batch = types.SimpleNamespace()
+        batch.req_pool_indices = torch.tensor([0, 1])
+        batch.seq_lens = torch.tensor([4, 2])
+        batch.input_ids = torch.tensor([10, 20])
+        batch.sampling_info = MagicMock()
+        batch.reqs = [MagicMock(), MagicMock()]
+
+        # Rank 0: attach + make follower batch
+        attach_page_table_snapshot(batch, rank0_pool)
+        follower_batch = make_follower_batch(batch)
+
+        # Simulate broadcast: pickle round-trip
+        data = pickle.dumps(follower_batch)
+        received = pickle.loads(data)
+
+        # Follower's empty pool
+        follower_pool = types.SimpleNamespace()
+        follower_pool.req_to_token = torch.zeros((4, 64), dtype=torch.int32)
+
+        # Follower: sync
+        sync_page_table(received, follower_pool)
+
+        # Verify follower's pool matches rank 0's
+        assert torch.equal(
+            follower_pool.req_to_token[0, 0:4],
+            torch.tensor([100, 101, 102, 103], dtype=torch.int32),
+        )
+        assert torch.equal(
+            follower_pool.req_to_token[1, 0:2],
+            torch.tensor([200, 201], dtype=torch.int32),
+        )
+        # Rest of pool is still zeros
+        assert follower_pool.req_to_token[2:].sum() == 0
+
 
 if __name__ == "__main__":
     unittest.main()
