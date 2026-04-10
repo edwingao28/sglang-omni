@@ -18,42 +18,16 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _get_model_registry():
-    """Get sglang's global ModelRegistry (separate function for testability)."""
-    from sglang.srt.models.registry import ModelRegistry
-
-    return ModelRegistry
-
-
 def register_omni_models() -> None:
     """Register sglang-omni model classes in sglang's ModelRegistry.
 
     Must be called in each subprocess before model loading because
     'spawn' start method doesn't inherit parent's registry state.
+    Delegates to the single source of truth in sglang_omni.models.registry.
     """
-    registry = _get_model_registry()
+    from sglang_omni.models.sglang_registry import register_omni_models_in_sglang
 
-    from sglang_omni.models.ming_omni.thinker import (
-        BailingMM2Config,
-        BailingMoeV2ForCausalLM,
-    )
-
-    registry.models["BailingMoeV2ForCausalLM"] = BailingMoeV2ForCausalLM
-
-    from transformers import AutoConfig
-
-    try:
-        AutoConfig.register("bailingmm_moe_v2_lite", BailingMM2Config)
-    except ValueError:
-        pass  # Already registered
-
-    # Register other omni models as needed
-    try:
-        from sglang_omni.models.qwen3_omni.talker import Qwen3OmniTalker
-
-        registry.models["Qwen3OmniTalker"] = Qwen3OmniTalker
-    except ImportError:
-        pass
+    register_omni_models_in_sglang()
 
 
 def relocate_batch_tensors(batch, device) -> None:
@@ -65,24 +39,43 @@ def relocate_batch_tensors(batch, device) -> None:
     import torch
 
     def _move(obj):
-        for attr, val in vars(obj).items():
-            if isinstance(val, torch.Tensor) and val.device != device:
-                setattr(obj, attr, val.to(device, non_blocking=True))
+        if isinstance(obj, torch.Tensor):
+            return obj.to(device, non_blocking=True) if obj.device != device else obj
+        if isinstance(obj, dict):
+            for key, val in obj.items():
+                obj[key] = _move(val)
+            return obj
+        if isinstance(obj, list):
+            for i, val in enumerate(obj):
+                obj[i] = _move(val)
+            return obj
+        if isinstance(obj, tuple):
+            return tuple(_move(val) for val in obj)
+        if hasattr(obj, "__dict__"):
+            for attr, val in vars(obj).items():
+                moved = _move(val)
+                if moved is not val:
+                    setattr(obj, attr, moved)
+        return obj
 
     # Move all top-level tensor attributes
     _move(batch)
 
-    # Move tensors nested inside multimodal_inputs (e.g. mrope_position_delta)
-    mm_inputs = getattr(batch, "multimodal_inputs", None)
-    if mm_inputs:
-        for mm in mm_inputs:
-            if mm is None:
-                continue
-            _move(mm)
-            # MultimodalInputs.mm_items contains MultimodalDataItem objects
-            for item in getattr(mm, "mm_items", []) or []:
-                if item is not None:
-                    _move(item)
+
+def sync_page_table(batch, req_to_token_pool) -> None:
+    """Write page table rows from rank 0's snapshot into the follower's pool.
+
+    Must be called BEFORE ForwardBatch.init_new() so the attention backend
+    can look up correct KV cache locations.
+    """
+    rows = getattr(batch, "tp_page_table_rows", None)
+    if not rows:
+        return
+    pool_tensor = req_to_token_pool.req_to_token
+    for i, row in enumerate(rows):
+        idx = int(batch.req_pool_indices[i])
+        seq_len = len(row)
+        pool_tensor[idx, :seq_len] = row.to(pool_tensor.device)
 
 
 def patch_batch_for_follower(batch, device, vocab_size: int = 0) -> None:
