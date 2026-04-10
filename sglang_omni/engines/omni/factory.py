@@ -241,6 +241,8 @@ def create_sglang_ar_engine(
     # --- TP follower spawning ---
     # Must happen BEFORE rank 0's ModelWorker init because
     # init_distributed_environment is a collective operation.
+    # Follower GPUs are assigned as base_gpu_id + rank (1, 2, …, tp_size-1).
+    # Pipeline gpu_placement must not overlap with these IDs.
     tp_size = server_args.tp_size
     follower_processes = []
 
