@@ -159,12 +159,12 @@ class Worker:
     async def _process_request(self, work: WorkDescriptor) -> None:
         """Process a single request."""
         request_id = work.request_id
-        logger.debug("Worker %s: processing request %s", self.stage.name, request_id)
+        logger.info("Worker %s: processing request %s", self.stage.name, request_id)
         try:
             if self.data_plane is None:
                 raise RuntimeError("Worker not bound to a data plane")
             payloads = await self._load_inputs(work)
-            logger.debug("Worker %s: loaded inputs for %s", self.stage.name, request_id)
+            logger.info("Worker %s: loaded inputs for %s", self.stage.name, request_id)
             merged = self._merge_payloads(work, payloads)
             if not isinstance(merged, StagePayload):
                 raise TypeError(f"Expected StagePayload, got {type(merged)}")
@@ -186,11 +186,11 @@ class Worker:
             fut: asyncio.Future[StagePayload] = loop.create_future()
             self._result_waiters[request_id] = fut
 
-            logger.debug(
+            logger.info(
                 "Worker %s: adding request %s to executor", self.stage.name, request_id
             )
             await self.executor.add_request(merged)
-            logger.debug(
+            logger.info(
                 "Worker %s: request %s added, waiting for result",
                 self.stage.name,
                 request_id,
@@ -206,7 +206,7 @@ class Worker:
                     )
 
             output_payload = await fut
-            logger.debug("Worker %s: got result for %s", self.stage.name, request_id)
+            logger.info("Worker %s: got result for %s", self.stage.name, request_id)
 
             # Signal stream done to all downstream streaming targets
             for target in self._stream_targets:
@@ -232,7 +232,7 @@ class Worker:
             # Route
             next_stage = self.stage.get_next(request_id, output_payload)
 
-            logger.debug(
+            logger.info(
                 "Worker %s: next_stage=%s for %s",
                 self.stage.name,
                 next_stage,
@@ -242,7 +242,7 @@ class Worker:
                 if stream_task is not None:
                     await self._finish_stream_task(stream_task)
                 await self._send_complete(request_id, output_payload.data)
-                logger.debug(
+                logger.info(
                     "Worker %s: sent complete for %s", self.stage.name, request_id
                 )
             else:
@@ -256,7 +256,7 @@ class Worker:
                     )
                     if not sent:
                         return
-                    logger.debug(
+                    logger.info(
                         "Worker %s: routed %s to %s",
                         self.stage.name,
                         request_id,
@@ -336,7 +336,7 @@ class Worker:
         self, request_id: str, next_stage: str, payload: StagePayload
     ) -> bool:
         """Send data to next stage."""
-        logger.debug("Worker: routing %s to %s", request_id, next_stage)
+        logger.info("Worker: routing %s to %s", request_id, next_stage)
 
         try:
             endpoint = self.stage.endpoints.get(next_stage)

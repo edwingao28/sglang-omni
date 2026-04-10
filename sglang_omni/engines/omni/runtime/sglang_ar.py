@@ -980,9 +980,15 @@ class SGLangModelRunner:
                 make_follower_batch,
             )
 
+            logger.info(
+                "DIAG[rank0]: broadcast start, mode=%s bs=%d",
+                schedule_batch.forward_mode,
+                len(model_worker_batch.seq_lens),
+            )
             attach_page_table_snapshot(model_worker_batch, self._req_to_token_pool)
             follower_batch = make_follower_batch(model_worker_batch)
             broadcast_pyobj([follower_batch], 0, self._tp_cpu_group, src=0)
+            logger.info("DIAG[rank0]: broadcast done")
 
         forward_batch = ForwardBatch.init_new(
             model_worker_batch, self.model_worker.model_runner
@@ -1011,6 +1017,12 @@ class SGLangModelRunner:
             and schedule_batch.forward_mode.is_extend()
             and has_projected_prefill
         )
+        logger.info(
+            "DIAG[rank0]: forward start, omni_embeds=%s projected=%s feedback=%s",
+            omni_embeds is not None and omni_embeds[0] is not None,
+            projected_prefill,
+            feedback_input_embeds is not None,
+        )
         if omni_embeds is not None and omni_embeds[0] is not None:
             input_embeds, ds_embeds, vis_masks = omni_embeds
             batch_result = self._forward_with_omni_embeds(
@@ -1037,6 +1049,7 @@ class SGLangModelRunner:
             )
         else:
             batch_result = self.model_worker.forward_batch_generation(forward_batch)
+        logger.info("DIAG[rank0]: forward done")
 
         if schedule_batch.is_prefill_only:
             batch_result.next_token_ids = torch.zeros(
