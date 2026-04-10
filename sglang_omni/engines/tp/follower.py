@@ -177,6 +177,7 @@ def follower_worker_loop(
             break
 
         patch_batch_for_follower(batch, device, vocab_size=model_vocab_size)
+        sync_page_table(batch, worker.model_runner.req_to_token_pool)
         forward_batch = ForwardBatch.init_new(batch, worker.model_runner)
         worker.model_runner.forward(forward_batch=forward_batch)
         step += 1
