@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import multiprocessing as mp
 import os
 
 from sglang_omni.models.ming_omni.config import MingOmniPipelineConfig
@@ -122,4 +123,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
     main()

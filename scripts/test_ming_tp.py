@@ -39,7 +39,11 @@ TEST_PROMPTS = [
 
 
 async def run_thinker(
-    tp_size: int, cpu_offload_gb: int, mem_fraction: float, output_file: str
+    tp_size: int,
+    cpu_offload_gb: int,
+    mem_fraction: float,
+    output_file: str,
+    attention_backend: str | None = None,
 ):
     from sglang_omni.models.ming_omni.config import MingOmniPipelineConfig
     from sglang_omni.pipeline.mp_runner import MultiProcessPipelineRunner
@@ -50,6 +54,8 @@ async def run_thinker(
         "cpu_offload_gb": cpu_offload_gb,
         "mem_fraction_static": mem_fraction,
     }
+    if attention_backend is not None:
+        overrides["attention_backend"] = attention_backend
 
     config = MingOmniPipelineConfig(
         model_path="inclusionAI/Ming-flash-omni-2.0",
@@ -59,7 +65,10 @@ async def run_thinker(
 
     runner = MultiProcessPipelineRunner(config)
     logger.info(
-        "Starting pipeline with TP=%d, cpu_offload_gb=%d ...", tp_size, cpu_offload_gb
+        "Starting pipeline with TP=%d, cpu_offload_gb=%d, attention_backend=%s ...",
+        tp_size,
+        cpu_offload_gb,
+        attention_backend,
     )
     await runner.start(timeout=600)
 
@@ -147,6 +156,7 @@ def main():
     run_p.add_argument("--tp", type=int, required=True)
     run_p.add_argument("--cpu-offload-gb", type=int, default=80)
     run_p.add_argument("--mem-fraction", type=float, default=0.80)
+    run_p.add_argument("--attention-backend", type=str, default=None)
     run_p.add_argument("--output", type=str, default=None)
 
     cmp_p = sub.add_parser("compare")
@@ -158,7 +168,13 @@ def main():
     if args.cmd == "run":
         output = args.output or f"tp{args.tp}_results.json"
         asyncio.run(
-            run_thinker(args.tp, args.cpu_offload_gb, args.mem_fraction, output)
+            run_thinker(
+                args.tp,
+                args.cpu_offload_gb,
+                args.mem_fraction,
+                output,
+                args.attention_backend,
+            )
         )
     elif args.cmd == "compare":
         sys.exit(0 if compare_outputs(args.file1, args.file2) else 1)
