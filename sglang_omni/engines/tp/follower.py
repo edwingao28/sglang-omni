@@ -175,6 +175,7 @@ def follower_worker_loop(
     # 4. Main loop: receive batch, forward, repeat
     step = 0
     while True:
+        log.info("DIAG[follower]: waiting for broadcast (step %d)", step)
         result = broadcast_pyobj([None], tp_rank, tp_cpu_group, src=0)
         batch = result[0] if result else None
 
@@ -182,10 +183,17 @@ def follower_worker_loop(
             log.info("Received stop signal after %d steps", step)
             break
 
+        log.info(
+            "DIAG[follower]: received batch, mode=%s bs=%d",
+            getattr(batch, "forward_mode", "?"),
+            len(batch.seq_lens) if hasattr(batch, "seq_lens") else -1,
+        )
         patch_batch_for_follower(batch, device, vocab_size=model_vocab_size)
         sync_page_table(batch, worker.model_runner.req_to_token_pool)
         forward_batch = ForwardBatch.init_new(batch, worker.model_runner)
+        log.info("DIAG[follower]: forward start (step %d)", step)
         worker.model_runner.forward(forward_batch=forward_batch)
+        log.info("DIAG[follower]: forward done (step %d)", step)
         step += 1
 
     log.info("Follower exiting")
@@ -212,10 +220,11 @@ def spawn_followers(
         List of mp.Process handles for followers.
     """
     processes = []
+    ctx = mp.get_context("spawn")
 
     for rank in range(1, tp_size):
         gpu_id = base_gpu_id + rank
-        proc = mp.Process(
+        proc = ctx.Process(
             target=follower_worker_loop,
             args=(rank, gpu_id, server_args, nccl_port),
             daemon=True,
