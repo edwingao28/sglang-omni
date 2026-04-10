@@ -38,7 +38,14 @@ def relocate_batch_tensors(batch, device) -> None:
     """
     import torch
 
+    seen: set[int] = set()
+
     def _move(obj):
+        obj_id = id(obj)
+        if obj_id in seen:
+            return obj
+        seen.add(obj_id)
+
         if isinstance(obj, torch.Tensor):
             return obj.to(device, non_blocking=True) if obj.device != device else obj
         if isinstance(obj, dict):
@@ -58,7 +65,6 @@ def relocate_batch_tensors(batch, device) -> None:
                     setattr(obj, attr, moved)
         return obj
 
-    # Move all top-level tensor attributes
     _move(batch)
 
 
