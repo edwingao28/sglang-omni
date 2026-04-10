@@ -68,8 +68,7 @@ async def main_async(args: argparse.Namespace) -> None:
                     stage.executor.args = {}
                 stage.executor.args["thinker_max_seq_len"] = args.thinker_max_seq_len
 
-    coordinator, stages = compile_pipeline(config)
-    runner = PipelineRunner(coordinator, stages)
+    runner = build_pipeline_runner(config)
 
     await runner.start()
     try:
