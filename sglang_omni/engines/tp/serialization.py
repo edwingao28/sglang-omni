@@ -25,9 +25,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Fields that are known to be non-picklable and not needed by followers.
-# launch_done is a threading.Event used by overlap scheduling — not needed
-# by followers and not picklable.
-_FIELDS_TO_STRIP = ("sampling_info", "reqs", "launch_done")
+_FIELDS_TO_STRIP = ("sampling_info", "reqs")
 
 _pickle_verified = False
 
@@ -39,7 +37,6 @@ def make_follower_batch(model_worker_batch: "ModelWorkerBatch") -> "ModelWorkerB
     - ``sampling_info``  — contains penalizer_orchestrator with weakrefs,
       sampling_info_done Event, and custom processor state.
     - ``reqs``           — contains request objects with callbacks/threads.
-    - ``launch_done``    — threading.Event from overlap scheduling.
 
     All tensor fields (input_ids, out_cache_loc, seq_lens, …) are preserved
     via the shallow copy so followers can call ForwardBatch.init_new() and
@@ -84,3 +81,20 @@ def _verify_pickle_safe(batch: "ModelWorkerBatch") -> None:
             f"Original error: {exc}"
         ) from exc
     logger.debug("Follower batch pickle verification passed")
+
+
+def attach_page_table_snapshot(batch: "ModelWorkerBatch", req_to_token_pool) -> None:
+    """Copy relevant req_to_token rows onto *batch* so followers can sync their page table.
+
+    Must be called on rank 0 AFTER the scheduler writes to req_to_token_pool
+    and BEFORE make_follower_batch().
+    """
+    import torch
+
+    pool_tensor = req_to_token_pool.req_to_token  # (max_reqs, max_ctx_len) int32
+    rows = []
+    for i in range(len(batch.seq_lens)):
+        idx = int(batch.req_pool_indices[i])
+        seq_len = int(batch.seq_lens[i])
+        rows.append(pool_tensor[idx, :seq_len].clone())
+    batch.tp_page_table_rows = rows

@@ -9,46 +9,17 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 
-def _make_mock_thinker_module():
-    """Build a minimal mock for sglang_omni.models.ming_omni.thinker."""
-    mod = types.ModuleType("sglang_omni.models.ming_omni.thinker")
-    mod.BailingMM2Config = MagicMock(name="BailingMM2Config")
-    mod.BailingMoeV2ForCausalLM = MagicMock(name="BailingMoeV2ForCausalLM")
-    return mod
-
-
 class TestFollowerRegistration(unittest.TestCase):
-    """Test that register_omni_models works and is picklable."""
+    """Test that register_omni_models delegates to shared registry helper."""
 
-    def test_register_adds_to_model_registry(self):
+    def test_register_delegates_to_shared_helper(self):
         from sglang_omni.engines.tp.follower import register_omni_models
 
-        mock_registry = MagicMock()
-        mock_registry.models = {}
-
-        mock_thinker = _make_mock_thinker_module()
-        mock_auto_config = MagicMock()
-
-        with (
-            patch(
-                "sglang_omni.engines.tp.follower._get_model_registry",
-                return_value=mock_registry,
-            ),
-            patch.dict(
-                sys.modules,
-                {"sglang_omni.models.ming_omni.thinker": mock_thinker},
-            ),
-            patch(
-                "sglang_omni.engines.tp.follower.AutoConfig",
-                mock_auto_config,
-                create=True,
-            ),
-        ):
-            # Patch the AutoConfig import inside the function
-            with patch("transformers.AutoConfig", mock_auto_config):
-                register_omni_models()
-
-        self.assertIn("BailingMoeV2ForCausalLM", mock_registry.models)
+        with patch(
+            "sglang_omni.models.sglang_registry.register_omni_models_in_sglang"
+        ) as mock_reg:
+            register_omni_models()
+            mock_reg.assert_called_once()
 
     def test_follower_entry_is_picklable(self):
         """follower_worker_loop must be picklable for mp.Process with spawn."""
@@ -160,6 +131,116 @@ class TestFollowerBatchFlow(unittest.TestCase):
         relocate_batch_tensors(batch, target)
         self.assertEqual(batch.input_ids.device, target)
         self.assertEqual(batch.seq_lens.device, target)
+
+    def test_relocate_batch_tensors_moves_model_specific_data(self):
+        """relocate_batch_tensors traverses model_specific_data tensor entries."""
+        import torch
+
+        from sglang_omni.engines.tp.follower import relocate_batch_tensors
+
+        item = types.SimpleNamespace(
+            model_specific_data={"patch_pixel_values": torch.tensor([1, 2, 3])}
+        )
+        mm = types.SimpleNamespace(mm_items=[item])
+        batch = types.SimpleNamespace(multimodal_inputs=[mm])
+
+        with patch.object(torch.Tensor, "to", autospec=True) as mock_to:
+            mock_to.side_effect = lambda self, *args, **kwargs: self
+            relocate_batch_tensors(batch, torch.device("meta"))
+
+        self.assertEqual(mock_to.call_count, 1)
+
+
+    def test_sync_page_table_writes_to_pool(self):
+        """sync_page_table writes snapshot rows into the follower's req_to_token_pool."""
+        import torch
+
+        from sglang_omni.engines.tp.follower import sync_page_table
+
+        pool = types.SimpleNamespace()
+        pool.req_to_token = torch.zeros((4, 64), dtype=torch.int32)
+
+        batch = types.SimpleNamespace()
+        batch.req_pool_indices = torch.tensor([2])
+        batch.seq_lens = torch.tensor([3])
+        batch.tp_page_table_rows = [
+            torch.tensor([10, 11, 12], dtype=torch.int32),
+        ]
+
+        sync_page_table(batch, pool)
+
+        expected = torch.tensor([10, 11, 12], dtype=torch.int32)
+        assert torch.equal(pool.req_to_token[2, 0:3], expected)
+
+    def test_sync_page_table_noop_without_snapshot(self):
+        """sync_page_table is a no-op when tp_page_table_rows is absent."""
+        import torch
+
+        from sglang_omni.engines.tp.follower import sync_page_table
+
+        pool = types.SimpleNamespace()
+        pool.req_to_token = torch.zeros((4, 64), dtype=torch.int32)
+        batch = types.SimpleNamespace()
+        batch.req_pool_indices = torch.tensor([0])
+        batch.seq_lens = torch.tensor([1])
+
+        sync_page_table(batch, pool)
+
+        assert pool.req_to_token.sum() == 0
+
+    def test_page_table_round_trip(self):
+        """Full round-trip: attach on rank 0 → pickle → unpickle → sync on follower."""
+        import pickle
+        import torch
+
+        from sglang_omni.engines.tp.follower import sync_page_table
+        from sglang_omni.engines.tp.serialization import (
+            attach_page_table_snapshot,
+            make_follower_batch,
+        )
+
+        # Rank 0's pool with known data
+        rank0_pool = types.SimpleNamespace()
+        rank0_pool.req_to_token = torch.zeros((4, 64), dtype=torch.int32)
+        rank0_pool.req_to_token[0, 0:4] = torch.tensor(
+            [100, 101, 102, 103], dtype=torch.int32
+        )
+        rank0_pool.req_to_token[1, 0:2] = torch.tensor([200, 201], dtype=torch.int32)
+
+        # Build batch like rank 0's scheduler would
+        batch = types.SimpleNamespace()
+        batch.req_pool_indices = torch.tensor([0, 1])
+        batch.seq_lens = torch.tensor([4, 2])
+        batch.input_ids = torch.tensor([10, 20])
+        batch.sampling_info = MagicMock()
+        batch.reqs = [MagicMock(), MagicMock()]
+
+        # Rank 0: attach + make follower batch
+        attach_page_table_snapshot(batch, rank0_pool)
+        follower_batch = make_follower_batch(batch)
+
+        # Simulate broadcast: pickle round-trip
+        data = pickle.dumps(follower_batch)
+        received = pickle.loads(data)
+
+        # Follower's empty pool
+        follower_pool = types.SimpleNamespace()
+        follower_pool.req_to_token = torch.zeros((4, 64), dtype=torch.int32)
+
+        # Follower: sync
+        sync_page_table(received, follower_pool)
+
+        # Verify follower's pool matches rank 0's
+        assert torch.equal(
+            follower_pool.req_to_token[0, 0:4],
+            torch.tensor([100, 101, 102, 103], dtype=torch.int32),
+        )
+        assert torch.equal(
+            follower_pool.req_to_token[1, 0:2],
+            torch.tensor([200, 201], dtype=torch.int32),
+        )
+        # Rest of pool is still zeros
+        assert follower_pool.req_to_token[2:].sum() == 0
 
 
 if __name__ == "__main__":

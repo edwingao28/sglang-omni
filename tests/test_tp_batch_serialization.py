@@ -89,5 +89,60 @@ class TestMakeFollowerBatch(unittest.TestCase):
         ser._pickle_verified = False
 
 
+def test_attach_page_table_snapshot():
+    """attach_page_table_snapshot stores the relevant rows from req_to_token_pool."""
+    import torch
+
+    from sglang_omni.engines.tp.serialization import attach_page_table_snapshot
+
+    pool = types.SimpleNamespace()
+    pool.req_to_token = torch.zeros((4, 64), dtype=torch.int32)
+    pool.req_to_token[2, 0:5] = torch.tensor([10, 11, 12, 13, 14], dtype=torch.int32)
+
+    batch = types.SimpleNamespace()
+    batch.req_pool_indices = torch.tensor([2])
+    batch.seq_lens = torch.tensor([5])
+
+    attach_page_table_snapshot(batch, pool)
+
+    assert hasattr(batch, "tp_page_table_rows")
+    assert len(batch.tp_page_table_rows) == 1
+    assert torch.equal(
+        batch.tp_page_table_rows[0],
+        torch.tensor([10, 11, 12, 13, 14], dtype=torch.int32),
+    )
+
+
+def test_page_table_snapshot_survives_pickle():
+    """tp_page_table_rows must survive pickle round-trip for broadcast."""
+    import pickle
+    import torch
+
+    from sglang_omni.engines.tp.serialization import (
+        attach_page_table_snapshot,
+        make_follower_batch,
+    )
+
+    pool = types.SimpleNamespace()
+    pool.req_to_token = torch.zeros((4, 64), dtype=torch.int32)
+    pool.req_to_token[1, 0:3] = torch.tensor([7, 8, 9], dtype=torch.int32)
+
+    batch = types.SimpleNamespace()
+    batch.req_pool_indices = torch.tensor([1])
+    batch.seq_lens = torch.tensor([3])
+    batch.sampling_info = None
+    batch.reqs = None
+
+    attach_page_table_snapshot(batch, pool)
+    data = pickle.dumps(batch)
+    restored = pickle.loads(data)
+
+    assert len(restored.tp_page_table_rows) == 1
+    assert torch.equal(
+        restored.tp_page_table_rows[0],
+        torch.tensor([7, 8, 9], dtype=torch.int32),
+    )
+
+
 if __name__ == "__main__":
     unittest.main()

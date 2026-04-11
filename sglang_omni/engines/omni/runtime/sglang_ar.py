@@ -517,6 +517,9 @@ class SGLangModelRunner:
         self.device = torch.device(f"cuda:{model_worker.gpu_id}")
         self._tp_size = model_worker.tp_size
         self._tp_cpu_group = model_worker.tp_cpu_group if self._tp_size > 1 else None
+        self._req_to_token_pool = (
+            model_worker.model_runner.req_to_token_pool if self._tp_size > 1 else None
+        )
 
         model = model_worker.model_runner.model
         self._embed_tokens, self._inner_model = self._get_inner_model_components(model)
@@ -984,8 +987,12 @@ class SGLangModelRunner:
         if self._tp_size > 1:
             from sglang.srt.utils import broadcast_pyobj
 
-            from sglang_omni.engines.tp.serialization import make_follower_batch
+            from sglang_omni.engines.tp.serialization import (
+                attach_page_table_snapshot,
+                make_follower_batch,
+            )
 
+            attach_page_table_snapshot(model_worker_batch, self._req_to_token_pool)
             follower_batch = make_follower_batch(model_worker_batch)
             broadcast_pyobj([follower_batch], 0, self._tp_cpu_group, src=0)
 

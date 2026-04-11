@@ -236,6 +236,15 @@ class Qwen3OmniSpeechPipelineConfig(PipelineConfig):
     def __init__(self, **kwargs):
         server_args_overrides = kwargs.pop("server_args_overrides", None)
         super().__init__(**kwargs)
+        tp_size = (
+            server_args_overrides.get("tp_size", 1) if server_args_overrides else 1
+        )
+        if tp_size > 1:
+            raise ValueError(
+                "Qwen3OmniSpeechPipelineConfig does not support tp_size > 1: "
+                "thinker TP followers would overlap with the fixed speech-stage "
+                "GPU placement."
+            )
         if server_args_overrides:
             for stage in self.stages:
                 if stage.name == THINKER_STAGE:
