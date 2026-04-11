@@ -978,12 +978,27 @@ class SGLangModelRunner:
 
         model_worker_batch = schedule_batch.get_model_worker_batch()
 
-        # Enable hidden state capture if output processor needs it
         if self.output_processor._capture_hidden:
             model_worker_batch.capture_hidden_mode = CaptureHiddenMode.LAST
 
-        # Broadcast batch to TP follower ranks so they can build ForwardBatch
-        # and participate in NCCL all-reduce during model.forward()
+        forward_batch = ForwardBatch.init_new(
+            model_worker_batch, self.model_worker.model_runner
+        )
+
+        # Attach all TP forward payload before broadcast.
+        omni_embeds = None
+        if schedule_batch.forward_mode.is_extend():
+            omni_embeds = self._inject_multimodal_embeds(forward_batch, schedule_batch)
+        if omni_embeds is not None and omni_embeds[0] is not None:
+            input_embeds, ds_embeds, vis_masks = omni_embeds
+            model_worker_batch.input_embeds = input_embeds
+            if ds_embeds is not None:
+                model_worker_batch.tp_deepstack_visual_embeds = ds_embeds
+            if vis_masks is not None:
+                model_worker_batch.tp_visual_pos_masks = vis_masks
+        else:
+            input_embeds, ds_embeds, vis_masks = None, None, None
+
         if self._tp_size > 1:
             from sglang.srt.utils import broadcast_pyobj
 
@@ -996,13 +1011,6 @@ class SGLangModelRunner:
             follower_batch = make_follower_batch(model_worker_batch)
             broadcast_pyobj([follower_batch], 0, self._tp_cpu_group, src=0)
 
-        forward_batch = ForwardBatch.init_new(
-            model_worker_batch, self.model_worker.model_runner
-        )
-
-        omni_embeds = None
-        if schedule_batch.forward_mode.is_extend():
-            omni_embeds = self._inject_multimodal_embeds(forward_batch, schedule_batch)
         feedback_input_embeds = self._build_feedback_input_embeds(
             forward_batch, schedule_batch
         )
@@ -1023,12 +1031,15 @@ class SGLangModelRunner:
             and schedule_batch.forward_mode.is_extend()
             and has_projected_prefill
         )
-        if omni_embeds is not None and omni_embeds[0] is not None:
-            input_embeds, ds_embeds, vis_masks = omni_embeds
+        if input_embeds is not None:
             batch_result = self._forward_with_omni_embeds(
                 forward_batch, input_embeds, ds_embeds, vis_masks
             )
         elif projected_prefill:
+            if self._tp_size > 1:
+                raise NotImplementedError(
+                    "Projected prefill (talker) is not yet supported with TP>1."
+                )
             projected_input_embeds = request_prefill_input_embeds
             if projected_input_embeds is None:
                 projected_input_embeds = forward_batch.input_embeds
@@ -1042,6 +1053,10 @@ class SGLangModelRunner:
                 input_embeds_are_projected=True,
             )
         elif feedback_input_embeds is not None:
+            if self._tp_size > 1:
+                raise NotImplementedError(
+                    "Feedback input embeds (talker) is not yet supported with TP>1."
+                )
             batch_result = self._forward_talker(
                 forward_batch,
                 input_embeds=feedback_input_embeds,
