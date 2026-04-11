@@ -1034,10 +1034,19 @@ class SGLangModelRunner:
             feedback_input_embeds is not None,
         )
         if input_embeds is not None:
+            if self._tp_size > 1 and ds_embeds is not None:
+                raise NotImplementedError(
+                    "deepstack_visual_embeds is not yet supported with TP>1. "
+                    "Followers would not receive deepstack data."
+                )
             batch_result = self._forward_with_omni_embeds(
                 forward_batch, input_embeds, ds_embeds, vis_masks
             )
         elif projected_prefill:
+            if self._tp_size > 1:
+                raise NotImplementedError(
+                    "Projected prefill (talker) is not yet supported with TP>1."
+                )
             projected_input_embeds = request_prefill_input_embeds
             if projected_input_embeds is None:
                 projected_input_embeds = forward_batch.input_embeds
@@ -1051,6 +1060,10 @@ class SGLangModelRunner:
                 input_embeds_are_projected=True,
             )
         elif feedback_input_embeds is not None:
+            if self._tp_size > 1:
+                raise NotImplementedError(
+                    "Feedback input embeds (talker) is not yet supported with TP>1."
+                )
             batch_result = self._forward_talker(
                 forward_batch,
                 input_embeds=feedback_input_embeds,
