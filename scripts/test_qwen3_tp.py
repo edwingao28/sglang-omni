@@ -35,7 +35,11 @@ TEST_PROMPTS = [
 ]
 
 
+DEFAULT_MODEL = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
+
+
 async def run_thinker(
+    model_path: str,
     tp_size: int,
     cpu_offload_gb: int,
     mem_fraction: float,
@@ -55,7 +59,7 @@ async def run_thinker(
         overrides["attention_backend"] = attention_backend
 
     config = Qwen3OmniPipelineConfig(
-        model_path="Qwen/Qwen3-Omni-8B",
+        model_path=model_path,
         relay_backend="shm",
         server_args_overrides=overrides,
     )
@@ -150,6 +154,8 @@ def main():
     sub = parser.add_subparsers(dest="cmd")
 
     run_p = sub.add_parser("run")
+    run_p.add_argument("--model-path", type=str, default=DEFAULT_MODEL,
+                        help="Local path or HF repo ID")
     run_p.add_argument("--tp", type=int, required=True)
     run_p.add_argument("--cpu-offload-gb", type=int, default=80)
     run_p.add_argument("--mem-fraction", type=float, default=0.80)
@@ -166,6 +172,7 @@ def main():
         output = args.output or f"qwen3_tp{args.tp}_results.json"
         asyncio.run(
             run_thinker(
+                args.model_path,
                 args.tp,
                 args.cpu_offload_gb,
                 args.mem_fraction,
