@@ -236,15 +236,6 @@ class Qwen3OmniSpeechPipelineConfig(PipelineConfig):
     def __init__(self, **kwargs):
         server_args_overrides = kwargs.pop("server_args_overrides", None)
         super().__init__(**kwargs)
-        tp_size = (
-            server_args_overrides.get("tp_size", 1) if server_args_overrides else 1
-        )
-        if tp_size > 1:
-            raise ValueError(
-                "Qwen3OmniSpeechPipelineConfig does not support tp_size > 1: "
-                "thinker TP followers would overlap with the fixed speech-stage "
-                "GPU placement."
-            )
         if server_args_overrides:
             for stage in self.stages:
                 if stage.name == THINKER_STAGE:
@@ -254,6 +245,21 @@ class Qwen3OmniSpeechPipelineConfig(PipelineConfig):
                         "server_args_overrides", {}
                     )
                     existing.update(server_args_overrides)
+
+        # Validate GPU placement: thinker TP range must not overlap speech stages
+        tp_size = (
+            server_args_overrides.get("tp_size", 1) if server_args_overrides else 1
+        )
+        thinker_gpu = self.gpu_placement.get("thinker", 0)
+        thinker_range = range(thinker_gpu, thinker_gpu + tp_size)
+        for stage_name in ("talker_ar", "code_predictor", "code2wav"):
+            stage_gpu = self.gpu_placement.get(stage_name)
+            if stage_gpu is not None and stage_gpu in thinker_range:
+                raise ValueError(
+                    f"{stage_name} GPU {stage_gpu} collides with thinker TP range "
+                    f"[{thinker_gpu}, {thinker_gpu + tp_size}). "
+                    f"Set --gpu-{stage_name.replace('_', '-')} >= {thinker_gpu + tp_size}."
+                )
 
 
 EntryClass = Qwen3OmniSpeechPipelineConfig
