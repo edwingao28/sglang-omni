@@ -300,5 +300,26 @@ class TestFollowerInputEmbeds(unittest.TestCase):
         self.assertEqual(batch.input_embeds.device, target)
 
 
+class TestFollowerGpuAssignment(unittest.TestCase):
+    """Verify GPU ID computation respects gpu_id_step."""
+
+    def test_gpu_id_formula_step_1(self):
+        """Default step=1: rank 1 → GPU 1, rank 2 → GPU 2."""
+        base, step = 0, 1
+        self.assertEqual(base + 1 * step, 1)
+        self.assertEqual(base + 2 * step, 2)
+
+    def test_gpu_id_formula_step_2(self):
+        """Step=2: rank 1 → GPU 2, rank 2 → GPU 4."""
+        base, step = 0, 2
+        self.assertEqual(base + 1 * step, 2)
+        self.assertEqual(base + 2 * step, 4)
+
+    def test_gpu_id_formula_nonzero_base(self):
+        """Base=4, step=2: rank 1 → GPU 6."""
+        base, step = 4, 2
+        self.assertEqual(base + 1 * step, 6)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -213,7 +213,7 @@ def spawn_followers(
     Args:
         server_args: SGLang ServerArgs.
         nccl_port: NCCL rendezvous port.
-        base_gpu_id: GPU ID for rank 0. Followers get base_gpu_id + rank.
+        base_gpu_id: GPU ID for rank 0. Followers get base_gpu_id + rank * gpu_id_step.
         tp_size: Total TP size (including rank 0).
 
     Returns:
@@ -223,7 +223,8 @@ def spawn_followers(
     ctx = mp.get_context("spawn")
 
     for rank in range(1, tp_size):
-        gpu_id = base_gpu_id + rank
+        gpu_id_step = getattr(server_args, "gpu_id_step", 1)
+        gpu_id = base_gpu_id + rank * gpu_id_step
         proc = ctx.Process(
             target=follower_worker_loop,
             args=(rank, gpu_id, server_args, nccl_port),
