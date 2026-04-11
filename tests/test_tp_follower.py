@@ -243,5 +243,50 @@ class TestFollowerBatchFlow(unittest.TestCase):
         assert follower_pool.req_to_token[2:].sum() == 0
 
 
+class TestFollowerInputEmbeds(unittest.TestCase):
+    """Tests that input_embeds survive the follower batch serialization round-trip."""
+
+    def test_input_embeds_survives_follower_batch_round_trip(self):
+        """input_embeds set on model_worker_batch must survive make_follower_batch + pickle."""
+        import torch
+
+        from sglang_omni.engines.tp.serialization import make_follower_batch
+
+        batch = types.SimpleNamespace()
+        batch.input_ids = torch.tensor([1, 2, 3])
+        batch.seq_lens = torch.tensor([3])
+        batch.sampling_info = None
+        batch.reqs = None
+        batch.input_embeds = torch.randn(3, 128)
+
+        follower = make_follower_batch(batch)
+        data = pickle.dumps(follower)
+        restored = pickle.loads(data)
+
+        self.assertIsNotNone(restored.input_embeds)
+        self.assertTrue(torch.equal(restored.input_embeds, batch.input_embeds))
+
+    def test_input_embeds_none_when_not_set(self):
+        """Batch without input_embeds should not crash after round-trip."""
+        import torch
+
+        from sglang_omni.engines.tp.serialization import make_follower_batch
+
+        batch = types.SimpleNamespace()
+        batch.input_ids = torch.tensor([1, 2, 3])
+        batch.seq_lens = torch.tensor([3])
+        batch.sampling_info = None
+        batch.reqs = None
+        # No input_embeds attribute at all
+
+        follower = make_follower_batch(batch)
+        data = pickle.dumps(follower)
+        restored = pickle.loads(data)
+
+        # Should not have input_embeds or it should be None
+        embeds = getattr(restored, "input_embeds", None)
+        self.assertIsNone(embeds)
+
+
 if __name__ == "__main__":
     unittest.main()

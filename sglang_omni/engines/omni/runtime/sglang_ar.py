@@ -970,6 +970,22 @@ class SGLangModelRunner:
         if self.output_processor._capture_hidden:
             model_worker_batch.capture_hidden_mode = CaptureHiddenMode.LAST
 
+        # Build ForwardBatch FIRST so we can compute multimodal embeds
+        forward_batch = ForwardBatch.init_new(
+            model_worker_batch, self.model_worker.model_runner
+        )
+
+        # Compute multimodal input_embeds and write onto model_worker_batch
+        # BEFORE broadcast, so followers get them via ForwardBatch.init_new()
+        omni_embeds = None
+        if schedule_batch.forward_mode.is_extend():
+            omni_embeds = self._inject_multimodal_embeds(forward_batch, schedule_batch)
+        if omni_embeds is not None and omni_embeds[0] is not None:
+            input_embeds, ds_embeds, vis_masks = omni_embeds
+            model_worker_batch.input_embeds = input_embeds
+        else:
+            input_embeds, ds_embeds, vis_masks = None, None, None
+
         # Broadcast batch to TP follower ranks so they can build ForwardBatch
         # and participate in NCCL all-reduce during model.forward()
         if self._tp_size > 1:
@@ -990,13 +1006,6 @@ class SGLangModelRunner:
             broadcast_pyobj([follower_batch], 0, self._tp_cpu_group, src=0)
             logger.info("DIAG[rank0]: broadcast done")
 
-        forward_batch = ForwardBatch.init_new(
-            model_worker_batch, self.model_worker.model_runner
-        )
-
-        omni_embeds = None
-        if schedule_batch.forward_mode.is_extend():
-            omni_embeds = self._inject_multimodal_embeds(forward_batch, schedule_batch)
         feedback_input_embeds = self._build_feedback_input_embeds(
             forward_batch, schedule_batch
         )
@@ -1019,12 +1028,11 @@ class SGLangModelRunner:
         )
         logger.info(
             "DIAG[rank0]: forward start, omni_embeds=%s projected=%s feedback=%s",
-            omni_embeds is not None and omni_embeds[0] is not None,
+            input_embeds is not None,
             projected_prefill,
             feedback_input_embeds is not None,
         )
-        if omni_embeds is not None and omni_embeds[0] is not None:
-            input_embeds, ds_embeds, vis_masks = omni_embeds
+        if input_embeds is not None:
             batch_result = self._forward_with_omni_embeds(
                 forward_batch, input_embeds, ds_embeds, vis_masks
             )
