@@ -975,8 +975,9 @@ class SGLangModelRunner:
             model_worker_batch, self.model_worker.model_runner
         )
 
-        # Compute multimodal input_embeds and write onto model_worker_batch
-        # BEFORE broadcast, so followers get them via ForwardBatch.init_new()
+        # Compute multimodal input_embeds and set on model_worker_batch before
+        # broadcast; shallow-copied by make_follower_batch so followers pick it
+        # up in their ForwardBatch.init_new().
         omni_embeds = None
         if schedule_batch.forward_mode.is_extend():
             omni_embeds = self._inject_multimodal_embeds(forward_batch, schedule_batch)

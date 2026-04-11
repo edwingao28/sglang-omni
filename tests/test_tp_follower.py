@@ -287,6 +287,18 @@ class TestFollowerInputEmbeds(unittest.TestCase):
         embeds = getattr(restored, "input_embeds", None)
         self.assertIsNone(embeds)
 
+    def test_relocate_moves_input_embeds(self):
+        """relocate_batch_tensors must move input_embeds to target device."""
+        import torch
+
+        from sglang_omni.engines.tp.follower import relocate_batch_tensors
+
+        batch = types.SimpleNamespace()
+        batch.input_embeds = torch.randn(3, 128)
+        target = torch.device("cpu")
+        relocate_batch_tensors(batch, target)
+        self.assertEqual(batch.input_embeds.device, target)
+
 
 if __name__ == "__main__":
     unittest.main()
