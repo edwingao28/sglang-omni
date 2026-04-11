@@ -117,14 +117,13 @@ def patch_batch_for_follower(batch, device, vocab_size: int = 0) -> None:
 
 def _forward_with_deepstack(model_runner, forward_batch, deepstack_visual_embeds,
                             visual_pos_masks) -> None:
-    """Forward with deepstack visual embeddings — mirrors rank 0's path.
+    """Forward with deepstack visual embeddings — mirrors rank 0's full path.
 
-    Rank 0 calls ``_forward_with_omni_embeds`` which passes
-    ``input_deepstack_embeds`` to the model.  Followers must do the same
-    so the NCCL all-reduce inside the transformer layers sees identical
-    computation on every rank.
+    Rank 0 calls ``_forward_with_omni_embeds`` which runs ``outer.model()``
+    then ``outer.logits_processor()`` (TP-parallel all_gather on LM head).
+    Followers must execute the same collective pattern to avoid NCCL hang.
 
-    Output is discarded; followers only participate in all-reduce.
+    Logits output is discarded; followers only participate in collectives.
     """
     import torch
 
@@ -150,12 +149,22 @@ def _forward_with_deepstack(model_runner, forward_batch, deepstack_visual_embeds
     model = model_runner.model
     outer = model.thinker if hasattr(model, "thinker") else model
 
-    outer.model(
+    hidden_states = outer.model(
         input_ids=None,
         positions=positions,
         forward_batch=forward_batch,
         input_embeds=input_embeds,
         input_deepstack_embeds=full_ds,
+    )
+
+    # Must also run logits_processor — it contains TP-parallel all_gather
+    # on the LM head.  Rank 0 does this in _forward_with_omni_embeds;
+    # skipping it here would cause an NCCL hang.
+    outer.logits_processor(
+        forward_batch.input_ids,
+        hidden_states,
+        outer.lm_head,
+        forward_batch,
     )
 
 
