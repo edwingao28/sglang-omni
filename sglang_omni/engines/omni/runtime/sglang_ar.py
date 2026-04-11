@@ -975,15 +975,19 @@ class SGLangModelRunner:
             model_worker_batch, self.model_worker.model_runner
         )
 
-        # Compute multimodal input_embeds and set on model_worker_batch before
-        # broadcast; shallow-copied by make_follower_batch so followers pick it
-        # up in their ForwardBatch.init_new().
+        # Compute all omni forward inputs and attach to model_worker_batch
+        # before broadcast.  Shallow-copied by make_follower_batch so followers
+        # get the full payload in a single broadcast_pyobj call.
         omni_embeds = None
         if schedule_batch.forward_mode.is_extend():
             omni_embeds = self._inject_multimodal_embeds(forward_batch, schedule_batch)
         if omni_embeds is not None and omni_embeds[0] is not None:
             input_embeds, ds_embeds, vis_masks = omni_embeds
             model_worker_batch.input_embeds = input_embeds
+            if ds_embeds is not None:
+                model_worker_batch.tp_deepstack_visual_embeds = ds_embeds
+            if vis_masks is not None:
+                model_worker_batch.tp_visual_pos_masks = vis_masks
         else:
             input_embeds, ds_embeds, vis_masks = None, None, None
 
@@ -1034,11 +1038,6 @@ class SGLangModelRunner:
             feedback_input_embeds is not None,
         )
         if input_embeds is not None:
-            if self._tp_size > 1 and ds_embeds is not None:
-                raise NotImplementedError(
-                    "deepstack_visual_embeds is not yet supported with TP>1. "
-                    "Followers would not receive deepstack data."
-                )
             batch_result = self._forward_with_omni_embeds(
                 forward_batch, input_embeds, ds_embeds, vis_masks
             )

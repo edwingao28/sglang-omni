@@ -115,6 +115,50 @@ def patch_batch_for_follower(batch, device, vocab_size: int = 0) -> None:
         )
 
 
+def _forward_with_deepstack(model_runner, forward_batch, deepstack_visual_embeds,
+                            visual_pos_masks) -> None:
+    """Forward with deepstack visual embeddings — mirrors rank 0's path.
+
+    Rank 0 calls ``_forward_with_omni_embeds`` which passes
+    ``input_deepstack_embeds`` to the model.  Followers must do the same
+    so the NCCL all-reduce inside the transformer layers sees identical
+    computation on every rank.
+
+    Output is discarded; followers only participate in all-reduce.
+    """
+    import torch
+
+    model_runner.attn_backend.init_forward_metadata(forward_batch)
+
+    input_embeds = forward_batch.input_embeds
+    device = input_embeds.device
+    dtype = input_embeds.dtype
+
+    positions = forward_batch.positions
+    if forward_batch.mrope_positions is not None:
+        positions = forward_batch.mrope_positions
+
+    # Process deepstack embeds — same as rank 0's _forward_with_omni_embeds
+    layer_tensors = [t.to(device=device, dtype=dtype) for t in deepstack_visual_embeds]
+    ds_input = torch.cat(layer_tensors, dim=-1)
+    full_ds = torch.zeros(
+        input_embeds.shape[0], ds_input.shape[-1], device=device, dtype=dtype,
+    )
+    full_ds[visual_pos_masks] = ds_input
+
+    # Unwrap to inner model — same as rank 0's _get_inner_model_components
+    model = model_runner.model
+    outer = model.thinker if hasattr(model, "thinker") else model
+
+    outer.model(
+        input_ids=None,
+        positions=positions,
+        forward_batch=forward_batch,
+        input_embeds=input_embeds,
+        input_deepstack_embeds=full_ds,
+    )
+
+
 def follower_worker_loop(
     tp_rank: int,
     gpu_id: int,
@@ -125,7 +169,7 @@ def follower_worker_loop(
 
     1. Register omni model classes
     2. Create ModelWorker (joins NCCL group — blocks until rank 0 joins too)
-    3. Loop: recv ModelWorkerBatch → ForwardBatch → model.forward()
+    3. Loop: recv batch → branch selection (mirrors rank 0) → model.forward()
     4. Exit on None signal
 
     Args:
@@ -191,8 +235,22 @@ def follower_worker_loop(
         patch_batch_for_follower(batch, device, vocab_size=model_vocab_size)
         sync_page_table(batch, worker.model_runner.req_to_token_pool)
         forward_batch = ForwardBatch.init_new(batch, worker.model_runner)
+
+        # Branch selection — mirrors rank 0's dispatch in sglang_ar.py.
+        # Rank 0 attaches omni payload onto the batch before broadcast;
+        # we check what's present and run the same forward path.
+        ds_embeds = getattr(batch, "tp_deepstack_visual_embeds", None)
+        vis_masks = getattr(batch, "tp_visual_pos_masks", None)
+
         log.info("DIAG[follower]: forward start (step %d)", step)
-        worker.model_runner.forward(forward_batch=forward_batch)
+        if forward_batch.input_embeds is not None and ds_embeds is not None:
+            _forward_with_deepstack(
+                worker.model_runner, forward_batch, ds_embeds, vis_masks,
+            )
+        else:
+            # input_embeds (no deepstack) or plain text — model_runner.forward
+            # already respects forward_batch.input_embeds when present.
+            worker.model_runner.forward(forward_batch=forward_batch)
         log.info("DIAG[follower]: forward done (step %d)", step)
         step += 1
 

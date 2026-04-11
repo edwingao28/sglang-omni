@@ -299,6 +299,49 @@ class TestFollowerInputEmbeds(unittest.TestCase):
         relocate_batch_tensors(batch, target)
         self.assertEqual(batch.input_embeds.device, target)
 
+    def test_deepstack_payload_survives_round_trip(self):
+        """tp_deepstack_visual_embeds + tp_visual_pos_masks survive pickle."""
+        import torch
+
+        from sglang_omni.engines.tp.serialization import make_follower_batch
+
+        batch = types.SimpleNamespace()
+        batch.input_ids = torch.tensor([1, 2, 3])
+        batch.seq_lens = torch.tensor([3])
+        batch.sampling_info = None
+        batch.reqs = None
+        batch.input_embeds = torch.randn(3, 128)
+        batch.tp_deepstack_visual_embeds = [torch.randn(2, 64), torch.randn(2, 64)]
+        batch.tp_visual_pos_masks = torch.tensor([True, False, True])
+
+        follower = make_follower_batch(batch)
+        data = pickle.dumps(follower)
+        restored = pickle.loads(data)
+
+        self.assertEqual(len(restored.tp_deepstack_visual_embeds), 2)
+        self.assertTrue(
+            torch.equal(restored.tp_deepstack_visual_embeds[0],
+                        batch.tp_deepstack_visual_embeds[0])
+        )
+        self.assertTrue(
+            torch.equal(restored.tp_visual_pos_masks, batch.tp_visual_pos_masks)
+        )
+
+    def test_relocate_moves_deepstack_tensors(self):
+        """relocate_batch_tensors must move deepstack list-of-tensors."""
+        import torch
+
+        from sglang_omni.engines.tp.follower import relocate_batch_tensors
+
+        batch = types.SimpleNamespace()
+        batch.tp_deepstack_visual_embeds = [torch.randn(2, 64), torch.randn(2, 64)]
+        batch.tp_visual_pos_masks = torch.tensor([True, False])
+        target = torch.device("cpu")
+        relocate_batch_tensors(batch, target)
+        for t in batch.tp_deepstack_visual_embeds:
+            self.assertEqual(t.device, target)
+        self.assertEqual(batch.tp_visual_pos_masks.device, target)
+
 
 class TestFollowerGpuAssignment(unittest.TestCase):
     """Verify GPU ID computation respects gpu_id_step."""
