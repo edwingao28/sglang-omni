@@ -163,20 +163,19 @@ class MingImageEncoder(nn.Module):
 
     @classmethod
     def _cleanup_sglang_tp(cls):
-        """Destroy model parallel state so a later component (thinker) can reinit.
-
-        Only cleans up if we were the ones who initialized it.
-        torch.distributed stays alive — only the TP/PP groups are removed.
-        """
         if not cls._did_init_tp:
             return
         cls._did_init_tp = False
+
+        import torch.distributed as dist
 
         from sglang.srt.distributed import parallel_state
 
         if parallel_state.model_parallel_is_initialized():
             parallel_state.destroy_model_parallel()
-            logger.info("Cleaned up model parallel state for thinker reuse")
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        logger.info("Cleaned up distributed state for thinker reuse")
 
     def forward(
         self,
