@@ -86,53 +86,13 @@ def patch_batch_for_follower(batch, device, vocab_size: int = 0) -> None:
         )
 
 
-def _forward_with_deepstack(model_runner, forward_batch, deepstack_visual_embeds,
-                            visual_pos_masks) -> None:
-    """Run the deepstack path followers need to mirror rank 0."""
-    import torch
-
-    model_runner.attn_backend.init_forward_metadata(forward_batch)
-
-    input_embeds = forward_batch.input_embeds
-    device = input_embeds.device
-    dtype = input_embeds.dtype
-
-    positions = forward_batch.positions
-    if forward_batch.mrope_positions is not None:
-        positions = forward_batch.mrope_positions
-
-    layer_tensors = [t.to(device=device, dtype=dtype) for t in deepstack_visual_embeds]
-    ds_input = torch.cat(layer_tensors, dim=-1)
-    full_ds = torch.zeros(
-        input_embeds.shape[0], ds_input.shape[-1], device=device, dtype=dtype,
-    )
-    full_ds[visual_pos_masks] = ds_input
-
-    model = model_runner.model
-    outer = model.thinker if hasattr(model, "thinker") else model
-
-    hidden_states = outer.model(
-        input_ids=None,
-        positions=positions,
-        forward_batch=forward_batch,
-        input_embeds=input_embeds,
-        input_deepstack_embeds=full_ds,
-    )
-
-    # Followers must join the LM-head collectives too.
-    outer.logits_processor(
-        forward_batch.input_ids,
-        hidden_states,
-        outer.lm_head,
-        forward_batch,
-    )
-
-
 def follower_worker_loop(
     tp_rank: int,
     gpu_id: int,
     server_args: Any,
     nccl_port: int,
+    model_arch_override: str | None = None,
+    weight_prefix: str | None = None,
 ) -> None:
     """Entry point for a follower TP worker process."""
     import torch
@@ -153,7 +113,11 @@ def follower_worker_loop(
     )
 
     worker = ModelWorker(
-        config=ModelWorkerConfig(nccl_port=nccl_port),
+        config=ModelWorkerConfig(
+            model_arch_override=model_arch_override,
+            weight_prefix=weight_prefix,
+            nccl_port=nccl_port,
+        ),
         server_args=server_args,
         gpu_id=gpu_id,
         tp_rank=tp_rank,
@@ -162,12 +126,29 @@ def follower_worker_loop(
     log.info("ModelWorker initialized, NCCL group joined")
 
     tp_cpu_group = worker.model_runner.tp_group.cpu_group
+    device_group = worker.model_runner.tp_group.device_group
 
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
     from sglang.srt.utils import broadcast_pyobj
+    import torch.distributed as dist
+
+    from sglang_omni.engines.omni.runtime.thinker_forward import (
+        thinker_forward_omni,
+    )
 
     device = torch.device("cuda", gpu_id)
     model_vocab_size = worker.model_runner.model_config.vocab_size
+
+    model = worker.model_runner.model
+    outer_model = model.thinker if hasattr(model, "thinker") else model
+    inner_model = getattr(outer_model, "model", outer_model)
+    embed_tokens = getattr(inner_model, "embed_tokens", None)
+    if embed_tokens is None:
+        get_input_embeddings = getattr(inner_model, "get_input_embeddings", None)
+        if callable(get_input_embeddings):
+            embed_tokens = get_input_embeddings()
+    if embed_tokens is None:
+        embed_tokens = getattr(inner_model, "codec_embedding", None)
 
     step = 0
     while True:
@@ -182,12 +163,55 @@ def follower_worker_loop(
         sync_page_table(batch, worker.model_runner.req_to_token_pool)
         forward_batch = ForwardBatch.init_new(batch, worker.model_runner)
 
-        ds_embeds = getattr(batch, "tp_deepstack_visual_embeds", None)
-        vis_masks = getattr(batch, "tp_visual_pos_masks", None)
+        has_mm_payload = getattr(batch, "tp_has_mm_payload", False)
 
-        if forward_batch.input_embeds is not None and ds_embeds is not None:
-            _forward_with_deepstack(
-                worker.model_runner, forward_batch, ds_embeds, vis_masks,
+        if has_mm_payload:
+            # Symmetric base embed — mirrors rank 0's call exactly so the
+            # VocabParallelEmbedding all_reduce pairs.
+            embed_input_ids = forward_batch.input_ids.clamp(
+                0, embed_tokens.num_embeddings - 1
+            )
+            _ = embed_tokens(embed_input_ids)
+
+            meta_result = broadcast_pyobj([None], tp_rank, tp_cpu_group, src=0)
+            payload_meta = meta_result[0] if meta_result else None
+            if payload_meta is None:
+                raise RuntimeError("Missing multimodal TP payload metadata from rank 0")
+
+            input_embeds_shape = payload_meta["input_embeds_shape"]
+            input_embeds = torch.empty(
+                input_embeds_shape,
+                dtype=payload_meta["input_embeds_dtype"],
+                device=device,
+            )
+            dist.broadcast(input_embeds, src=0, group=device_group)
+
+            ds_embeds = None
+            ds_shapes = payload_meta["deepstack_shapes"]
+            if ds_shapes is not None:
+                ds_dtype = payload_meta["deepstack_dtype"]
+                ds_embeds = [
+                    torch.empty(shape, dtype=ds_dtype, device=device)
+                    for shape in ds_shapes
+                ]
+                for t in ds_embeds:
+                    dist.broadcast(t, src=0, group=device_group)
+
+            vis_masks = None
+            vis_mask_shape = payload_meta["visual_pos_mask_shape"]
+            if vis_mask_shape is not None:
+                vis_masks = torch.empty(
+                    vis_mask_shape, dtype=torch.bool, device=device
+                )
+                dist.broadcast(vis_masks, src=0, group=device_group)
+
+            thinker_forward_omni(
+                outer_model=outer_model,
+                attn_backend=worker.model_runner.attn_backend,
+                forward_batch=forward_batch,
+                input_embeds=input_embeds,
+                deepstack_visual_embeds=ds_embeds,
+                visual_pos_masks=vis_masks,
             )
         else:
             worker.model_runner.forward(forward_batch=forward_batch)
@@ -201,6 +225,8 @@ def spawn_followers(
     nccl_port: int,
     base_gpu_id: int,
     tp_size: int,
+    model_arch_override: str | None = None,
+    weight_prefix: str | None = None,
 ) -> list[mp.Process]:
     """Spawn TP follower processes."""
     processes = []
@@ -211,7 +237,14 @@ def spawn_followers(
         gpu_id = base_gpu_id + rank * gpu_id_step
         proc = ctx.Process(
             target=follower_worker_loop,
-            args=(rank, gpu_id, server_args, nccl_port),
+            args=(
+                rank,
+                gpu_id,
+                server_args,
+                nccl_port,
+                model_arch_override,
+                weight_prefix,
+            ),
             daemon=True,
         )
         proc.start()

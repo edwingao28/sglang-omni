@@ -167,14 +167,21 @@ class MingImageEncoder(nn.Module):
             return
         cls._did_init_tp = False
 
-        import torch.distributed as dist
-
+        import sglang.srt.layers.dp_attention as dp
         from sglang.srt.distributed import parallel_state
 
         if parallel_state.model_parallel_is_initialized():
             parallel_state.destroy_model_parallel()
-        if dist.is_initialized():
-            dist.destroy_process_group()
+        parallel_state.destroy_distributed_environment()
+
+        dp._ATTN_TP_GROUP = None
+        dp._ATTN_TP_RANK = None
+        dp._ATTN_TP_SIZE = None
+        dp._ATTN_DP_RANK = None
+        dp._ATTN_DP_SIZE = None
+        dp._LOCAL_ATTN_DP_SIZE = None
+        dp._LOCAL_ATTN_DP_RANK = None
+        dp._ENABLE_DP_ATTENTION_FLAG = False
         logger.info("Cleaned up distributed state for thinker reuse")
 
     def forward(

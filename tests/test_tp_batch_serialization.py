@@ -28,7 +28,6 @@ def _make_mock_batch():
         sampling_info_done=None,
     )
 
-    # reqs with callback
     batch.reqs = [lambda: None]
     return batch
 
@@ -39,10 +38,8 @@ class TestMakeFollowerBatch(unittest.TestCase):
         follower = make_follower_batch(batch)
         data = pickle.dumps(follower)
         restored = pickle.loads(data)
-        # Verify tensors survive round-trip
         self.assertTrue(torch.equal(restored.input_ids, batch.input_ids))
         self.assertTrue(torch.equal(restored.seq_lens, batch.seq_lens))
-        # Verify stripped fields stay None
         self.assertIsNone(restored.sampling_info)
         self.assertIsNone(restored.reqs)
 
@@ -70,27 +67,172 @@ class TestMakeFollowerBatch(unittest.TestCase):
         data = pickle.dumps(None)
         self.assertIsNone(pickle.loads(data))
 
+    def test_shape_primitives_are_pickle_safe(self):
+        """TP shape attrs on the batch must not break pickle verification."""
+        import sglang_omni.engines.tp.serialization as ser
+
+        ser._pickle_verified = False
+        batch = _make_mock_batch()
+        batch.tp_input_embeds_shape = (3, 128)
+        batch.tp_input_embeds_dtype = torch.bfloat16
+        batch.tp_deepstack_shapes = [(2, 128)]
+        batch.tp_deepstack_dtype = torch.bfloat16
+        batch.tp_visual_pos_mask_shape = (3,)
+
+        follower = make_follower_batch(batch)
+        restored = pickle.loads(pickle.dumps(follower))
+        self.assertEqual(restored.tp_input_embeds_shape, (3, 128))
+        self.assertEqual(restored.tp_input_embeds_dtype, torch.bfloat16)
+        self.assertEqual(restored.tp_deepstack_shapes, [(2, 128)])
+        self.assertEqual(restored.tp_visual_pos_mask_shape, (3,))
+
+        ser._pickle_verified = False
+
+    def test_mm_flag_is_pickle_safe(self):
+        import sglang_omni.engines.tp.serialization as ser
+
+        ser._pickle_verified = False
+        batch = _make_mock_batch()
+        batch.tp_has_mm_payload = True
+
+        follower = make_follower_batch(batch)
+        restored = pickle.loads(pickle.dumps(follower))
+        self.assertTrue(restored.tp_has_mm_payload)
+
+        ser._pickle_verified = False
+
     def test_new_unpicklable_field_raises_clear_error(self):
         """Verify the runtime safety net catches new unpicklable fields."""
         import sglang_omni.engines.tp.serialization as ser
 
-        # Reset verification cache so it re-runs
         ser._pickle_verified = False
 
         batch = _make_mock_batch()
-        # Add a new unpicklable field that isn't in _FIELDS_TO_STRIP
         batch.bad_callback = lambda: None
 
         with self.assertRaises(RuntimeError) as ctx:
             make_follower_batch(batch)
         self.assertIn("bad_callback", str(ctx.exception))
 
-        # Reset for other tests
         ser._pickle_verified = False
 
 
+class TestInputEmbedsPickle(unittest.TestCase):
+    def test_input_embeds_survives_follower_batch_round_trip(self):
+        batch = types.SimpleNamespace()
+        batch.input_ids = torch.tensor([1, 2, 3])
+        batch.seq_lens = torch.tensor([3])
+        batch.sampling_info = None
+        batch.reqs = None
+        batch.input_embeds = torch.randn(3, 128)
+
+        follower = make_follower_batch(batch)
+        data = pickle.dumps(follower)
+        restored = pickle.loads(data)
+
+        self.assertIsNotNone(restored.input_embeds)
+        self.assertTrue(torch.equal(restored.input_embeds, batch.input_embeds))
+
+    def test_input_embeds_none_when_not_set(self):
+        batch = types.SimpleNamespace()
+        batch.input_ids = torch.tensor([1, 2, 3])
+        batch.seq_lens = torch.tensor([3])
+        batch.sampling_info = None
+        batch.reqs = None
+        follower = make_follower_batch(batch)
+        data = pickle.dumps(follower)
+        restored = pickle.loads(data)
+
+        embeds = getattr(restored, "input_embeds", None)
+        self.assertIsNone(embeds)
+
+
+class TestDeepstackPickle(unittest.TestCase):
+    def test_deepstack_payload_survives_round_trip(self):
+        batch = types.SimpleNamespace()
+        batch.input_ids = torch.tensor([1, 2, 3])
+        batch.seq_lens = torch.tensor([3])
+        batch.sampling_info = None
+        batch.reqs = None
+        batch.input_embeds = torch.randn(3, 128)
+        batch.tp_deepstack_visual_embeds = [torch.randn(2, 64), torch.randn(2, 64)]
+        batch.tp_visual_pos_masks = torch.tensor([True, False, True])
+
+        follower = make_follower_batch(batch)
+        data = pickle.dumps(follower)
+        restored = pickle.loads(data)
+
+        self.assertEqual(len(restored.tp_deepstack_visual_embeds), 2)
+        self.assertTrue(
+            torch.equal(restored.tp_deepstack_visual_embeds[0],
+                        batch.tp_deepstack_visual_embeds[0])
+        )
+        self.assertTrue(
+            torch.equal(restored.tp_visual_pos_masks, batch.tp_visual_pos_masks)
+        )
+
+
+class TestShapeAttrsPickle(unittest.TestCase):
+    """Shape primitives let follower alloc NCCL receive buffers pre-broadcast."""
+
+    def test_shape_attrs_survive_pickle_round_trip(self):
+        batch = types.SimpleNamespace()
+        batch.input_ids = torch.tensor([1, 2, 3])
+        batch.seq_lens = torch.tensor([3])
+        batch.sampling_info = None
+        batch.reqs = None
+        batch.tp_input_embeds_shape = (3, 128)
+        batch.tp_input_embeds_dtype = torch.bfloat16
+        batch.tp_deepstack_shapes = [(2, 128), (2, 128)]
+        batch.tp_deepstack_dtype = torch.bfloat16
+        batch.tp_visual_pos_mask_shape = (3,)
+
+        follower = make_follower_batch(batch)
+        data = pickle.dumps(follower)
+        restored = pickle.loads(data)
+
+        self.assertEqual(restored.tp_input_embeds_shape, (3, 128))
+        self.assertEqual(restored.tp_input_embeds_dtype, torch.bfloat16)
+        self.assertEqual(restored.tp_deepstack_shapes, [(2, 128), (2, 128)])
+        self.assertEqual(restored.tp_deepstack_dtype, torch.bfloat16)
+        self.assertEqual(restored.tp_visual_pos_mask_shape, (3,))
+
+    def test_shape_attrs_absent_for_text_only(self):
+        batch = types.SimpleNamespace()
+        batch.input_ids = torch.tensor([1, 2, 3])
+        batch.seq_lens = torch.tensor([3])
+        batch.sampling_info = None
+        batch.reqs = None
+
+        follower = make_follower_batch(batch)
+        data = pickle.dumps(follower)
+        restored = pickle.loads(data)
+
+        self.assertIsNone(getattr(restored, "tp_input_embeds_shape", None))
+        self.assertIsNone(getattr(restored, "tp_deepstack_shapes", None))
+        self.assertIsNone(getattr(restored, "tp_visual_pos_mask_shape", None))
+
+    def test_shape_attrs_with_only_input_embeds(self):
+        batch = types.SimpleNamespace()
+        batch.input_ids = torch.tensor([1, 2, 3])
+        batch.seq_lens = torch.tensor([3])
+        batch.sampling_info = None
+        batch.reqs = None
+        batch.tp_input_embeds_shape = (3, 64)
+        batch.tp_input_embeds_dtype = torch.float16
+        batch.tp_deepstack_shapes = None
+        batch.tp_deepstack_dtype = None
+        batch.tp_visual_pos_mask_shape = None
+
+        follower = make_follower_batch(batch)
+        restored = pickle.loads(pickle.dumps(follower))
+
+        self.assertEqual(restored.tp_input_embeds_shape, (3, 64))
+        self.assertIsNone(restored.tp_deepstack_shapes)
+        self.assertIsNone(restored.tp_visual_pos_mask_shape)
+
+
 def test_attach_page_table_snapshot():
-    """attach_page_table_snapshot stores the relevant rows from req_to_token_pool."""
     import torch
 
     from sglang_omni.engines.tp.serialization import attach_page_table_snapshot
@@ -114,7 +256,6 @@ def test_attach_page_table_snapshot():
 
 
 def test_page_table_snapshot_survives_pickle():
-    """tp_page_table_rows must survive pickle round-trip for broadcast."""
     import pickle
     import torch
 

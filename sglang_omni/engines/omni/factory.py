@@ -258,6 +258,8 @@ def create_sglang_ar_engine(
             nccl_port=nccl_port,
             base_gpu_id=gpu_id,
             tp_size=tp_size,
+            model_arch_override=model_arch_override,
+            weight_prefix=weight_prefix,
         )
         # Inject nccl_port into config so rank 0 uses the same port
         config = ModelWorkerConfig(
