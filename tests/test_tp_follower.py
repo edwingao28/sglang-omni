@@ -309,6 +309,78 @@ class TestFollowerInputEmbeds(unittest.TestCase):
         self.assertEqual(batch.tp_visual_pos_masks.device, target)
 
 
+class TestFollowerShapeAttrs(unittest.TestCase):
+    """Shape primitives let follower alloc NCCL receive buffers pre-broadcast."""
+
+    def test_shape_attrs_survive_pickle_round_trip(self):
+        import torch
+
+        from sglang_omni.engines.tp.serialization import make_follower_batch
+
+        batch = types.SimpleNamespace()
+        batch.input_ids = torch.tensor([1, 2, 3])
+        batch.seq_lens = torch.tensor([3])
+        batch.sampling_info = None
+        batch.reqs = None
+        batch.tp_input_embeds_shape = (3, 128)
+        batch.tp_input_embeds_dtype = torch.bfloat16
+        batch.tp_deepstack_shapes = [(2, 128), (2, 128)]
+        batch.tp_deepstack_dtype = torch.bfloat16
+        batch.tp_visual_pos_mask_shape = (3,)
+
+        follower = make_follower_batch(batch)
+        data = pickle.dumps(follower)
+        restored = pickle.loads(data)
+
+        self.assertEqual(restored.tp_input_embeds_shape, (3, 128))
+        self.assertEqual(restored.tp_input_embeds_dtype, torch.bfloat16)
+        self.assertEqual(restored.tp_deepstack_shapes, [(2, 128), (2, 128)])
+        self.assertEqual(restored.tp_deepstack_dtype, torch.bfloat16)
+        self.assertEqual(restored.tp_visual_pos_mask_shape, (3,))
+
+    def test_shape_attrs_absent_for_text_only(self):
+        import torch
+
+        from sglang_omni.engines.tp.serialization import make_follower_batch
+
+        batch = types.SimpleNamespace()
+        batch.input_ids = torch.tensor([1, 2, 3])
+        batch.seq_lens = torch.tensor([3])
+        batch.sampling_info = None
+        batch.reqs = None
+
+        follower = make_follower_batch(batch)
+        data = pickle.dumps(follower)
+        restored = pickle.loads(data)
+
+        self.assertIsNone(getattr(restored, "tp_input_embeds_shape", None))
+        self.assertIsNone(getattr(restored, "tp_deepstack_shapes", None))
+        self.assertIsNone(getattr(restored, "tp_visual_pos_mask_shape", None))
+
+    def test_shape_attrs_with_only_input_embeds(self):
+        import torch
+
+        from sglang_omni.engines.tp.serialization import make_follower_batch
+
+        batch = types.SimpleNamespace()
+        batch.input_ids = torch.tensor([1, 2, 3])
+        batch.seq_lens = torch.tensor([3])
+        batch.sampling_info = None
+        batch.reqs = None
+        batch.tp_input_embeds_shape = (3, 64)
+        batch.tp_input_embeds_dtype = torch.float16
+        batch.tp_deepstack_shapes = None
+        batch.tp_deepstack_dtype = None
+        batch.tp_visual_pos_mask_shape = None
+
+        follower = make_follower_batch(batch)
+        restored = pickle.loads(pickle.dumps(follower))
+
+        self.assertEqual(restored.tp_input_embeds_shape, (3, 64))
+        self.assertIsNone(restored.tp_deepstack_shapes)
+        self.assertIsNone(restored.tp_visual_pos_mask_shape)
+
+
 class TestFollowerGpuAssignment(unittest.TestCase):
     def test_gpu_id_formula_step_1(self):
         base, step = 0, 1
@@ -323,6 +395,49 @@ class TestFollowerGpuAssignment(unittest.TestCase):
     def test_gpu_id_formula_nonzero_base(self):
         base, step = 4, 2
         self.assertEqual(base + 1 * step, 6)
+
+    def test_spawn_followers_passes_model_config(self):
+        from sglang_omni.engines.tp.follower import spawn_followers
+
+        started = []
+
+        class DummyProcess:
+            def __init__(self, target, args, daemon):
+                self.target = target
+                self.args = args
+                self.daemon = daemon
+                self.pid = 12345
+
+            def start(self):
+                started.append(self.args)
+
+        class DummyContext:
+            def Process(self, target, args, daemon):
+                return DummyProcess(target, args, daemon)
+
+        server_args = types.SimpleNamespace(gpu_id_step=1)
+        with patch("sglang_omni.engines.tp.follower.mp.get_context", return_value=DummyContext()):
+            processes = spawn_followers(
+                server_args=server_args,
+                nccl_port=23456,
+                base_gpu_id=0,
+                tp_size=2,
+                model_arch_override="BailingMoeV2ForCausalLM",
+                weight_prefix="thinker.",
+            )
+
+        self.assertEqual(len(processes), 1)
+        self.assertEqual(
+            started[0],
+            (
+                1,
+                1,
+                server_args,
+                23456,
+                "BailingMoeV2ForCausalLM",
+                "thinker.",
+            ),
+        )
 
 
 if __name__ == "__main__":

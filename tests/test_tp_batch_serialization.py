@@ -70,6 +70,40 @@ class TestMakeFollowerBatch(unittest.TestCase):
         data = pickle.dumps(None)
         self.assertIsNone(pickle.loads(data))
 
+    def test_shape_primitives_are_pickle_safe(self):
+        """TP shape attrs on the batch must not break pickle verification."""
+        import sglang_omni.engines.tp.serialization as ser
+
+        ser._pickle_verified = False
+        batch = _make_mock_batch()
+        batch.tp_input_embeds_shape = (3, 128)
+        batch.tp_input_embeds_dtype = torch.bfloat16
+        batch.tp_deepstack_shapes = [(2, 128)]
+        batch.tp_deepstack_dtype = torch.bfloat16
+        batch.tp_visual_pos_mask_shape = (3,)
+
+        follower = make_follower_batch(batch)
+        restored = pickle.loads(pickle.dumps(follower))
+        self.assertEqual(restored.tp_input_embeds_shape, (3, 128))
+        self.assertEqual(restored.tp_input_embeds_dtype, torch.bfloat16)
+        self.assertEqual(restored.tp_deepstack_shapes, [(2, 128)])
+        self.assertEqual(restored.tp_visual_pos_mask_shape, (3,))
+
+        ser._pickle_verified = False
+
+    def test_mm_flag_is_pickle_safe(self):
+        import sglang_omni.engines.tp.serialization as ser
+
+        ser._pickle_verified = False
+        batch = _make_mock_batch()
+        batch.tp_has_mm_payload = True
+
+        follower = make_follower_batch(batch)
+        restored = pickle.loads(pickle.dumps(follower))
+        self.assertTrue(restored.tp_has_mm_payload)
+
+        ser._pickle_verified = False
+
     def test_new_unpicklable_field_raises_clear_error(self):
         """Verify the runtime safety net catches new unpicklable fields."""
         import sglang_omni.engines.tp.serialization as ser
