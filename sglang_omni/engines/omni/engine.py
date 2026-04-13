@@ -154,8 +154,8 @@ class OmniEngine(Engine):
 
                 try:
                     broadcast_pyobj([None], 0, tp_cpu_group, src=0)
-                except Exception:
-                    pass  # Followers may already be dead
+                except Exception as exc:
+                    logger.warning("TP stop broadcast failed: %s", exc)
 
             for proc in self._follower_processes:
                 if proc.is_alive():

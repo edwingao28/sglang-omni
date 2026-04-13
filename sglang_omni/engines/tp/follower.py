@@ -132,6 +132,10 @@ def follower_worker_loop(
     from sglang.srt.utils import broadcast_pyobj
     import torch.distributed as dist
 
+    from sglang_omni.engines.omni.runtime.thinker_forward import (
+        thinker_forward_omni,
+    )
+
     device = torch.device("cuda", gpu_id)
     model_vocab_size = worker.model_runner.model_config.vocab_size
 
@@ -201,39 +205,13 @@ def follower_worker_loop(
                 )
                 dist.broadcast(vis_masks, src=0, group=device_group)
 
-            worker.model_runner.attn_backend.init_forward_metadata(forward_batch)
-            positions = forward_batch.positions
-            if forward_batch.mrope_positions is not None:
-                positions = forward_batch.mrope_positions
-
-            ds_input = None
-            if ds_embeds is not None and vis_masks is not None:
-                layer_tensors = [
-                    t.to(device=input_embeds.device, dtype=input_embeds.dtype)
-                    for t in ds_embeds
-                ]
-                ds_concat = torch.cat(layer_tensors, dim=-1)
-                full_ds = torch.zeros(
-                    input_embeds.shape[0],
-                    ds_concat.shape[-1],
-                    device=input_embeds.device,
-                    dtype=input_embeds.dtype,
-                )
-                full_ds[vis_masks] = ds_concat
-                ds_input = full_ds
-
-            hidden_states = outer_model.model(
-                input_ids=None,
-                positions=positions,
+            thinker_forward_omni(
+                outer_model=outer_model,
+                attn_backend=worker.model_runner.attn_backend,
                 forward_batch=forward_batch,
                 input_embeds=input_embeds,
-                input_deepstack_embeds=ds_input,
-            )
-            outer_model.logits_processor(
-                forward_batch.input_ids,
-                hidden_states,
-                outer_model.lm_head,
-                forward_batch,
+                deepstack_visual_embeds=ds_embeds,
+                visual_pos_masks=vis_masks,
             )
         else:
             worker.model_runner.forward(forward_batch=forward_batch)

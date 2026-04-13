@@ -725,49 +725,18 @@ class SGLangModelRunner:
         deepstack_visual_embeds: list | None = None,
         visual_pos_masks: torch.Tensor | None = None,
     ) -> Any:
+        from sglang_omni.engines.omni.runtime.thinker_forward import (
+            thinker_forward_omni,
+        )
 
-        model_runner = self.model_worker.model_runner
-        outer = self._inner_model
-
-        model_runner.attn_backend.init_forward_metadata(forward_batch)
-
-        positions = forward_batch.positions
-        if forward_batch.mrope_positions is not None:
-            positions = forward_batch.mrope_positions
-
-        ds_input = None
-        if deepstack_visual_embeds is not None and visual_pos_masks is not None:
-            device = input_embeds.device
-            dtype = input_embeds.dtype
-            layer_tensors = [
-                t.to(device=device, dtype=dtype) for t in deepstack_visual_embeds
-            ]
-            ds_input = torch.cat(layer_tensors, dim=-1)
-
-            full_ds = torch.zeros(
-                input_embeds.shape[0],
-                ds_input.shape[-1],
-                device=device,
-                dtype=dtype,
-            )
-            full_ds[visual_pos_masks] = ds_input
-            ds_input = full_ds
-
-        hidden_states = outer.model(
-            input_ids=None,
-            positions=positions,
+        logits_output = thinker_forward_omni(
+            outer_model=self._inner_model,
+            attn_backend=self.model_worker.model_runner.attn_backend,
             forward_batch=forward_batch,
             input_embeds=input_embeds,
-            input_deepstack_embeds=ds_input,
+            deepstack_visual_embeds=deepstack_visual_embeds,
+            visual_pos_masks=visual_pos_masks,
         )
-
-        logits_output = outer.logits_processor(
-            forward_batch.input_ids,
-            hidden_states,
-            outer.lm_head,
-            forward_batch,
-        )
-
         return GenerationBatchResult(
             logits_output=logits_output,
             can_run_cuda_graph=False,
