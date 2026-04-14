@@ -986,7 +986,9 @@ class SGLangModelRunner:
                         if ds_embeds is not None
                         else None
                     ),
-                    "deepstack_dtype": ds_embeds[0].dtype if ds_embeds is not None else None,
+                    "deepstack_dtype": (
+                        ds_embeds[0].dtype if ds_embeds is not None else None
+                    ),
                     "visual_pos_mask_shape": (
                         tuple(vis_masks.shape) if vis_masks is not None else None
                     ),

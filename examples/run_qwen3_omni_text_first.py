@@ -39,9 +39,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--relay-backend", type=str, default="nixl", choices=["nixl", "shm"]
     )
-    parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size for thinker")
-    parser.add_argument("--cpu-offload-gb", type=int, default=0, help="GB of model weights to offload to CPU")
-    parser.add_argument("--mem-fraction-static", type=float, default=None, help="Fraction of GPU memory for KV cache")
+    parser.add_argument(
+        "--tp-size", type=int, default=1, help="Tensor parallel size for thinker"
+    )
+    parser.add_argument(
+        "--cpu-offload-gb",
+        type=int,
+        default=0,
+        help="GB of model weights to offload to CPU",
+    )
+    parser.add_argument(
+        "--mem-fraction-static",
+        type=float,
+        default=None,
+        help="Fraction of GPU memory for KV cache",
+    )
     return parser.parse_args()
 
 

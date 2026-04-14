@@ -38,7 +38,7 @@ class TestMingOmniSpeechGPUValidation(unittest.TestCase):
 
 
 try:
-    from sglang_omni.models.qwen3_omni.config import Qwen3OmniSpeechPipelineConfig
+    pass
 
     _qwen3_available = True
 except ImportError:

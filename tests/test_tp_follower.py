@@ -181,7 +181,10 @@ class TestFollowerGpuAssignment(unittest.TestCase):
                 return DummyProcess(target, args, daemon)
 
         server_args = types.SimpleNamespace(gpu_id_step=1)
-        with patch("sglang_omni.engines.tp.follower.mp.get_context", return_value=DummyContext()):
+        with patch(
+            "sglang_omni.engines.tp.follower.mp.get_context",
+            return_value=DummyContext(),
+        ):
             processes = spawn_followers(
                 server_args=server_args,
                 nccl_port=23456,

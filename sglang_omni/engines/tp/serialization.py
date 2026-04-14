@@ -89,7 +89,6 @@ def attach_page_table_snapshot(batch: "ModelWorkerBatch", req_to_token_pool) -> 
     Must be called on rank 0 AFTER the scheduler writes to req_to_token_pool
     and BEFORE make_follower_batch().
     """
-    import torch
 
     pool_tensor = req_to_token_pool.req_to_token  # (max_reqs, max_ctx_len) int32
     rows = []

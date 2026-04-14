@@ -164,8 +164,10 @@ class TestDeepstackPickle(unittest.TestCase):
 
         self.assertEqual(len(restored.tp_deepstack_visual_embeds), 2)
         self.assertTrue(
-            torch.equal(restored.tp_deepstack_visual_embeds[0],
-                        batch.tp_deepstack_visual_embeds[0])
+            torch.equal(
+                restored.tp_deepstack_visual_embeds[0],
+                batch.tp_deepstack_visual_embeds[0],
+            )
         )
         self.assertTrue(
             torch.equal(restored.tp_visual_pos_masks, batch.tp_visual_pos_masks)
@@ -257,12 +259,10 @@ def test_attach_page_table_snapshot():
 
 def test_page_table_snapshot_survives_pickle():
     import pickle
+
     import torch
 
-    from sglang_omni.engines.tp.serialization import (
-        attach_page_table_snapshot,
-        make_follower_batch,
-    )
+    from sglang_omni.engines.tp.serialization import attach_page_table_snapshot
 
     pool = types.SimpleNamespace()
     pool.req_to_token = torch.zeros((4, 64), dtype=torch.int32)

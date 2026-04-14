@@ -128,13 +128,11 @@ def follower_worker_loop(
     tp_cpu_group = worker.model_runner.tp_group.cpu_group
     device_group = worker.model_runner.tp_group.device_group
 
+    import torch.distributed as dist
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
     from sglang.srt.utils import broadcast_pyobj
-    import torch.distributed as dist
 
-    from sglang_omni.engines.omni.runtime.thinker_forward import (
-        thinker_forward_omni,
-    )
+    from sglang_omni.engines.omni.runtime.thinker_forward import thinker_forward_omni
 
     device = torch.device("cuda", gpu_id)
     model_vocab_size = worker.model_runner.model_config.vocab_size
@@ -200,9 +198,7 @@ def follower_worker_loop(
             vis_masks = None
             vis_mask_shape = payload_meta["visual_pos_mask_shape"]
             if vis_mask_shape is not None:
-                vis_masks = torch.empty(
-                    vis_mask_shape, dtype=torch.bool, device=device
-                )
+                vis_masks = torch.empty(vis_mask_shape, dtype=torch.bool, device=device)
                 dist.broadcast(vis_masks, src=0, group=device_group)
 
             thinker_forward_omni(
