@@ -103,6 +103,15 @@ class Qwen3OmniPipelineConfig(PipelineConfig):
     def __init__(self, **kwargs):
         server_args_overrides = kwargs.pop("server_args_overrides", None)
         super().__init__(**kwargs)
+        tp_size = (
+            server_args_overrides.get("tp_size", 1) if server_args_overrides else 1
+        )
+        if tp_size > 1:
+            raise NotImplementedError(
+                "The TP runtime under sglang_omni/engines/tp/ is model-agnostic; "
+                "Qwen3-Omni support will land as a follow-up after Ming-flash-omni "
+                "TP lands."
+            )
         if server_args_overrides:
             for stage in self.stages:
                 if stage.name == THINKER_STAGE:
