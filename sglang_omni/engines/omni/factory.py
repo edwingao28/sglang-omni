@@ -238,6 +238,7 @@ def create_sglang_ar_engine(
         logger.debug("Disabling overlap for feedback-enabled engine")
         enable_overlap = False
 
+    # Note (wenyao):
     # --- TP follower spawning ---
     # Must happen BEFORE rank 0's ModelWorker init because
     # init_distributed_environment is a collective operation.

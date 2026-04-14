@@ -23,10 +23,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TEST_PROMPTS = [
-    "1+1等于几？",
-    "法国的首都是哪里？",
+    "What is 1+1?",
+    "What is the capital of France?",
     "What is the capital of Japan?",
-    "请用一句话解释什么是量子计算。",
+    "Explain quantum computing in one sentence.",
 ]
 
 
@@ -70,7 +70,10 @@ async def run_thinker(
             logger.info("[%d/%d] Prompt: %s", i + 1, len(TEST_PROMPTS), prompt)
             request = {
                 "messages": [
-                    {"role": "system", "content": "你是一个友好的AI助手。请简洁回答。"},
+                    {
+                        "role": "system",
+                        "content": "You are a friendly AI assistant. Please answer concisely.",
+                    },
                     {"role": "user", "content": prompt},
                 ],
                 "audios": [],

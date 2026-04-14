@@ -970,6 +970,12 @@ class SGLangModelRunner:
             broadcast_pyobj([follower_batch], 0, self._tp_cpu_group, src=0)
 
             if has_mm_payload:
+                # Note (wenyao):
+                # Pre-clamp input_ids to vocab range: multimodal placeholder tokens are
+                # content-hash pad_values that exceed vocab_size. Non-in-place clamp
+                # preserves original input_ids for chunked prefill pad_value mask matching.
+                # Mirrored on the follower side in follower.py.
+                # (Constraint originally documented by @Yifei in _inject_multimodal_embeds.)
                 embed_input_ids = forward_batch.input_ids.clamp(
                     0, self._embed_tokens.num_embeddings - 1
                 )
