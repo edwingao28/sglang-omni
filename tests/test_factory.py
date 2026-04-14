@@ -138,6 +138,7 @@ def test_create_sglang_ar_engine_disables_overlap_for_feedback(monkeypatch) -> N
         page_size=16,
         chunked_prefill_size=32,
         max_prefill_tokens=64,
+        tp_size=1,
     )
 
     engine = factory.create_sglang_ar_engine(
@@ -158,6 +159,7 @@ def test_create_sglang_ar_engine_keeps_overlap_without_feedback(monkeypatch) -> 
         page_size=16,
         chunked_prefill_size=32,
         max_prefill_tokens=64,
+        tp_size=1,
     )
 
     engine = factory.create_sglang_ar_engine(
@@ -178,7 +180,7 @@ def test_qwen3_speech_pipeline_enables_talker_feedback() -> None:
 
 
 def test_qwen3_speech_pipeline_rejects_tp() -> None:
-    with pytest.raises(ValueError, match="does not support tp_size > 1"):
+    with pytest.raises(ValueError, match="collides"):
         Qwen3OmniSpeechPipelineConfig(
             model_path="dummy",
             server_args_overrides={"tp_size": 2},
