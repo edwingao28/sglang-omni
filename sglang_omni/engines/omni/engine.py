@@ -158,12 +158,12 @@ class OmniEngine(Engine):
                     logger.warning("TP stop broadcast failed: %s", exc)
 
             for proc in self._follower_processes:
-                if proc.is_alive():
-                    proc.terminate()
-            for proc in self._follower_processes:
                 proc.join(timeout=10)
                 if proc.is_alive():
-                    proc.kill()
+                    proc.terminate()
+                    proc.join(timeout=5)
+                    if proc.is_alive():
+                        proc.kill()
             self._follower_processes.clear()
 
         logger.info("OmniEngine stopped")

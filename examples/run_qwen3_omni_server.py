@@ -5,7 +5,6 @@ Usage::
 
     python examples/run_qwen3_omni_server.py \
         --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct \
-        --tp-size 2 \
         --port 8000
 
 Then test with::
@@ -47,12 +46,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--thinker-max-seq-len", type=int, default=None)
     parser.add_argument(
-        "--tp-size",
-        type=int,
-        default=1,
-        help="Tensor parallel size for thinker",
-    )
-    parser.add_argument(
         "--cpu-offload-gb",
         type=int,
         default=0,
@@ -91,8 +84,6 @@ def main() -> None:
     args = parse_args()
 
     overrides = {}
-    if args.tp_size and args.tp_size > 1:
-        overrides["tp_size"] = args.tp_size
     if args.cpu_offload_gb:
         overrides["cpu_offload_gb"] = args.cpu_offload_gb
     if args.mem_fraction_static is not None:
