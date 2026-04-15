@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared thinker forward helper used by rank 0 and TP followers."""
 from __future__ import annotations
 
 from typing import Any
@@ -17,10 +16,8 @@ def thinker_forward_omni(
 ) -> Any:
     """Shared thinker forward used by rank 0 and TP followers.
 
-    IMPORTANT: both rank 0 and follower MUST call this function even if
-    the follower discards the return value — logits_processor performs a
-    vocab-parallel all-gather collective and any rank skipping it will
-    misalign NCCL state across the TP group.
+    Both ranks MUST call this even if follower discards the result —
+    logits_processor does a vocab-parallel all-gather; skipping desyncs NCCL.
     """
     attn_backend.init_forward_metadata(forward_batch)
 
