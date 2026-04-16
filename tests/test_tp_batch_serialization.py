@@ -154,7 +154,9 @@ class TestCpuSanitizer(unittest.TestCase):
         self.assertIsNot(follower.multimodal_inputs[0], mm)
         self.assertIs(batch.multimodal_inputs[0], mm)
         self.assertTrue(
-            torch.equal(follower.multimodal_inputs[0].mrope_positions, mm.mrope_positions)
+            torch.equal(
+                follower.multimodal_inputs[0].mrope_positions, mm.mrope_positions
+            )
         )
         self.assertTrue(
             torch.equal(
