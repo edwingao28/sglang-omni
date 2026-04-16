@@ -1,0 +1,60 @@
+name: Ming-Omni CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ming-omni-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ming-omni-ci:
+    name: MMMU accuracy + speed
+    runs-on: [self-hosted]
+    timeout-minutes: 90
+    container:
+      image: frankleeeee/sglang-omni:dev
+      options: --gpus all --rm -v /dev/shm:/dev/shm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/omni-setup
+        with:
+          venv-name: omni-ming
+          install-deps: "true"
+
+      - name: Run MMMU CI (accuracy + speed)
+        shell: bash
+        run: |
+          source omni-ming/bin/activate
+          export PYTHONPATH=$PWD
+          pytest tests/test_model/test_ming_omni_mmmu_ci.py -v -s -x
+        env:
+          HF_ENDPOINT: https://hf-mirror.com
+
+      - name: Post-stage cleanup
+        if: always()
+        uses: ./.github/actions/omni-post-stage
+        with:
+          stage-label: MMMU (accuracy + speed)
+          artifact-path-globs: |
+            */mmmu/mmmu_results.json
+          artifact-upload-name: ming-omni-mmmu-results
+          artifact-upload-path: /tmp/**/mmmu_results.json
+
+      - name: Save cache
+        if: always()
+        shell: bash
+        run: |
+          if omni-ming/bin/python -c "import torch" 2>/dev/null; then
+            rm -rf /github/home/omni-ming
+            cp -p -r omni-ming /github/home/
+          else
+            echo "::warning::Skipping cache save - venv appears corrupted (torch not importable)"
+          fi

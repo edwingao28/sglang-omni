@@ -1,0 +1,105 @@
+# SPDX-License-Identifier: Apache-2.0
+"""MMMU accuracy and speed CI for Ming-flash-omni-2.0 (Text+Image → Text).
+
+Usage:
+    pytest tests/test_model/test_ming_omni_mmmu_ci.py -s -x
+"""
+
+from __future__ import annotations
+
+import asyncio
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from benchmarks.dataset.prepare import DATASETS
+from benchmarks.eval.benchmark_omni_mmmu import MMMUEvalConfig, run_mmmu_eval
+from sglang_omni.utils import find_available_port
+from tests.utils import (
+    apply_slack,
+    assert_speed_thresholds,
+    start_server_from_cmd,
+    stop_server,
+)
+
+MODEL_PATH = "inclusionAI/Ming-flash-omni-2.0"
+
+CONCURRENCY = 4
+STARTUP_TIMEOUT = 1200
+
+# MMMU accuracy floor - conservative starting value; tighten after first
+# green CI run yields a baseline (separate reference-run PR).
+MMMU_MIN_ACCURACY = 0.40
+
+# TODO (wenyao): Thresholds are placeholders; replace with H20/H100 CI-measured
+# P95 values in the follow-up reference-run PR. Baseline source for first
+# CI run: mirror qwen3 pattern at tests/test_model/test_qwen3_omni_mmmu_ci.py:37-39
+# (which cites PR#265 comment for its own reference measurements).
+_MMMU_P95 = {
+    4: {
+        "throughput_qps": 0.05,
+        "tok_per_s_agg": 5.0,
+        "latency_mean_s": 90.0,
+    },
+}
+MMMU_THRESHOLDS = apply_slack(_MMMU_P95)
+
+
+@pytest.fixture(scope="module")
+def server_process(tmp_path_factory: pytest.TempPathFactory):
+    """Start the Ming-Omni text server and wait until healthy."""
+    port = find_available_port()
+    log_file = tmp_path_factory.mktemp("server_logs") / "server.log"
+    cmd = [
+        sys.executable,
+        "examples/run_ming_omni_server.py",
+        "--model-path",
+        MODEL_PATH,
+        "--port",
+        str(port),
+        "--model-name",
+        "ming-omni",
+    ]
+    proc = start_server_from_cmd(cmd, log_file, port, timeout=STARTUP_TIMEOUT)
+    proc.port = port
+    yield proc
+    stop_server(proc)
+
+
+@pytest.mark.benchmark
+def test_mmmu_accuracy_and_speed(
+    server_process: subprocess.Popen,
+    tmp_path: Path,
+) -> None:
+    """Run MMMU eval and assert accuracy + speed meet thresholds."""
+    config = MMMUEvalConfig(
+        model="ming-omni",
+        port=server_process.port,
+        max_concurrency=CONCURRENCY,
+        output_dir=str(tmp_path / "mmmu"),
+        repo_id=DATASETS["mmmu-ci-50"],
+        # Borrow qwen3 mixed-batch regression guard for issue #299.
+        warmup=2,
+    )
+    results = asyncio.run(run_mmmu_eval(config))
+
+    summary = results["summary"]
+    failed_count = summary.get("failed", 0)
+    assert failed_count == 0, (
+        f"{failed_count} requests failed; summary={summary}"
+    )
+
+    assert summary["accuracy"] >= MMMU_MIN_ACCURACY, (
+        f"MMMU accuracy {summary['accuracy']:.4f} "
+        f"({summary['accuracy'] * 100:.1f}%) < "
+        f"threshold {MMMU_MIN_ACCURACY} ({MMMU_MIN_ACCURACY * 100:.0f}%)"
+    )
+
+    speed = results["speed"]
+    assert_speed_thresholds(speed, MMMU_THRESHOLDS, CONCURRENCY)
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-s", "-x", "-v"]))
