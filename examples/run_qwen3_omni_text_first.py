@@ -40,9 +40,6 @@ def parse_args() -> argparse.Namespace:
         "--relay-backend", type=str, default="nixl", choices=["nixl", "shm"]
     )
     parser.add_argument(
-        "--tp-size", type=int, default=1, help="Tensor parallel size for thinker"
-    )
-    parser.add_argument(
         "--cpu-offload-gb",
         type=int,
         default=0,
@@ -59,8 +56,6 @@ def parse_args() -> argparse.Namespace:
 
 async def main_async(args: argparse.Namespace) -> None:
     overrides = {}
-    if args.tp_size and args.tp_size > 1:
-        overrides["tp_size"] = args.tp_size
     if args.cpu_offload_gb:
         overrides["cpu_offload_gb"] = args.cpu_offload_gb
     if args.mem_fraction_static is not None:

@@ -4,10 +4,23 @@ import pickle
 import types
 import unittest
 import weakref
+from enum import Enum, auto
 
 import torch
 
 from sglang_omni.engines.tp.serialization import make_follower_batch
+
+
+class _FakeModality(Enum):
+    IMAGE = auto()
+
+    @classmethod
+    def from_str(cls, value):
+        return cls[value.upper()]
+
+    @staticmethod
+    def all():
+        return [_FakeModality.IMAGE]
 
 
 def _make_mock_batch():
@@ -115,6 +128,73 @@ class TestMakeFollowerBatch(unittest.TestCase):
         self.assertIn("bad_callback", str(ctx.exception))
 
         ser._pickle_verified = False
+
+
+class TestCpuSanitizer(unittest.TestCase):
+    """Rank 0 must move tensors to CPU before broadcast and leave original batch intact."""
+
+    def test_nested_tensors_rebuilt_without_mutating_original(self):
+        class MMInput:
+            pass
+
+        mm = MMInput()
+        mm.mrope_positions = torch.tensor([0, 1, 2])
+        mm.mrope_position_delta = torch.tensor([1])
+
+        batch = _make_mock_batch()
+        page_table_rows = [torch.tensor([10, 11, 12], dtype=torch.int32)]
+        batch.tp_page_table_rows = page_table_rows
+        batch.multimodal_inputs = [mm]
+
+        follower = make_follower_batch(batch)
+
+        self.assertIsNot(follower.tp_page_table_rows, page_table_rows)
+        self.assertIs(batch.tp_page_table_rows, page_table_rows)
+        self.assertTrue(torch.equal(follower.tp_page_table_rows[0], page_table_rows[0]))
+        self.assertIsNot(follower.multimodal_inputs[0], mm)
+        self.assertIs(batch.multimodal_inputs[0], mm)
+        self.assertTrue(
+            torch.equal(follower.multimodal_inputs[0].mrope_positions, mm.mrope_positions)
+        )
+        self.assertTrue(
+            torch.equal(
+                follower.multimodal_inputs[0].mrope_position_delta,
+                mm.mrope_position_delta,
+            )
+        )
+
+    def test_enum_fields_are_not_recursed_into(self):
+        mm_item = types.SimpleNamespace()
+        mm_item.modality = _FakeModality.IMAGE
+        mm_item.feature = torch.tensor([1.0])
+
+        batch = _make_mock_batch()
+        batch.multimodal_inputs = [types.SimpleNamespace(mm_items=[mm_item])]
+
+        follower = make_follower_batch(batch)
+        restored = pickle.loads(pickle.dumps(follower))
+
+        self.assertIs(
+            restored.multimodal_inputs[0].mm_items[0].modality,
+            _FakeModality.IMAGE,
+        )
+        self.assertTrue(
+            torch.equal(
+                restored.multimodal_inputs[0].mm_items[0].feature,
+                torch.tensor([1.0]),
+            )
+        )
+
+    def test_cycle_handled_via_memo(self):
+        batch = _make_mock_batch()
+        a = {"tensor": torch.tensor([1.0])}
+        a["self"] = a
+        batch.cycle = a
+
+        follower = make_follower_batch(batch)
+
+        self.assertIsNot(follower.cycle, a)
+        self.assertIs(follower.cycle["self"], follower.cycle)
 
 
 class TestInputEmbedsPickle(unittest.TestCase):
