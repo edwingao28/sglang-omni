@@ -33,6 +33,7 @@ logging.basicConfig(
     level=os.environ.get("LOGLEVEL", "INFO").upper(),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
@@ -75,6 +76,11 @@ def parse_args() -> argparse.Namespace:
         help="Fraction of GPU memory for KV cache (default: 0.80)",
     )
     parser.add_argument(
+        "--disable-cuda-graph",
+        action="store_true",
+        help="Disable CUDA graph for the thinker SGLang engine.",
+    )
+    parser.add_argument(
         "--relay-backend",
         type=str,
         default="shm",
@@ -108,6 +114,16 @@ def main() -> None:
         overrides["cpu_offload_gb"] = args.cpu_offload_gb
     if args.mem_fraction_static is not None:
         overrides["mem_fraction_static"] = args.mem_fraction_static
+    overrides["disable_cuda_graph"] = args.disable_cuda_graph
+
+    logger.info(
+        "Launching Ming thinker server with tp_size=%s, cpu_offload_gb=%s, "
+        "mem_fraction_static=%s, disable_cuda_graph=%s",
+        args.tp_size,
+        args.cpu_offload_gb,
+        args.mem_fraction_static,
+        args.disable_cuda_graph,
+    )
 
     config = MingOmniPipelineConfig(
         model_path=args.model_path,
