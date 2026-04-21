@@ -64,6 +64,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--voice", type=str, default="DB30", help="Voice ID for the talker"
     )
+    parser.add_argument(
+        "--tp-size",
+        type=int,
+        default=1,
+        help="Tensor parallel size for thinker (set to 2 on 2xH200 to avoid CPU offload).",
+    )
+    parser.add_argument(
+        "--cpu-offload-gb",
+        type=int,
+        default=None,
+        help="GB of thinker weights to offload to CPU (0 disables offload).",
+    )
+    parser.add_argument(
+        "--mem-fraction-static",
+        type=float,
+        default=None,
+        help="Fraction of GPU memory for KV cache.",
+    )
+    parser.add_argument(
+        "--quantization",
+        type=str,
+        default=None,
+        help="Quantization method (e.g., fp8) for thinker model.",
+    )
 
     # Server
     parser.add_argument("--host", type=str, default="0.0.0.0")
@@ -86,10 +110,22 @@ async def main_async(args: argparse.Namespace) -> None:
         "talker": args.gpu_talker,
     }
 
+    overrides: dict = {}
+    if args.tp_size and args.tp_size > 1:
+        overrides["tp_size"] = args.tp_size
+        overrides["disable_custom_all_reduce"] = True
+    if args.cpu_offload_gb is not None:
+        overrides["cpu_offload_gb"] = args.cpu_offload_gb
+    if args.mem_fraction_static is not None:
+        overrides["mem_fraction_static"] = args.mem_fraction_static
+    if args.quantization:
+        overrides["quantization"] = args.quantization
+
     config = MingOmniSpeechPipelineConfig(
         model_path=args.model_path,
         relay_backend=args.relay_backend,
         gpu_placement=gpu_placement,
+        server_args_overrides=overrides if overrides else None,
     )
 
     runner = MultiProcessPipelineRunner(config)
