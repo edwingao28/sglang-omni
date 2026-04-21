@@ -3,7 +3,10 @@
 
 Splits SSE `choices[0].delta` into Thinker text vs Talker audio chunks:
 - Thinker TTFT = request_start -> first delta.content
+- Talker TTFT  = first delta.content -> first delta.audio.data
+  (paper-style: Talker handoff-to-first-codec-token delay)
 - Talker TTFC  = request_start -> first delta.audio.data
+  (absolute wall-time first audio chunk)
 - Thinker TPOT = mean gap between consecutive text deltas (fallback:
   wall-span / (completion_tokens-1) when usage is reported)
 - Talker TPOT  = mean gap between consecutive audio deltas
@@ -43,7 +46,6 @@ from typing import Any
 
 import httpx
 
-
 DEFAULT_PROMPT = "请讲一个关于机器人的短故事，不少于六句话。"
 DEFAULT_SYSTEM = "你是一个友好的AI助手，请用自然、温暖的语气说话。"
 
@@ -54,6 +56,7 @@ class RequestTiming:
     e2e_s: float
     ttft_s: float | None = None
     ttfc_s: float | None = None
+    talker_ttft_s: float | None = None
     n_text_events: int = 0
     n_audio_events: int = 0
     text_tpot_s: float | None = None
@@ -128,7 +131,9 @@ def _parse_delta(line: str) -> tuple[dict | None, dict | None, bool]:
     except json.JSONDecodeError:
         return None, None, False
     choices = evt.get("choices") or []
-    delta = choices[0].get("delta") if choices and isinstance(choices[0], dict) else None
+    delta = (
+        choices[0].get("delta") if choices and isinstance(choices[0], dict) else None
+    )
     usage = evt.get("usage") if isinstance(evt.get("usage"), dict) else None
     return delta, usage, False
 
@@ -184,6 +189,11 @@ async def one_request(
 
     ttft = (t_first_text - t0) if t_first_text is not None else None
     ttfc = (t_first_audio - t0) if t_first_audio is not None else None
+    talker_ttft = (
+        (t_first_audio - t_first_text)
+        if t_first_audio is not None and t_first_text is not None
+        else None
+    )
 
     text_tpot: float | None = None
     if n_text >= 2 and t_last_text is not None and t_first_text is not None:
@@ -206,6 +216,7 @@ async def one_request(
         e2e_s=e2e_anchor - t0,
         ttft_s=ttft,
         ttfc_s=ttfc,
+        talker_ttft_s=talker_ttft,
         n_text_events=n_text,
         n_audio_events=n_audio,
         text_tpot_s=text_tpot,
@@ -239,6 +250,7 @@ async def run_level(
 
     ttft = col("ttft_s")
     ttfc = col("ttfc_s")
+    talker_ttft = col("talker_ttft_s")
     text_tpot = col("text_tpot_s")
     audio_tpot = col("audio_tpot_s")
     e2e = col("e2e_s")
@@ -256,6 +268,8 @@ async def run_level(
         "thinker_ttft_p95_s": percentile(ttft, 0.95),
         "talker_ttfc_p50_s": percentile(ttfc, 0.5),
         "talker_ttfc_p95_s": percentile(ttfc, 0.95),
+        "talker_ttft_p50_s": percentile(talker_ttft, 0.5),
+        "talker_ttft_p95_s": percentile(talker_ttft, 0.95),
         "thinker_tpot_p50_s": percentile(text_tpot, 0.5),
         "thinker_tpot_p95_s": percentile(text_tpot, 0.95),
         "talker_tpot_p50_s": percentile(audio_tpot, 0.5),
@@ -306,11 +320,14 @@ async def warmup(client, url, payload, n):
 
 def print_paper_table(model: str, rows: list[dict[str, Any]]) -> None:
     print(f"\nPaper-style median/p95 per concurrency (ms) — model={model}")
-    header = f"{'metric':>16} | " + " | ".join(f"{r['concurrency']:>4} conc" for r in rows)
+    header = f"{'metric':>16} | " + " | ".join(
+        f"{r['concurrency']:>4} conc" for r in rows
+    )
     print(header)
     print("-" * len(header))
     fields = [
         ("Thinker TTFT", "thinker_ttft_p50_s", "thinker_ttft_p95_s"),
+        ("Talker TTFT", "talker_ttft_p50_s", "talker_ttft_p95_s"),
         ("Talker TTFC", "talker_ttfc_p50_s", "talker_ttfc_p95_s"),
         ("Thinker TPOT", "thinker_tpot_p50_s", "thinker_tpot_p95_s"),
         ("Talker TPOT", "talker_tpot_p50_s", "talker_tpot_p95_s"),
@@ -354,12 +371,18 @@ async def main_async(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--url", default="http://127.0.0.1:8000/v1/chat/completions")
-    p.add_argument("--model", default="ming-omni",
-                   help="Model name for the API request (e.g. ming-omni, qwen3-omni).")
+    p.add_argument(
+        "--model",
+        default="ming-omni",
+        help="Model name for the API request (e.g. ming-omni, qwen3-omni).",
+    )
     p.add_argument("--prompt", default=DEFAULT_PROMPT)
     p.add_argument("--system", default=DEFAULT_SYSTEM)
-    p.add_argument("--audio", default=None,
-                   help="Optional audio input path/URL (enables audio-in column).")
+    p.add_argument(
+        "--audio",
+        default=None,
+        help="Optional audio input path/URL (enables audio-in column).",
+    )
     p.add_argument(
         "--modalities",
         nargs="+",
@@ -371,10 +394,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--temperature", type=float, default=0.7)
     p.add_argument("--warmup", type=int, default=2)
     p.add_argument("--sweep", nargs="+", type=int, default=[1, 4, 8])
-    p.add_argument("--per-level", type=int, default=12,
-                   help="Requests per concurrency level (>=3x conc).")
-    p.add_argument("--payload-file", default=None,
-                   help="Use a full JSON payload from file (overrides prompt/system).")
+    p.add_argument(
+        "--per-level",
+        type=int,
+        default=12,
+        help="Requests per concurrency level (>=3x conc).",
+    )
+    p.add_argument(
+        "--payload-file",
+        default=None,
+        help="Use a full JSON payload from file (overrides prompt/system).",
+    )
     p.add_argument("--save-json", default=None)
     return p.parse_args()
 
