@@ -12,7 +12,13 @@ Splits SSE `choices[0].delta` into Thinker text vs Talker audio chunks:
 - Talker TPOT  = mean gap between consecutive audio deltas
 - Overall E2E  = request_start -> last audio delta (or last event if no audio)
 
-Each metric reports median/p95 in ms per concurrency level.
+Also reports:
+- Thinker TPS  = completion_tokens / thinker active wall-span
+- Talker chunks/s = n_audio_events / talker active wall-span
+- Audio max/p99 inter-chunk gap (playback smoothness)
+- Generation RTF = wall_time / decoded_audio_duration
+
+Each latency metric reports median/p95 in ms per concurrency level.
 
 Recommended fair-comparison setup on H200 (no CPU offload on either side):
     # Ming speech: thinker TP=2 on GPU 0,1 + talker on GPU 2 (3xH200)
@@ -38,8 +44,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import io
 import json
 import time
+import wave
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -62,7 +71,23 @@ class RequestTiming:
     text_tpot_s: float | None = None
     audio_tpot_s: float | None = None
     completion_tokens: int | None = None
+    thinker_tps: float | None = None
+    talker_chunks_per_s: float | None = None
+    audio_max_gap_s: float | None = None
+    audio_p99_gap_s: float | None = None
+    audio_duration_s: float | None = None
+    rtf: float | None = None
     error: str | None = None
+
+
+def _wav_seconds(audio_bytes: bytes) -> float | None:
+    try:
+        with wave.open(io.BytesIO(audio_bytes), "rb") as wf:
+            frames = wf.getnframes()
+            rate = wf.getframerate()
+        return frames / rate if rate > 0 else None
+    except (wave.Error, EOFError, ValueError):
+        return None
 
 
 def percentile(values: list[float], p: float) -> float | None:
@@ -150,6 +175,8 @@ async def one_request(
     n_audio = 0
     completion_tokens: int | None = None
     t_end = t0
+    audio_gaps: list[float] = []
+    audio_duration_s = 0.0
 
     try:
         async with client.stream("POST", url, json=payload, timeout=None) as resp:
@@ -177,8 +204,17 @@ async def one_request(
                 if isinstance(audio, dict) and audio.get("data"):
                     if t_first_audio is None:
                         t_first_audio = now
+                    else:
+                        audio_gaps.append(now - t_last_audio)
                     t_last_audio = now
                     n_audio += 1
+                    try:
+                        chunk_bytes = base64.b64decode(audio["data"])
+                        wav_s = _wav_seconds(chunk_bytes)
+                        if wav_s is not None:
+                            audio_duration_s += wav_s
+                    except Exception:
+                        pass
                 t_end = now
     except Exception as exc:
         return RequestTiming(
@@ -207,13 +243,33 @@ async def one_request(
         text_tpot = (t_last_text - t_first_text) / (completion_tokens - 1)
 
     audio_tpot: float | None = None
+    talker_chunks_per_s: float | None = None
     if n_audio >= 2 and t_last_audio is not None and t_first_audio is not None:
-        audio_tpot = (t_last_audio - t_first_audio) / (n_audio - 1)
+        talker_span = t_last_audio - t_first_audio
+        audio_tpot = talker_span / (n_audio - 1)
+        if talker_span > 0:
+            talker_chunks_per_s = n_audio / talker_span
+
+    thinker_tps: float | None = None
+    if (
+        completion_tokens
+        and completion_tokens > 0
+        and t_last_text is not None
+        and t_first_text is not None
+        and t_last_text > t_first_text
+    ):
+        thinker_tps = completion_tokens / (t_last_text - t_first_text)
+
+    audio_max_gap = max(audio_gaps) if audio_gaps else None
+    audio_p99_gap = percentile(audio_gaps, 0.99) if audio_gaps else None
 
     e2e_anchor = t_last_audio if t_last_audio is not None else t_end
+    e2e_s = e2e_anchor - t0
+    rtf = e2e_s / audio_duration_s if audio_duration_s > 0 else None
+
     return RequestTiming(
         ok=True,
-        e2e_s=e2e_anchor - t0,
+        e2e_s=e2e_s,
         ttft_s=ttft,
         ttfc_s=ttfc,
         talker_ttft_s=talker_ttft,
@@ -222,6 +278,12 @@ async def one_request(
         text_tpot_s=text_tpot,
         audio_tpot_s=audio_tpot,
         completion_tokens=completion_tokens,
+        thinker_tps=thinker_tps,
+        talker_chunks_per_s=talker_chunks_per_s,
+        audio_max_gap_s=audio_max_gap,
+        audio_p99_gap_s=audio_p99_gap,
+        audio_duration_s=audio_duration_s if audio_duration_s > 0 else None,
+        rtf=rtf,
     )
 
 
@@ -254,8 +316,16 @@ async def run_level(
     text_tpot = col("text_tpot_s")
     audio_tpot = col("audio_tpot_s")
     e2e = col("e2e_s")
+    thinker_tps_vals = col("thinker_tps")
+    talker_cps_vals = col("talker_chunks_per_s")
+    max_gaps = col("audio_max_gap_s")
+    p99_gaps = col("audio_p99_gap_s")
+    rtfs = col("rtf")
 
     agg_tokens = sum(r.completion_tokens or 0 for r in ok)
+
+    def _median(v: list[float]) -> float | None:
+        return percentile(v, 0.5) if v else None
 
     return {
         "concurrency": concurrency,
@@ -276,7 +346,13 @@ async def run_level(
         "talker_tpot_p95_s": percentile(audio_tpot, 0.95),
         "e2e_p50_s": percentile(e2e, 0.5),
         "e2e_p95_s": percentile(e2e, 0.95),
+        "thinker_tps_p50": _median(thinker_tps_vals),
         "thinker_tps_agg": agg_tokens / wall if wall > 0 else None,
+        "talker_chunks_per_s_p50": _median(talker_cps_vals),
+        "audio_max_gap_p95_s": percentile(max_gaps, 0.95) if max_gaps else None,
+        "audio_p99_gap_p50_s": _median(p99_gaps),
+        "rtf_p50": _median(rtfs),
+        "rtf_p95": percentile(rtfs, 0.95) if rtfs else None,
         "errors": [r.error for r in err][:5],
         "per_request": [asdict(r) for r in results],
     }
@@ -318,24 +394,45 @@ async def warmup(client, url, payload, n):
         await one_request(client, url, payload)
 
 
+def _fmt_num(v: float | None, precision: int = 2) -> str:
+    return "-" if v is None else f"{v:.{precision}f}"
+
+
 def print_paper_table(model: str, rows: list[dict[str, Any]]) -> None:
-    print(f"\nPaper-style median/p95 per concurrency (ms) — model={model}")
-    header = f"{'metric':>16} | " + " | ".join(
+    print(f"\nPaper-style summary per concurrency — model={model}")
+    header = f"{'metric':>22} | " + " | ".join(
         f"{r['concurrency']:>4} conc" for r in rows
     )
     print(header)
     print("-" * len(header))
-    fields = [
-        ("Thinker TTFT", "thinker_ttft_p50_s", "thinker_ttft_p95_s"),
-        ("Talker TTFT", "talker_ttft_p50_s", "talker_ttft_p95_s"),
-        ("Talker TTFC", "talker_ttfc_p50_s", "talker_ttfc_p95_s"),
-        ("Thinker TPOT", "thinker_tpot_p50_s", "thinker_tpot_p95_s"),
-        ("Talker TPOT", "talker_tpot_p50_s", "talker_tpot_p95_s"),
-        ("Overall Latency", "e2e_p50_s", "e2e_p95_s"),
+
+    latency_fields = [
+        ("Thinker TTFT (ms)", "thinker_ttft_p50_s", "thinker_ttft_p95_s"),
+        ("Talker TTFT (ms)", "talker_ttft_p50_s", "talker_ttft_p95_s"),
+        ("Talker TTFC (ms)", "talker_ttfc_p50_s", "talker_ttfc_p95_s"),
+        ("Thinker TPOT (ms)", "thinker_tpot_p50_s", "thinker_tpot_p95_s"),
+        ("Talker TPOT (ms)", "talker_tpot_p50_s", "talker_tpot_p95_s"),
+        ("Overall Latency (ms)", "e2e_p50_s", "e2e_p95_s"),
     ]
-    for label, k50, k95 in fields:
+    for label, k50, k95 in latency_fields:
         cells = [fmt_pair(r[k50], r[k95]) for r in rows]
-        print(f"{label:>16} | " + " | ".join(f"{c:>9}" for c in cells))
+        print(f"{label:>22} | " + " | ".join(f"{c:>11}" for c in cells))
+
+    print("-" * len(header))
+    scalar_fields = [
+        ("Thinker TPS (tok/s)", "thinker_tps_p50", 1, False),
+        ("Talker chunks/s", "talker_chunks_per_s_p50", 1, False),
+        ("Audio p99 gap (ms)", "audio_p99_gap_p50_s", None, True),
+        ("Audio max gap p95 (ms)", "audio_max_gap_p95_s", None, True),
+        ("Generation RTF", "rtf_p50", 3, False),
+        ("req/s", "throughput_req_per_s", 2, False),
+    ]
+    for label, key, precision, is_ms in scalar_fields:
+        if is_ms:
+            cells = [fmt_ms(r.get(key)) for r in rows]
+        else:
+            cells = [_fmt_num(r.get(key), precision) for r in rows]
+        print(f"{label:>22} | " + " | ".join(f"{c:>11}" for c in cells))
 
 
 async def main_async(args: argparse.Namespace) -> None:
