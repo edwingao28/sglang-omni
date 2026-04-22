@@ -41,6 +41,15 @@ The most useful flags are:
 - `--model-name`: override the model name returned by `/v1/models`
 - `--log-level`: logging level for the server process
 
+Thinker-stage engine tuning (applies to the pipeline's SGLang thinker AR stage):
+
+- `--cpu-offload-gb N`: offload `N` GB of thinker weights to CPU (`0` disables)
+- `--tp-size N`: tensor parallel size for the thinker
+- `--disable-cuda-graph`: disable CUDA graph on the thinker
+- `--mem-fraction-static`, `--thinker-mem-fraction-static`, `--talker-mem-fraction-static`: pin SGLang KV/weights budget; omit to let SGLang auto-size
+
+For Ming-Omni with `--tp-size > 1`, `disable_custom_all_reduce=True` is injected automatically (the custom all-reduce kernel hangs the Ming thinker under TP).
+
 If you already have a pipeline config file, you can also pass `--config path/to/config.yaml`. In the current CLI, `--model-path` is still required even when `--config` is provided.
 
 ## Check That It Works

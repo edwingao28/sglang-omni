@@ -174,6 +174,11 @@ python examples/run_qwen3_omni_speech_server.py \
 the global value for that stage. Values must be greater than `0` and less than
 `1`.
 
+Additional thinker-stage engine tuning is available via `--cpu-offload-gb`,
+`--tp-size`, and `--disable-cuda-graph`. These all target the pipeline's
+thinker AR stage. Qwen3-Omni rejects `--tp-size > 1` (not yet supported);
+Ming-Omni auto-injects `disable_custom_all_reduce=True` under TP.
+
 ### Image and Text Input
 
 Send an image with a text question to get both text and audio responses. Set `"modalities": ["text", "audio"]` to enable audio output.

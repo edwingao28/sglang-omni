@@ -66,6 +66,36 @@ def serve(
             )
         ),
     ] = None,
+    cpu_offload_gb: Annotated[
+        int | None,
+        typer.Option(
+            help=(
+                "GB of model weights to offload to CPU for the pipeline's "
+                "thinker AR stage. Some pipelines do not expose a thinker AR "
+                "stage."
+            )
+        ),
+    ] = None,
+    tp_size: Annotated[
+        int | None,
+        typer.Option(
+            help=(
+                "Tensor parallel size for the pipeline's thinker AR stage. "
+                "Some pipelines do not expose a thinker AR stage or reject "
+                "tp_size > 1."
+            )
+        ),
+    ] = None,
+    disable_cuda_graph: Annotated[
+        bool,
+        typer.Option(
+            "--disable-cuda-graph",
+            help=(
+                "Disable CUDA graph on the pipeline's thinker AR stage. "
+                "Some pipelines do not expose a thinker AR stage."
+            ),
+        ),
+    ] = False,
     log_level: Annotated[
         Literal["debug", "info", "warning", "error", "critical"],
         typer.Option(help="Log level (default: info)."),
@@ -129,6 +159,44 @@ def serve(
                 stage_name=stage_name,
                 overrides={"mem_fraction_static": final_mem_fraction_static},
             )
+
+    thinker_stage = role_to_stage.get("thinker")
+    if cpu_offload_gb is not None:
+        if cpu_offload_gb < 0:
+            raise typer.BadParameter(
+                f"--cpu-offload-gb must be >= 0, got {cpu_offload_gb}"
+            )
+        if thinker_stage is None:
+            raise typer.BadParameter(
+                "--cpu-offload-gb is not supported by pipeline "
+                f"{type(merged_config).__name__}."
+            )
+    if tp_size is not None:
+        if tp_size < 1:
+            raise typer.BadParameter(f"--tp-size must be >= 1, got {tp_size}")
+        if thinker_stage is None:
+            raise typer.BadParameter(
+                "--tp-size is not supported by pipeline "
+                f"{type(merged_config).__name__}."
+            )
+    if disable_cuda_graph and thinker_stage is None:
+        raise typer.BadParameter(
+            "--disable-cuda-graph is not supported by pipeline "
+            f"{type(merged_config).__name__}."
+        )
+
+    thinker_overrides: dict[str, object] = {}
+    if cpu_offload_gb is not None:
+        thinker_overrides["cpu_offload_gb"] = cpu_offload_gb
+    if tp_size is not None:
+        thinker_overrides["tp_size"] = tp_size
+    if disable_cuda_graph:
+        thinker_overrides["disable_cuda_graph"] = True
+    if thinker_overrides:
+        merged_config.apply_server_args_overrides(
+            stage_name=thinker_stage,
+            overrides=thinker_overrides,
+        )
 
     # print merged configuration
     print("=" * 20, "Merged Configuration", "=" * 20)

@@ -23,6 +23,12 @@ from sglang_omni.models.ming_omni.pipeline.next_stage import (
 )
 
 
+def _inject_ming_tp_all_reduce_workaround(overrides: dict[str, Any]) -> None:
+    # Ming thinker hangs with the custom all-reduce kernel under TP>1.
+    if overrides.get("tp_size", 1) > 1:
+        overrides.setdefault("disable_custom_all_reduce", True)
+
+
 class MingOmniPipelineConfig(PipelineConfig):
     """6-stage text/vision pipeline for Ming-Omni.
 
@@ -105,6 +111,16 @@ class MingOmniPipelineConfig(PipelineConfig):
     @classmethod
     def mem_fraction_role_to_stage(cls) -> dict[str, str]:
         return {"thinker": THINKER_STAGE}
+
+    def apply_server_args_overrides(
+        self, *, stage_name: str, overrides: dict[str, Any]
+    ) -> None:
+        if stage_name == THINKER_STAGE:
+            _inject_ming_tp_all_reduce_workaround(overrides)
+        super().apply_server_args_overrides(
+            stage_name=stage_name,
+            overrides=overrides,
+        )
 
 
 def _validate_ming_speech_gpu_placement(
@@ -224,11 +240,13 @@ class MingOmniSpeechPipelineConfig(PipelineConfig):
     def apply_server_args_overrides(
         self, *, stage_name: str, overrides: dict[str, Any]
     ) -> None:
-        if stage_name == THINKER_STAGE and "tp_size" in overrides:
-            _validate_ming_speech_gpu_placement(
-                self.gpu_placement,
-                tp_size=overrides["tp_size"],
-            )
+        if stage_name == THINKER_STAGE:
+            if "tp_size" in overrides:
+                _validate_ming_speech_gpu_placement(
+                    self.gpu_placement,
+                    tp_size=overrides["tp_size"],
+                )
+            _inject_ming_tp_all_reduce_workaround(overrides)
         super().apply_server_args_overrides(
             stage_name=stage_name,
             overrides=overrides,
