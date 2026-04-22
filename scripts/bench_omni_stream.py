@@ -259,6 +259,15 @@ async def one_request(
         and t_last_text > t_first_text
     ):
         thinker_tps = completion_tokens / (t_last_text - t_first_text)
+    elif (
+        n_text >= 2
+        and t_last_text is not None
+        and t_first_text is not None
+        and t_last_text > t_first_text
+    ):
+        # Fallback for servers that don't emit usage.completion_tokens
+        # (e.g. Ming-Omni). Assumes one text delta == one token.
+        thinker_tps = n_text / (t_last_text - t_first_text)
 
     audio_max_gap = max(audio_gaps) if audio_gaps else None
     audio_p99_gap = percentile(audio_gaps, 0.99) if audio_gaps else None
