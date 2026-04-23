@@ -118,6 +118,10 @@ class QwenTalkerModelRunner(ModelRunner):
                 )
             )
             sched_req.data.feedback_embeds = feedback_row
+            # Match legacy timing: feedback emitted for this token should pair with
+            # the trailing-text row at the current generation step, which becomes
+            # generation_steps - 1 on the next decode iteration.
+            sched_req.data.feedback_step_index = int(sched_req.data.generation_steps)
 
     def sample_before_post_prefill(
         self, forward_batch: Any, schedule_batch: Any, requests: list
@@ -192,6 +196,7 @@ class QwenTalkerModelRunner(ModelRunner):
             feedback_buffer[row_idx].copy_(combined)
             feedback_mask[row_idx] = True
             sched_req.data.feedback_embeds = None
+            sched_req.data.feedback_step_index = None
 
     @staticmethod
     def _combine_feedback_embed(
@@ -206,9 +211,7 @@ class QwenTalkerModelRunner(ModelRunner):
             return None
 
         combined = feedback.to(device=device, dtype=dtype).reshape(-1)
-        projected = bool(data.input_embeds_are_projected)
-        step_offset = 2 if projected else 1
-        step_index = max(int(data.generation_steps) - step_offset, 0)
+        step_index = max(int(data.feedback_step_index), 0)
         trailing = data.trailing_text_hidden
         tts_pad_embed = data.tts_pad_embed
         thinker_chunks_done = bool(data.thinker_chunks_done)

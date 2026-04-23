@@ -4,16 +4,11 @@ SGLang-native Talker model for Qwen3-Omni compatiable with hf formatting.
 
 from __future__ import annotations
 
-import os
 from typing import Iterable, Optional, Tuple
 
 import torch
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
-from sglang.srt.layers.moe.fused_moe_native import (
-    fused_moe_forward_native,
-    moe_forward_native,
-)
-from sglang.srt.layers.moe.token_dispatcher import StandardDispatchOutput
+from sglang.srt.layers.moe.fused_moe_native import moe_forward_native
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.utils import add_prefix
@@ -38,14 +33,11 @@ from sglang_omni_v1.vendor.sglang.layers import (
     RowParallelLinear,
     SiluAndMul,
     should_use_flashinfer_cutlass_moe_fp4_allgather,
+    top_k_top_p_sampling_from_probs,
 )
 from sglang_omni_v1.vendor.sglang.models import apply_qk_norm
 from sglang_omni_v1.vendor.sglang.server_args import get_global_server_args
 from sglang_omni_v1.vendor.sglang.utils import make_layers
-
-
-def _talker_moe_backend() -> str:
-    return os.environ.get("QWEN_TALKER_MOE_BACKEND", "moe_native").strip()
 
 
 def _bind_default_weight_loaders(module: nn.Module) -> None:
@@ -211,37 +203,6 @@ class Qwen3OmniMoeTalkerSparseMoeBlock(Qwen3OmniMoeThinkerTextSparseMoeBlock):
             prefix=add_prefix("shared_expert_gate", prefix),
         )
 
-    def _routed_expert_forward(
-        self,
-        hidden_states: torch.Tensor,
-        topk_output,
-    ) -> torch.Tensor:
-        backend = _talker_moe_backend()
-        if backend == "moe_native":
-            return moe_forward_native(
-                self.experts,
-                hidden_states,
-                topk_output,
-                self.experts.moe_runner_config,
-            )
-        if backend == "fused_native":
-            dispatch_output = StandardDispatchOutput(
-                hidden_states=hidden_states,
-                hidden_states_scale=None,
-                topk_output=topk_output,
-            )
-            return fused_moe_forward_native(
-                self.experts,
-                dispatch_output,
-            ).hidden_states
-        if backend == "experts":
-            # This is the standard SGLang MoE surface the user is concerned about.
-            return self.experts(hidden_states, topk_output)
-        raise ValueError(
-            "Unsupported QWEN_TALKER_MOE_BACKEND="
-            f"{backend!r}; expected one of moe_native, fused_native, experts"
-        )
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -265,7 +226,12 @@ class Qwen3OmniMoeTalkerSparseMoeBlock(Qwen3OmniMoeThinkerTextSparseMoeBlock):
         # --- Routed experts (no all-reduce yet) ---
         router_logits, _ = self.gate(linear_hidden_states)
         topk_output = self.topk(linear_hidden_states, router_logits)
-        routed_output = self._routed_expert_forward(linear_hidden_states, topk_output)
+        routed_output = moe_forward_native(
+            self.experts,
+            linear_hidden_states,
+            topk_output,
+            self.experts.moe_runner_config,
+        )
 
         # --- Combine then unified all-reduce ---
         final_hidden_states = routed_output + shared_output
@@ -908,6 +874,14 @@ class Qwen3OmniTalker(nn.Module):
     def get_input_embeddings(self):
         return self.model.get_input_embeddings()
 
+    @staticmethod
+    def _sample_code_predictor_token(logits: torch.Tensor) -> torch.Tensor:
+        probs = torch.softmax(logits[:, -1, :], dim=-1)
+        next_code = top_k_top_p_sampling_from_probs(probs, top_k=50, top_p=0.8)
+        if next_code.ndim == 1:
+            next_code = next_code.unsqueeze(-1)
+        return next_code
+
     def prepare_decode_buffers(self, requests: list) -> None:
         batch_size = len(requests)
         self._repetition_mask[:batch_size] = False
@@ -1176,77 +1150,6 @@ class Qwen3OmniTalker(nn.Module):
         logits, _ = self.codec_head(hidden_states)
         return logits
 
-    def _code_predictor_forward_full_prefix(
-        self,
-        layer0_codes: torch.Tensor,
-        talker_hidden: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Baseline full-prefix predictor used as the local correctness oracle."""
-        if layer0_codes.ndim == 1:
-            layer0_codes = layer0_codes.unsqueeze(1)
-        if talker_hidden.ndim == 2:
-            talker_hidden = talker_hidden.unsqueeze(1)
-
-        batch_size, seq_len = layer0_codes.shape
-        if talker_hidden.shape[:2] != (batch_size, seq_len):
-            raise ValueError(
-                "talker_hidden shape must align with layer0_codes: "
-                f"{tuple(talker_hidden.shape)} vs {tuple(layer0_codes.shape)}"
-            )
-
-        predictor_input = self._predictor_input_buffer[:batch_size]
-        predictor_input.zero_()
-        all_codes_per_pos = []
-        all_summed_per_pos = []
-        num_groups = self.config.num_code_groups
-
-        for pos in range(seq_len):
-            layer0_code = layer0_codes[:, pos : pos + 1]
-            layer0_embed = self.get_input_embeddings()(layer0_code)
-            predictor_input[:, 0, :] = talker_hidden[:, pos, :].to(
-                dtype=predictor_input.dtype
-            )
-            predictor_input[:, 1, :] = layer0_embed[:, 0, :].to(
-                dtype=predictor_input.dtype
-            )
-
-            pos_codes: list[torch.Tensor] = [layer0_code]
-            current_len = 2
-            for layer_idx in range(num_groups - 1):
-                predictor_hidden = self.code_predictor(
-                    inputs_embeds=predictor_input[:, :current_len, :],
-                    positions=self._predictor_positions[:current_len],
-                    forward_batch=None,
-                )
-                logits, _ = self.code_predictor.lm_head[layer_idx](
-                    predictor_hidden[:, -1:, :]
-                )
-                next_code = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-                if next_code.ndim == 1:
-                    next_code = next_code.unsqueeze(-1)
-                pos_codes.append(next_code)
-
-                new_embed = self.code_predictor.model.codec_embedding[layer_idx](
-                    next_code
-                )
-                predictor_input[:, current_len, :] = new_embed[:, 0, :].to(
-                    dtype=predictor_input.dtype
-                )
-                current_len += 1
-
-            codes_for_pos = torch.stack(pos_codes, dim=1)
-            all_codes_per_pos.append(codes_for_pos)
-            all_summed_per_pos.append(
-                predictor_input[:, 1 : num_groups + 1, :].sum(dim=1, keepdim=True)
-            )
-
-        # [batch, num_code_groups, seq_len]
-        result_codes = torch.cat(all_codes_per_pos, dim=2)
-        # [batch, seq_len, hidden]
-        summed_embeddings = torch.cat(all_summed_per_pos, dim=1)
-
-        return result_codes, summed_embeddings
-
     def _code_predictor_forward_incremental(
         self,
         layer0_codes: torch.Tensor,
@@ -1317,9 +1220,7 @@ class Qwen3OmniTalker(nn.Module):
 
             for layer_idx in range(num_groups - 1):
                 logits, _ = self.code_predictor.lm_head[layer_idx](last_hidden)
-                next_code = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-                if next_code.ndim == 1:
-                    next_code = next_code.unsqueeze(-1)
+                next_code = self._sample_code_predictor_token(logits)
                 pos_codes[:, layer_idx + 1].copy_(next_code[:, 0])
 
                 new_embed = self.code_predictor.model.codec_embedding[layer_idx](

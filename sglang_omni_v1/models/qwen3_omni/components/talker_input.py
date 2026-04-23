@@ -88,7 +88,14 @@ def build_assistant_part(
     projected = text_projection(assistant_embed)  # [N, hidden]
 
     # Text side: [first 3] + [4x pad] + [bos] + [4th token]
-    fourth_token = projected[3].unsqueeze(0)
+    # The initial talker request can be built before the thinker has emitted
+    # four assistant tokens, so keep the slot stable and fill it later through
+    # trailing_text_hidden updates.
+    fourth_token = (
+        projected[3:4]
+        if projected.shape[0] > 3
+        else torch.zeros((1, projected.shape[-1]), device=device, dtype=dtype)
+    )
     text_hidden = torch.cat(
         [
             projected[:3],
