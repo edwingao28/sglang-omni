@@ -38,7 +38,7 @@ jobs:
         shell: bash
         run: |
           source omni-s2pro/bin/activate
-          pytest tests/docs/s2pro/test_docs_tts_s2pro.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/s2pro-docs-legacy"
+          pytest tests/docs/s2pro/test_docs_tts_s2pro.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-s2pro-docs-legacy"
         env:
           HF_ENDPOINT: https://hf-mirror.com
 
@@ -52,7 +52,7 @@ jobs:
         shell: bash
         run: |
           source omni-s2pro/bin/activate
-          pytest tests/docs/s2pro/test_docs_tts_s2pro.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/s2pro-docs-v1"
+          pytest tests/docs/s2pro/test_docs_tts_s2pro.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-s2pro-docs-v1"
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_OMNI_SERVER_VERSION: v1
@@ -94,7 +94,7 @@ jobs:
         shell: bash
         run: |
           source omni-s2pro/bin/activate
-          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-1-nonstream --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/s2pro-stage1-legacy"
+          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-1-nonstream --basetemp "${GITHUB_WORKSPACE}/.pytest-s2pro-stage1-legacy"
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_SEEDTTS50_DIR: /github/home/seedtts-50
@@ -117,7 +117,7 @@ jobs:
         shell: bash
         run: |
           source omni-s2pro/bin/activate
-          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-1-nonstream --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/s2pro-stage1-v1"
+          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-1-nonstream --basetemp "${GITHUB_WORKSPACE}/.pytest-s2pro-stage1-v1"
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_SEEDTTS50_DIR: /github/home/seedtts-50
@@ -157,7 +157,7 @@ jobs:
         shell: bash
         run: |
           source omni-s2pro/bin/activate
-          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-2-stream --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/s2pro-stage2-legacy"
+          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-2-stream --basetemp "${GITHUB_WORKSPACE}/.pytest-s2pro-stage2-legacy"
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_SEEDTTS50_DIR: /github/home/seedtts-50
@@ -180,7 +180,7 @@ jobs:
         shell: bash
         run: |
           source omni-s2pro/bin/activate
-          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-2-stream --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/s2pro-stage2-v1"
+          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-2-stream --basetemp "${GITHUB_WORKSPACE}/.pytest-s2pro-stage2-v1"
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_SEEDTTS50_DIR: /github/home/seedtts-50
@@ -244,7 +244,7 @@ jobs:
         shell: bash
         run: |
           source omni-s2pro/bin/activate
-          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-3-consistency --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/s2pro-stage3-legacy"
+          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-3-consistency --basetemp "${GITHUB_WORKSPACE}/.pytest-s2pro-stage3-legacy"
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_SEEDTTS50_DIR: /github/home/seedtts-50
@@ -265,7 +265,7 @@ jobs:
         shell: bash
         run: |
           source omni-s2pro/bin/activate
-          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-3-consistency --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/s2pro-stage3-v1"
+          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-3-consistency --basetemp "${GITHUB_WORKSPACE}/.pytest-s2pro-stage3-v1"
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_SEEDTTS50_DIR: /github/home/seedtts-50

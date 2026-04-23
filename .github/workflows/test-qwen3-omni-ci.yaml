@@ -40,7 +40,7 @@ jobs:
         shell: bash
         run: |
           source omni-qwen3/bin/activate
-          pytest tests/docs/qwen3_omni/test_docs_qwen3_omni.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/qwen3-docs-legacy"
+          pytest tests/docs/qwen3_omni/test_docs_qwen3_omni.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-qwen3-docs-legacy"
         env:
           HF_ENDPOINT: https://hf-mirror.com
 
@@ -54,7 +54,7 @@ jobs:
         shell: bash
         run: |
           source omni-qwen3/bin/activate
-          pytest tests/docs/qwen3_omni/test_docs_qwen3_omni.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/qwen3-docs-v1"
+          pytest tests/docs/qwen3_omni/test_docs_qwen3_omni.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-qwen3-docs-v1"
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_OMNI_SERVER_VERSION: v1
@@ -96,7 +96,7 @@ jobs:
         shell: bash
         run: |
           source omni-qwen3/bin/activate
-          pytest tests/test_model/test_qwen3_omni_thinker_length.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/qwen3-thinker-legacy"
+          pytest tests/test_model/test_qwen3_omni_thinker_length.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-qwen3-thinker-legacy"
         env:
           HF_ENDPOINT: https://hf-mirror.com
 
@@ -110,7 +110,7 @@ jobs:
         shell: bash
         run: |
           source omni-qwen3/bin/activate
-          pytest tests/test_model/test_qwen3_omni_thinker_length.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/qwen3-thinker-v1"
+          pytest tests/test_model/test_qwen3_omni_thinker_length.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-qwen3-thinker-v1"
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_OMNI_SERVER_VERSION: v1
@@ -141,7 +141,7 @@ jobs:
         shell: bash
         run: |
           source omni-qwen3/bin/activate
-          pytest tests/test_model/test_qwen3_omni_tts_ci.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/qwen3-tts-legacy"
+          pytest tests/test_model/test_qwen3_omni_tts_ci.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-qwen3-tts-legacy"
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_SEEDTTS_MINI_DIR: /github/home/seedtts-mini
@@ -151,18 +151,18 @@ jobs:
         uses: ./.github/actions/omni-post-stage
         with:
           stage-label: TTS (speed + WER, legacy)
-          artifact-search-root: ${{ github.workspace }}/.pytest-tmp/qwen3-tts-legacy
+          artifact-search-root: ${{ github.workspace }}/.pytest-qwen3-tts-legacy
           artifact-path-globs: |
             */speed_results.json
             */wer_results.json
           artifact-upload-name: qwen3-omni-tts-results
-          artifact-upload-path: ${{ github.workspace }}/.pytest-tmp/qwen3-tts-legacy/**/*_results.json
+          artifact-upload-path: ${{ github.workspace }}/.pytest-qwen3-tts-legacy/**/*_results.json
 
       - name: Run TTS CI (v1)
         shell: bash
         run: |
           source omni-qwen3/bin/activate
-          pytest tests/test_model/test_qwen3_omni_tts_ci.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/qwen3-tts-v1"
+          pytest tests/test_model/test_qwen3_omni_tts_ci.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-qwen3-tts-v1"
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_SEEDTTS_MINI_DIR: /github/home/seedtts-mini
@@ -173,12 +173,12 @@ jobs:
         uses: ./.github/actions/omni-post-stage
         with:
           stage-label: TTS (speed + WER, v1)
-          artifact-search-root: ${{ github.workspace }}/.pytest-tmp/qwen3-tts-v1
+          artifact-search-root: ${{ github.workspace }}/.pytest-qwen3-tts-v1
           artifact-path-globs: |
             */speed_results.json
             */wer_results.json
           artifact-upload-name: qwen3-omni-tts-results-v1
-          artifact-upload-path: ${{ github.workspace }}/.pytest-tmp/qwen3-tts-v1/**/*_results.json
+          artifact-upload-path: ${{ github.workspace }}/.pytest-qwen3-tts-v1/**/*_results.json
 
   stage-3-mmmu:
     name: stage 3 - MMMU accuracy + speed
@@ -200,7 +200,7 @@ jobs:
         shell: bash
         run: |
           source omni-qwen3/bin/activate
-          pytest tests/test_model/test_qwen3_omni_mmmu_ci.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/qwen3-mmmu-legacy"
+          pytest tests/test_model/test_qwen3_omni_mmmu_ci.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-qwen3-mmmu-legacy"
         env:
           HF_ENDPOINT: https://hf-mirror.com
 
@@ -209,17 +209,17 @@ jobs:
         uses: ./.github/actions/omni-post-stage
         with:
           stage-label: MMMU (accuracy + speed, legacy)
-          artifact-search-root: ${{ github.workspace }}/.pytest-tmp/qwen3-mmmu-legacy
+          artifact-search-root: ${{ github.workspace }}/.pytest-qwen3-mmmu-legacy
           artifact-path-globs: |
             */mmmu/mmmu_results.json
           artifact-upload-name: qwen3-omni-mmmu-results
-          artifact-upload-path: ${{ github.workspace }}/.pytest-tmp/qwen3-mmmu-legacy/**/mmmu_results.json
+          artifact-upload-path: ${{ github.workspace }}/.pytest-qwen3-mmmu-legacy/**/mmmu_results.json
 
       - name: Run MMMU CI (v1)
         shell: bash
         run: |
           source omni-qwen3/bin/activate
-          pytest tests/test_model/test_qwen3_omni_mmmu_ci.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/qwen3-mmmu-v1"
+          pytest tests/test_model/test_qwen3_omni_mmmu_ci.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-qwen3-mmmu-v1"
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_OMNI_SERVER_VERSION: v1
@@ -229,11 +229,11 @@ jobs:
         uses: ./.github/actions/omni-post-stage
         with:
           stage-label: MMMU (accuracy + speed, v1)
-          artifact-search-root: ${{ github.workspace }}/.pytest-tmp/qwen3-mmmu-v1
+          artifact-search-root: ${{ github.workspace }}/.pytest-qwen3-mmmu-v1
           artifact-path-globs: |
             */mmmu/mmmu_results.json
           artifact-upload-name: qwen3-omni-mmmu-results-v1
-          artifact-upload-path: ${{ github.workspace }}/.pytest-tmp/qwen3-mmmu-v1/**/mmmu_results.json
+          artifact-upload-path: ${{ github.workspace }}/.pytest-qwen3-mmmu-v1/**/mmmu_results.json
 
   stage-4-mmmu-tts-consistency:
     name: stage 4 - MMMU TTS consistency
@@ -255,7 +255,7 @@ jobs:
         shell: bash
         run: |
           source omni-qwen3/bin/activate
-          pytest tests/test_model/test_qwen3_omni_mmmu_tts_consistency_ci.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/qwen3-mmmu-tts-legacy"
+          pytest tests/test_model/test_qwen3_omni_mmmu_tts_consistency_ci.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-qwen3-mmmu-tts-legacy"
         env:
           HF_ENDPOINT: https://hf-mirror.com
 
@@ -264,17 +264,17 @@ jobs:
         uses: ./.github/actions/omni-post-stage
         with:
           stage-label: MMMU TTS Consistency (WER + speed, legacy)
-          artifact-search-root: ${{ github.workspace }}/.pytest-tmp/qwen3-mmmu-tts-legacy
+          artifact-search-root: ${{ github.workspace }}/.pytest-qwen3-mmmu-tts-legacy
           artifact-path-globs: |
             */mmmu_audio/mmmu_results.json
           artifact-upload-name: qwen3-omni-mmmu-tts-consistency-results
-          artifact-upload-path: ${{ github.workspace }}/.pytest-tmp/qwen3-mmmu-tts-legacy/**/mmmu_audio/mmmu_results.json
+          artifact-upload-path: ${{ github.workspace }}/.pytest-qwen3-mmmu-tts-legacy/**/mmmu_audio/mmmu_results.json
 
       - name: Run MMMU TTS Consistency CI (v1)
         shell: bash
         run: |
           source omni-qwen3/bin/activate
-          pytest tests/test_model/test_qwen3_omni_mmmu_tts_consistency_ci.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/qwen3-mmmu-tts-v1"
+          pytest tests/test_model/test_qwen3_omni_mmmu_tts_consistency_ci.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-qwen3-mmmu-tts-v1"
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_OMNI_SERVER_VERSION: v1
@@ -284,11 +284,11 @@ jobs:
         uses: ./.github/actions/omni-post-stage
         with:
           stage-label: MMMU TTS Consistency (WER + speed, v1)
-          artifact-search-root: ${{ github.workspace }}/.pytest-tmp/qwen3-mmmu-tts-v1
+          artifact-search-root: ${{ github.workspace }}/.pytest-qwen3-mmmu-tts-v1
           artifact-path-globs: |
             */mmmu_audio/mmmu_results.json
           artifact-upload-name: qwen3-omni-mmmu-tts-consistency-results-v1
-          artifact-upload-path: ${{ github.workspace }}/.pytest-tmp/qwen3-mmmu-tts-v1/**/mmmu_audio/mmmu_results.json
+          artifact-upload-path: ${{ github.workspace }}/.pytest-qwen3-mmmu-tts-v1/**/mmmu_audio/mmmu_results.json
 
   stage-5-mmsu:
     name: stage 5 - MMSU accuracy + speed
@@ -310,7 +310,7 @@ jobs:
         shell: bash
         run: |
           source omni-qwen3/bin/activate
-          pytest tests/test_model/test_qwen3_omni_mmsu_ci.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/qwen3-mmsu-legacy"
+          pytest tests/test_model/test_qwen3_omni_mmsu_ci.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-qwen3-mmsu-legacy"
         env:
           HF_ENDPOINT: https://hf-mirror.com
 
@@ -319,18 +319,18 @@ jobs:
         uses: ./.github/actions/omni-post-stage
         with:
           stage-label: MMSU (accuracy + speed, summary only, legacy)
-          artifact-search-root: ${{ github.workspace }}/.pytest-tmp/qwen3-mmsu-legacy
+          artifact-search-root: ${{ github.workspace }}/.pytest-qwen3-mmsu-legacy
           artifact-path-globs: |
             */mmsu/mmsu_results.json
           artifact-upload-name: qwen3-omni-mmsu-results
-          artifact-upload-path: ${{ github.workspace }}/.pytest-tmp/qwen3-mmsu-legacy/**/mmsu/mmsu_results.json
+          artifact-upload-path: ${{ github.workspace }}/.pytest-qwen3-mmsu-legacy/**/mmsu/mmsu_results.json
           summary-only: "true"
 
       - name: Run MMSU CI (v1)
         shell: bash
         run: |
           source omni-qwen3/bin/activate
-          pytest tests/test_model/test_qwen3_omni_mmsu_ci.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/qwen3-mmsu-v1"
+          pytest tests/test_model/test_qwen3_omni_mmsu_ci.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-qwen3-mmsu-v1"
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_OMNI_SERVER_VERSION: v1
@@ -340,11 +340,11 @@ jobs:
         uses: ./.github/actions/omni-post-stage
         with:
           stage-label: MMSU (accuracy + speed, summary only, v1)
-          artifact-search-root: ${{ github.workspace }}/.pytest-tmp/qwen3-mmsu-v1
+          artifact-search-root: ${{ github.workspace }}/.pytest-qwen3-mmsu-v1
           artifact-path-globs: |
             */mmsu/mmsu_results.json
           artifact-upload-name: qwen3-omni-mmsu-results-v1
-          artifact-upload-path: ${{ github.workspace }}/.pytest-tmp/qwen3-mmsu-v1/**/mmsu/mmsu_results.json
+          artifact-upload-path: ${{ github.workspace }}/.pytest-qwen3-mmsu-v1/**/mmsu/mmsu_results.json
           summary-only: "true"
 
   stage-6-mmsu-tts-consistency:
@@ -367,7 +367,7 @@ jobs:
         shell: bash
         run: |
           source omni-qwen3/bin/activate
-          pytest tests/test_model/test_qwen3_omni_mmsu_tts_consistency_ci.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/qwen3-mmsu-tts-legacy"
+          pytest tests/test_model/test_qwen3_omni_mmsu_tts_consistency_ci.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-qwen3-mmsu-tts-legacy"
         env:
           HF_ENDPOINT: https://hf-mirror.com
 
@@ -376,17 +376,17 @@ jobs:
         uses: ./.github/actions/omni-post-stage
         with:
           stage-label: MMSU TTS Consistency (WER + speed, legacy)
-          artifact-search-root: ${{ github.workspace }}/.pytest-tmp/qwen3-mmsu-tts-legacy
+          artifact-search-root: ${{ github.workspace }}/.pytest-qwen3-mmsu-tts-legacy
           artifact-path-globs: |
             */mmsu_audio/mmsu_results.json
           artifact-upload-name: qwen3-omni-mmsu-tts-consistency-results
-          artifact-upload-path: ${{ github.workspace }}/.pytest-tmp/qwen3-mmsu-tts-legacy/**/mmsu_audio/mmsu_results.json
+          artifact-upload-path: ${{ github.workspace }}/.pytest-qwen3-mmsu-tts-legacy/**/mmsu_audio/mmsu_results.json
 
       - name: Run MMSU TTS Consistency CI (v1)
         shell: bash
         run: |
           source omni-qwen3/bin/activate
-          pytest tests/test_model/test_qwen3_omni_mmsu_tts_consistency_ci.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/qwen3-mmsu-tts-v1"
+          pytest tests/test_model/test_qwen3_omni_mmsu_tts_consistency_ci.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-qwen3-mmsu-tts-v1"
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_OMNI_SERVER_VERSION: v1
@@ -396,8 +396,8 @@ jobs:
         uses: ./.github/actions/omni-post-stage
         with:
           stage-label: MMSU TTS Consistency (WER + speed, v1)
-          artifact-search-root: ${{ github.workspace }}/.pytest-tmp/qwen3-mmsu-tts-v1
+          artifact-search-root: ${{ github.workspace }}/.pytest-qwen3-mmsu-tts-v1
           artifact-path-globs: |
             */mmsu_audio/mmsu_results.json
           artifact-upload-name: qwen3-omni-mmsu-tts-consistency-results-v1
-          artifact-upload-path: ${{ github.workspace }}/.pytest-tmp/qwen3-mmsu-tts-v1/**/mmsu_audio/mmsu_results.json
+          artifact-upload-path: ${{ github.workspace }}/.pytest-qwen3-mmsu-tts-v1/**/mmsu_audio/mmsu_results.json
