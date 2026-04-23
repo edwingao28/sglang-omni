@@ -21,7 +21,7 @@ jobs:
   docs:
     name: docs
     runs-on: [self-hosted]
-    timeout-minutes: 10
+    timeout-minutes: 20
     container:
       image: frankleeeee/sglang-omni:dev
       options: --gpus all --rm -v /dev/shm:/dev/shm
@@ -34,20 +34,34 @@ jobs:
           venv-name: omni-s2pro
           install-deps: "true"
 
-      - name: Run docs tests
+      - name: Run docs tests (legacy)
         shell: bash
         run: |
           source omni-s2pro/bin/activate
-          export PYTHONPATH=$PWD
-          pytest tests/docs/s2pro/test_docs_tts_s2pro.py -v -s -x
+          pytest tests/docs/s2pro/test_docs_tts_s2pro.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/s2pro-docs-legacy"
         env:
           HF_ENDPOINT: https://hf-mirror.com
 
-      - name: Post-stage cleanup
+      - name: Post-stage cleanup (legacy)
         if: always()
         uses: ./.github/actions/omni-post-stage
         with:
-          stage-label: S2-Pro docs
+          stage-label: S2-Pro docs (legacy)
+
+      - name: Run docs tests (v1)
+        shell: bash
+        run: |
+          source omni-s2pro/bin/activate
+          pytest tests/docs/s2pro/test_docs_tts_s2pro.py -v -s -x --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/s2pro-docs-v1"
+        env:
+          HF_ENDPOINT: https://hf-mirror.com
+          SGLANG_OMNI_SERVER_VERSION: v1
+
+      - name: Post-stage cleanup (v1)
+        if: always()
+        uses: ./.github/actions/omni-post-stage
+        with:
+          stage-label: S2-Pro docs (v1)
 
       - name: Save cache
         if: always()
@@ -64,7 +78,7 @@ jobs:
     name: stage 1 - non-streaming
     needs: docs
     runs-on: [self-hosted]
-    timeout-minutes: 5
+    timeout-minutes: 10
     container:
       image: frankleeeee/sglang-omni:dev
       options: --gpus all --rm -v /dev/shm:/dev/shm
@@ -76,35 +90,58 @@ jobs:
         with:
           venv-name: omni-s2pro
 
-      - name: Run benchmark stage
+      - name: Run benchmark stage (legacy)
         shell: bash
         run: |
           source omni-s2pro/bin/activate
-          export PYTHONPATH=$PWD
-          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-1-nonstream
+          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-1-nonstream --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/s2pro-stage1-legacy"
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_SEEDTTS50_DIR: /github/home/seedtts-50
-          S2PRO_STAGE_OUTPUT_ROOT: ${{ github.workspace }}/stage-results/nonstream
+          S2PRO_STAGE_OUTPUT_ROOT: ${{ github.workspace }}/stage-results/legacy/nonstream
 
-      - name: Post-stage cleanup
+      - name: Post-stage cleanup (legacy)
         if: always()
         uses: ./.github/actions/omni-post-stage
         with:
-          stage-label: S2-Pro stage 1 (non-streaming)
-          artifact-search-root: stage-results/nonstream
+          stage-label: S2-Pro stage 1 (non-streaming, legacy)
+          artifact-search-root: stage-results/legacy/nonstream
           artifact-path-globs: |
             */speed_results.json
             */wer_results.json
           artifact-upload-name: s2pro-stage-1-results
-          artifact-upload-path: stage-results/nonstream
+          artifact-upload-path: stage-results/legacy/nonstream
+          artifact-if-no-files-found: error
+
+      - name: Run benchmark stage (v1)
+        shell: bash
+        run: |
+          source omni-s2pro/bin/activate
+          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-1-nonstream --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/s2pro-stage1-v1"
+        env:
+          HF_ENDPOINT: https://hf-mirror.com
+          SGLANG_SEEDTTS50_DIR: /github/home/seedtts-50
+          S2PRO_STAGE_OUTPUT_ROOT: ${{ github.workspace }}/stage-results/v1/nonstream
+          SGLANG_OMNI_SERVER_VERSION: v1
+
+      - name: Post-stage cleanup (v1)
+        if: always()
+        uses: ./.github/actions/omni-post-stage
+        with:
+          stage-label: S2-Pro stage 1 (non-streaming, v1)
+          artifact-search-root: stage-results/v1/nonstream
+          artifact-path-globs: |
+            */speed_results.json
+            */wer_results.json
+          artifact-upload-name: s2pro-stage-1-results-v1
+          artifact-upload-path: stage-results/v1/nonstream
           artifact-if-no-files-found: error
 
   stage-2-streaming:
     name: stage 2 - streaming
     needs: docs
     runs-on: [self-hosted]
-    timeout-minutes: 5
+    timeout-minutes: 10
     container:
       image: frankleeeee/sglang-omni:dev
       options: --gpus all --rm -v /dev/shm:/dev/shm
@@ -116,35 +153,58 @@ jobs:
         with:
           venv-name: omni-s2pro
 
-      - name: Run benchmark stage
+      - name: Run benchmark stage (legacy)
         shell: bash
         run: |
           source omni-s2pro/bin/activate
-          export PYTHONPATH=$PWD
-          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-2-stream
+          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-2-stream --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/s2pro-stage2-legacy"
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_SEEDTTS50_DIR: /github/home/seedtts-50
-          S2PRO_STAGE_OUTPUT_ROOT: ${{ github.workspace }}/stage-results/stream
+          S2PRO_STAGE_OUTPUT_ROOT: ${{ github.workspace }}/stage-results/legacy/stream
 
-      - name: Post-stage cleanup
+      - name: Post-stage cleanup (legacy)
         if: always()
         uses: ./.github/actions/omni-post-stage
         with:
-          stage-label: S2-Pro stage 2 (streaming)
-          artifact-search-root: stage-results/stream
+          stage-label: S2-Pro stage 2 (streaming, legacy)
+          artifact-search-root: stage-results/legacy/stream
           artifact-path-globs: |
             */speed_results.json
             */wer_results.json
           artifact-upload-name: s2pro-stage-2-results
-          artifact-upload-path: stage-results/stream
+          artifact-upload-path: stage-results/legacy/stream
+          artifact-if-no-files-found: error
+
+      - name: Run benchmark stage (v1)
+        shell: bash
+        run: |
+          source omni-s2pro/bin/activate
+          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-2-stream --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/s2pro-stage2-v1"
+        env:
+          HF_ENDPOINT: https://hf-mirror.com
+          SGLANG_SEEDTTS50_DIR: /github/home/seedtts-50
+          S2PRO_STAGE_OUTPUT_ROOT: ${{ github.workspace }}/stage-results/v1/stream
+          SGLANG_OMNI_SERVER_VERSION: v1
+
+      - name: Post-stage cleanup (v1)
+        if: always()
+        uses: ./.github/actions/omni-post-stage
+        with:
+          stage-label: S2-Pro stage 2 (streaming, v1)
+          artifact-search-root: stage-results/v1/stream
+          artifact-path-globs: |
+            */speed_results.json
+            */wer_results.json
+          artifact-upload-name: s2pro-stage-2-results-v1
+          artifact-upload-path: stage-results/v1/stream
           artifact-if-no-files-found: error
 
   stage-3-consistency:
     name: stage 3 - consistency
     needs: [stage-1-non-streaming, stage-2-streaming]
     runs-on: [self-hosted]
-    timeout-minutes: 5
+    timeout-minutes: 10
     container:
       image: frankleeeee/sglang-omni:dev
       options: --gpus all --rm -v /dev/shm:/dev/shm
@@ -156,36 +216,69 @@ jobs:
         with:
           venv-name: omni-s2pro
 
-      - name: Download stage 1 artifact
+      - name: Download stage 1 artifact (legacy)
         uses: actions/download-artifact@v4
         with:
           name: s2pro-stage-1-results
-          path: stage-artifacts/nonstream
+          path: stage-artifacts/legacy/nonstream
 
-      - name: Download stage 2 artifact
+      - name: Download stage 2 artifact (legacy)
         uses: actions/download-artifact@v4
         with:
           name: s2pro-stage-2-results
-          path: stage-artifacts/stream
+          path: stage-artifacts/legacy/stream
 
-      - name: Run benchmark stage
+      - name: Download stage 1 artifact (v1)
+        uses: actions/download-artifact@v4
+        with:
+          name: s2pro-stage-1-results-v1
+          path: stage-artifacts/v1/nonstream
+
+      - name: Download stage 2 artifact (v1)
+        uses: actions/download-artifact@v4
+        with:
+          name: s2pro-stage-2-results-v1
+          path: stage-artifacts/v1/stream
+
+      - name: Run benchmark stage (legacy)
         shell: bash
         run: |
           source omni-s2pro/bin/activate
-          export PYTHONPATH=$PWD
-          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-3-consistency
+          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-3-consistency --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/s2pro-stage3-legacy"
         env:
           HF_ENDPOINT: https://hf-mirror.com
           SGLANG_SEEDTTS50_DIR: /github/home/seedtts-50
-          S2PRO_STAGE1_SPEED_RESULTS_DIR: ${{ github.workspace }}/stage-artifacts/nonstream
-          S2PRO_STAGE2_SPEED_RESULTS_DIR: ${{ github.workspace }}/stage-artifacts/stream
+          S2PRO_STAGE1_SPEED_RESULTS_DIR: ${{ github.workspace }}/stage-artifacts/legacy/nonstream
+          S2PRO_STAGE2_SPEED_RESULTS_DIR: ${{ github.workspace }}/stage-artifacts/legacy/stream
 
-      - name: Post-stage cleanup
+      - name: Post-stage cleanup (legacy)
         if: always()
         uses: ./.github/actions/omni-post-stage
         with:
-          stage-label: S2-Pro stage 3 (consistency inputs)
-          artifact-search-root: stage-artifacts
+          stage-label: S2-Pro stage 3 (consistency inputs, legacy)
+          artifact-search-root: stage-artifacts/legacy
+          artifact-path-globs: |
+            */speed_results.json
+            */wer_results.json
+
+      - name: Run benchmark stage (v1)
+        shell: bash
+        run: |
+          source omni-s2pro/bin/activate
+          pytest tests/test_model/test_s2pro_tts_ci.py -v -s -x --concurrency 8 --s2pro-stage s2pro-stage-3-consistency --basetemp "${GITHUB_WORKSPACE}/.pytest-tmp/s2pro-stage3-v1"
+        env:
+          HF_ENDPOINT: https://hf-mirror.com
+          SGLANG_SEEDTTS50_DIR: /github/home/seedtts-50
+          S2PRO_STAGE1_SPEED_RESULTS_DIR: ${{ github.workspace }}/stage-artifacts/v1/nonstream
+          S2PRO_STAGE2_SPEED_RESULTS_DIR: ${{ github.workspace }}/stage-artifacts/v1/stream
+          SGLANG_OMNI_SERVER_VERSION: v1
+
+      - name: Post-stage cleanup (v1)
+        if: always()
+        uses: ./.github/actions/omni-post-stage
+        with:
+          stage-label: S2-Pro stage 3 (consistency inputs, v1)
+          artifact-search-root: stage-artifacts/v1
           artifact-path-globs: |
             */speed_results.json
             */wer_results.json

@@ -15,6 +15,11 @@ from typing import Generator
 from benchmarks.benchmarker.utils import wait_for_service
 
 STARTUP_TIMEOUT = 600
+_SERVER_VERSION_ENV = "SGLANG_OMNI_SERVER_VERSION"
+_QWEN3_LAUNCHERS = {
+    "run_qwen3_omni_server.py",
+    "run_qwen3_omni_speech_server.py",
+}
 
 
 @dataclass
@@ -100,6 +105,24 @@ def wait_healthy(
         raise
 
 
+def _has_version_flag(cmd: list[str]) -> bool:
+    return any(arg == "--version" or arg.startswith("--version=") for arg in cmd)
+
+
+def _inject_server_version(cmd: list[str]) -> list[str]:
+    version = os.environ.get(_SERVER_VERSION_ENV)
+    if version != "v1" or _has_version_flag(cmd):
+        return list(cmd)
+
+    if len(cmd) >= 4 and cmd[1:4] == ["-m", "sglang_omni.cli.cli", "serve"]:
+        return [*cmd[:4], "--version", version, *cmd[4:]]
+
+    if len(cmd) >= 2 and Path(cmd[1]).name in _QWEN3_LAUNCHERS:
+        return [*cmd, "--version", version]
+
+    return list(cmd)
+
+
 def start_server_from_cmd(
     cmd: list[str],
     log_file: Path,
@@ -107,9 +130,10 @@ def start_server_from_cmd(
     timeout: int = STARTUP_TIMEOUT,
 ) -> subprocess.Popen:
     """Start a server from an arbitrary command and wait until healthy."""
+    resolved_cmd = _inject_server_version(cmd)
     with open(log_file, "w") as log_handle:
         proc = subprocess.Popen(
-            cmd,
+            resolved_cmd,
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             start_new_session=True,
