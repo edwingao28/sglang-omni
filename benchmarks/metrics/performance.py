@@ -44,6 +44,7 @@ def compute_speed_metrics(
         return {"completed_requests": 0, "failed_requests": len(outputs)}
 
     latencies = [o.latency_s for o in successes]
+    ttfas = [o.ttfa_s for o in successes if o.ttfa_s > 0]
     rtfs = [o.rtf for o in successes if 0 < o.rtf < float("inf")]
     audio_durations = [o.audio_duration_s for o in successes if o.audio_duration_s > 0]
 
@@ -70,4 +71,13 @@ def compute_speed_metrics(
         "throughput_qps": throughput,
         **_compute_token_metrics(successes),
     }
+    if ttfas:
+        metrics_summary.update(
+            {
+                "ttfa_mean_s": round(float(np.mean(ttfas)), 3),
+                "ttfa_median_s": round(float(np.median(ttfas)), 3),
+                "ttfa_p95_s": round(float(np.percentile(ttfas, 95)), 3),
+                "ttfa_p99_s": round(float(np.percentile(ttfas, 99)), 3),
+            }
+        )
     return metrics_summary

@@ -70,6 +70,28 @@ NONCLONE_WER_MAX_CORPUS = 0.20
 NONCLONE_WER_MAX_PER_SAMPLE = 0.60
 
 
+def _assert_ttfa_diagnostics(summary: dict, per_request: list[dict]) -> None:
+    """Verify non-stream TTFA baseline metrics are emitted.
+
+    Ming does not support true streaming TTS yet, so these values are diagnostics
+    rather than a blocking performance gate.
+    """
+    for key in (
+        "ttfa_mean_s",
+        "ttfa_median_s",
+        "ttfa_p95_s",
+        "ttfa_p99_s",
+    ):
+        assert summary.get(key, 0) > 0, f"Expected positive {key}, got {summary}"
+
+    for req in per_request:
+        rid = req["id"]
+        ttfa = req.get("ttfa_s")
+        assert ttfa is not None and ttfa > 0, (
+            f"Request {rid}: ttfa_s={ttfa}, expected > 0"
+        )
+
+
 def _run_benchmark(
     port: int,
     meta: str,
@@ -214,6 +236,7 @@ def speed_output_dir(
     summary, per_request = results["summary"], results["per_request"]
     assert_summary_metrics(summary)
     assert_per_request_fields(per_request)
+    _assert_ttfa_diagnostics(summary, per_request)
     assert_speed_thresholds(summary, VC_NON_STREAM_THRESHOLDS, CONCURRENCY)
     return output_dir
 

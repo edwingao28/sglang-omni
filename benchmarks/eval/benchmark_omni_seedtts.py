@@ -158,6 +158,7 @@ def _build_results_config(
         "base_url": base_url,
         "meta": config.meta,
         "voice_clone": config.voice_clone,
+        "stream": False,
         "lang": config.lang,
         "speaker": config.speaker,
         "max_samples": config.max_samples,
@@ -202,10 +203,12 @@ def make_send_fn(
                 temperature=temperature,
                 voice_clone=voice_clone,
             )
+            ttfa_s = time.perf_counter() - start_time
             result.audio_duration_s = get_wav_duration(wav_bytes)
             elapsed = time.perf_counter() - start_time
             if result.audio_duration_s > 0:
                 result.is_success = True
+                result.ttfa_s = ttfa_s
                 result.rtf = elapsed / result.audio_duration_s
             else:
                 result.error = f"Invalid audio ({len(wav_bytes)} bytes)"
