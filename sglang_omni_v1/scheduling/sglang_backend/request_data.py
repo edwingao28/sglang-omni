@@ -31,6 +31,7 @@ class SGLangARRequestData:
     talker_model_inputs: dict[str, Any] = field(default_factory=dict)
     feedback_embeds: Any = None
     feedback_step_index: int | None = None
+    feedback_queue: Any = None
     trailing_text_hidden: Any = None
     tts_pad_embed: Any = None
     tts_eos_embed: Any = None

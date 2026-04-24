@@ -33,7 +33,6 @@ from sglang_omni_v1.vendor.sglang.layers import (
     RowParallelLinear,
     SiluAndMul,
     should_use_flashinfer_cutlass_moe_fp4_allgather,
-    top_k_top_p_sampling_from_probs,
 )
 from sglang_omni_v1.vendor.sglang.models import apply_qk_norm
 from sglang_omni_v1.vendor.sglang.server_args import get_global_server_args
@@ -876,8 +875,9 @@ class Qwen3OmniTalker(nn.Module):
 
     @staticmethod
     def _sample_code_predictor_token(logits: torch.Tensor) -> torch.Tensor:
-        probs = torch.softmax(logits[:, -1, :], dim=-1)
-        next_code = top_k_top_p_sampling_from_probs(probs, top_k=50, top_p=0.8)
+        # Match HF generate(do_sample=False, temperature=0.0) behavior for the
+        # residual code predictor by taking the highest-logit token directly.
+        next_code = torch.argmax(logits[:, -1, :], dim=-1)
         if next_code.ndim == 1:
             next_code = next_code.unsqueeze(-1)
         return next_code

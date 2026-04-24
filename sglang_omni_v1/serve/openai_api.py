@@ -401,12 +401,25 @@ def _build_chat_generate_request(req: ChatCompletionRequest) -> GenerateRequest:
     if videos:
         metadata["videos"] = videos
 
+    extra_params: dict[str, Any] = {}
+    for field_name in (
+        "talker_temperature",
+        "talker_top_p",
+        "talker_top_k",
+        "talker_repetition_penalty",
+        "talker_max_new_tokens",
+    ):
+        value = getattr(req, field_name)
+        if value is not None:
+            extra_params[field_name] = value
+
     return GenerateRequest(
         model=req.model,
         messages=messages,
         sampling=sampling,
         stage_sampling=stage_sampling,
         stage_params=req.stage_params,
+        extra_params=extra_params,
         stream=req.stream,
         max_tokens=req.effective_max_tokens,
         output_modalities=output_modalities,

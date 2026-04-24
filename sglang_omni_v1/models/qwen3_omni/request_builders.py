@@ -458,7 +458,13 @@ def make_thinker_stream_output_builder():
         return _normalize_chunk_hidden(embed), _normalize_chunk_hidden(layer_hidden)
 
     def _build_stream_output(request_id: str, req_data: Any, req_output: Any):
-        del req_data
+        req = getattr(req_data, "req", None)
+        if req is not None and int(getattr(req, "is_chunked", 0) or 0) > 0:
+            # Match the legacy thinker stream adapter: while chunked prefill is still
+            # consuming prompt tokens, suppress hidden-state streaming to the talker.
+            # Emitting chunks this early lets prompt-side states masquerade as the
+            # first assistant token and can leak the user/ref-text prompt into TTS.
+            return None
         if req_output.data is None:
             return None
         extra = req_output.extra
