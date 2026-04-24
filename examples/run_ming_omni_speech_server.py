@@ -14,6 +14,11 @@ Usage::
         --model-path inclusionAI/Ming-flash-omni-2.0 \
         --gpu-thinker 0 --gpu-talker 1
 
+    # Tensor parallel thinker (talker must not overlap thinker GPUs):
+    python examples/run_ming_omni_speech_server.py \
+        --model-path inclusionAI/Ming-flash-omni-2.0 \
+        --gpu-thinker 0 --gpu-talker 2 --tp-size 2
+
     # Then test:
     curl http://localhost:8000/v1/chat/completions \
         -H "Content-Type: application/json" \
@@ -56,6 +61,12 @@ def parse_args() -> argparse.Namespace:
     # GPU placement
     parser.add_argument("--gpu-thinker", type=int, default=0)
     parser.add_argument("--gpu-talker", type=int, default=1)
+    parser.add_argument(
+        "--tp-size",
+        type=int,
+        default=1,
+        help="Tensor parallel size for thinker",
+    )
 
     # Pipeline
     parser.add_argument(
@@ -100,6 +111,12 @@ async def main_async(args: argparse.Namespace) -> None:
         relay_backend=args.relay_backend,
         gpu_placement=gpu_placement,
     )
+    overrides = {}
+    if args.tp_size and args.tp_size > 1:
+        overrides["tp_size"] = args.tp_size
+        overrides["disable_custom_all_reduce"] = True
+    if overrides:
+        config.apply_server_args_overrides(stage_name="thinker", overrides=overrides)
     if args.mem_fraction_static is not None:
         if not 0.0 < args.mem_fraction_static < 1.0:
             raise ValueError(

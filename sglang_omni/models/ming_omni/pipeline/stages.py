@@ -147,6 +147,7 @@ def create_sglang_thinker_executor(
             params=payload.request.params,
             tokenizer=tokenizer,
             vocab_size=vocab_size,
+            max_seq_len=getattr(server_args, "context_length", None),
             request_id=payload.request_id,
         )
         return data
@@ -441,6 +442,18 @@ def create_decode_executor(model_path: str) -> PreprocessingExecutor:
             ):
                 result["text"] = tokenizer.decode(output_ids, skip_special_tokens=True)
                 result.setdefault("modality", "text")
+
+        finish_reason = thinker_out.get("finish_reason")
+        if finish_reason is not None:
+            result["finish_reason"] = finish_reason
+
+        prompt_tokens = int(thinker_out.get("prompt_tokens", 0))
+        completion_tokens = int(thinker_out.get("completion_tokens", 0))
+        result["usage"] = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
 
         payload.data = result
         return payload

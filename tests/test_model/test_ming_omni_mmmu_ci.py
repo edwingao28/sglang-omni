@@ -28,6 +28,7 @@ MODEL_PATH = "inclusionAI/Ming-flash-omni-2.0"
 
 CONCURRENCY = 4
 STARTUP_TIMEOUT = 1200
+THINKER_TP_SIZE = 2
 
 # MMMU accuracy floor - conservative starting value; tighten after first
 # green CI run yields a baseline (separate reference-run PR).
@@ -59,6 +60,8 @@ def server_process(tmp_path_factory: pytest.TempPathFactory):
         MODEL_PATH,
         "--port",
         str(port),
+        "--tp-size",
+        str(THINKER_TP_SIZE),
         "--model-name",
         "ming-omni",
     ]

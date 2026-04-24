@@ -106,6 +106,40 @@ class MingOmniPipelineConfig(PipelineConfig):
     def mem_fraction_role_to_stage(cls) -> dict[str, str]:
         return {"thinker": THINKER_STAGE}
 
+    def apply_server_args_overrides(
+        self, *, stage_name: str, overrides: dict[str, Any]
+    ) -> None:
+        remaining = _route_thinker_executor_args(self.stages, stage_name, overrides)
+        if remaining:
+            super().apply_server_args_overrides(
+                stage_name=stage_name,
+                overrides=remaining,
+            )
+
+
+def _route_thinker_executor_args(
+    stages: list[StageConfig],
+    stage_name: str,
+    overrides: dict[str, Any],
+) -> dict[str, Any]:
+    """Pop thinker-factory kwargs onto the thinker stage; return the rest."""
+    remaining = dict(overrides)
+    if stage_name != THINKER_STAGE:
+        return remaining
+
+    casted: dict[str, Any] = {}
+
+    seq_len = remaining.pop("thinker_max_seq_len", None)
+    if seq_len is not None:
+        casted["thinker_max_seq_len"] = int(seq_len)
+
+    if casted:
+        for stage in stages:
+            if stage.name == THINKER_STAGE:
+                stage.executor.args.update(casted)
+                break
+    return remaining
+
 
 def _validate_ming_speech_gpu_placement(
     gpu_placement: dict[str, int],
@@ -229,10 +263,12 @@ class MingOmniSpeechPipelineConfig(PipelineConfig):
                 self.gpu_placement,
                 tp_size=overrides["tp_size"],
             )
-        super().apply_server_args_overrides(
-            stage_name=stage_name,
-            overrides=overrides,
-        )
+        remaining = _route_thinker_executor_args(self.stages, stage_name, overrides)
+        if remaining:
+            super().apply_server_args_overrides(
+                stage_name=stage_name,
+                overrides=remaining,
+            )
 
 
 EntryClass = MingOmniPipelineConfig

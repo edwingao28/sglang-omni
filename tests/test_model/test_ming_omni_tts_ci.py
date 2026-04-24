@@ -45,6 +45,8 @@ MAX_SAMPLES = 10
 DATASET_CACHE_ENV = "SGLANG_SEEDTTS_MINI_DIR"
 STARTUP_TIMEOUT = 1200
 WER_TIMEOUT = 600
+THINKER_TP_SIZE = 2
+TALKER_GPU_ID = 2
 
 # Placeholder thresholds for the first Ming-Omni TTS CI pass.
 # Replace these P95 values with H20 CI-measured values in a follow-up
@@ -208,7 +210,9 @@ def server_process(tmp_path_factory: pytest.TempPathFactory):
         "--gpu-thinker",
         "0",
         "--gpu-talker",
-        "1",
+        str(TALKER_GPU_ID),
+        "--tp-size",
+        str(THINKER_TP_SIZE),
         "--port",
         str(port),
         "--model-name",

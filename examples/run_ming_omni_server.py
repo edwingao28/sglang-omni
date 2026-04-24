@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Pipeline options
-    parser.add_argument("--thinker-max-seq-len", type=int, default=8192)
+    parser.add_argument("--thinker-max-seq-len", type=int, default=None)
     parser.add_argument(
         "--tp-size",
         type=int,
@@ -102,6 +102,8 @@ def main() -> None:
     args = parse_args()
 
     overrides = {}
+    if args.thinker_max_seq_len is not None:
+        overrides["thinker_max_seq_len"] = args.thinker_max_seq_len
     if args.tp_size and args.tp_size > 1:
         overrides["tp_size"] = args.tp_size
         overrides["disable_custom_all_reduce"] = True

@@ -5,7 +5,67 @@ from __future__ import annotations
 import unittest
 
 
+def _stage_by_name(config, name: str):
+    for stage in config.stages:
+        if stage.name == name:
+            return stage
+    raise AssertionError(f"stage {name!r} not found")
+
+
 class TestMingOmniSpeechGPUValidation(unittest.TestCase):
+    def test_text_pipeline_routes_thinker_max_seq_len_to_executor_args(self):
+        from sglang_omni.models.ming_omni.config import MingOmniPipelineConfig
+
+        config = MingOmniPipelineConfig(model_path="test/model")
+        config.apply_server_args_overrides(
+            stage_name="thinker",
+            overrides={
+                "thinker_max_seq_len": 128,
+                "tp_size": 2,
+                "cpu_offload_gb": 80,
+            },
+        )
+
+        thinker = _stage_by_name(config, "thinker")
+        self.assertEqual(thinker.executor.args["thinker_max_seq_len"], 128)
+        self.assertNotIn(
+            "thinker_max_seq_len",
+            thinker.executor.args["server_args_overrides"],
+        )
+        self.assertEqual(thinker.executor.args["server_args_overrides"]["tp_size"], 2)
+        self.assertEqual(
+            thinker.executor.args["server_args_overrides"]["cpu_offload_gb"],
+            80,
+        )
+
+    def test_speech_pipeline_routes_thinker_max_seq_len_to_executor_args(self):
+        from sglang_omni.models.ming_omni.config import MingOmniSpeechPipelineConfig
+
+        config = MingOmniSpeechPipelineConfig(
+            model_path="test/model",
+            gpu_placement={"thinker": 0, "talker": 2},
+        )
+        config.apply_server_args_overrides(
+            stage_name="thinker",
+            overrides={
+                "thinker_max_seq_len": "128",
+                "tp_size": 2,
+                "cpu_offload_gb": 80,
+            },
+        )
+
+        thinker = _stage_by_name(config, "thinker")
+        self.assertEqual(thinker.executor.args["thinker_max_seq_len"], 128)
+        self.assertNotIn(
+            "thinker_max_seq_len",
+            thinker.executor.args["server_args_overrides"],
+        )
+        self.assertEqual(thinker.executor.args["server_args_overrides"]["tp_size"], 2)
+        self.assertEqual(
+            thinker.executor.args["server_args_overrides"]["cpu_offload_gb"],
+            80,
+        )
+
     def test_default_tp_construction_rejects_colliding_gpu_placement(self):
         from sglang_omni.models.ming_omni.config import MingOmniSpeechPipelineConfig
 

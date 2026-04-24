@@ -22,6 +22,7 @@ from tests.utils import start_server_from_cmd, stop_server
 
 MODEL_PATH = "inclusionAI/Ming-flash-omni-2.0"
 STARTUP_TIMEOUT = 1200
+THINKER_TP_SIZE = 2
 
 
 @pytest.fixture(scope="module")
@@ -36,6 +37,8 @@ def server_process(tmp_path_factory: pytest.TempPathFactory):
         MODEL_PATH,
         "--port",
         str(port),
+        "--tp-size",
+        str(THINKER_TP_SIZE),
         "--model-name",
         "ming-omni",
     ]

@@ -35,6 +35,7 @@ from tests.utils import (
 MODEL_PATH = "inclusionAI/Ming-flash-omni-2.0"
 CONCURRENCY = 4
 STARTUP_TIMEOUT = 1200
+THINKER_TP_SIZE = 2
 MMSU_MIN_ACCURACY = 0.40
 
 # TODO: Thresholds are placeholders; replace with H20/H100 CI-measured P95
@@ -65,6 +66,8 @@ def server_process(tmp_path_factory: pytest.TempPathFactory):
         MODEL_PATH,
         "--port",
         str(port),
+        "--tp-size",
+        str(THINKER_TP_SIZE),
         "--model-name",
         "ming-omni",
     ]
