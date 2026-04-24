@@ -13,8 +13,119 @@ permissions:
   contents: read
 
 jobs:
-  ming-omni-ci:
-    name: MMMU accuracy + speed
+  docs:
+    name: docs
+    runs-on: [self-hosted]
+    timeout-minutes: 30
+    container:
+      image: frankleeeee/sglang-omni:dev
+      options: --gpus all --rm -v /dev/shm:/dev/shm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/omni-setup
+        with:
+          venv-name: omni-ming
+          install-deps: "true"
+
+      - name: Run docs tests
+        shell: bash
+        run: |
+          source omni-ming/bin/activate
+          export PYTHONPATH=$PWD
+          pytest tests/docs/ming_omni/test_docs_ming_omni.py -v -s -x
+        env:
+          HF_ENDPOINT: https://hf-mirror.com
+
+      - name: Post-stage cleanup
+        if: always()
+        uses: ./.github/actions/omni-post-stage
+        with:
+          stage-label: docs
+
+      - name: Save cache
+        if: always()
+        shell: bash
+        run: |
+          if omni-ming/bin/python -c "import torch" 2>/dev/null; then
+            rm -rf /github/home/omni-ming
+            cp -p -r omni-ming /github/home/
+          else
+            echo "::warning::Skipping cache save - venv appears corrupted (torch not importable)"
+          fi
+
+  stage-1-thinker:
+    name: stage 1 - thinker length integration
+    needs: docs
+    runs-on: [self-hosted]
+    timeout-minutes: 40
+    container:
+      image: frankleeeee/sglang-omni:dev
+      options: --gpus all --rm -v /dev/shm:/dev/shm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/omni-setup
+        with:
+          venv-name: omni-ming
+
+      - name: Run thinker length integration test
+        shell: bash
+        run: |
+          source omni-ming/bin/activate
+          export PYTHONPATH=$PWD
+          pytest tests/test_model/test_ming_omni_thinker_length.py -v -s -x
+        env:
+          HF_ENDPOINT: https://hf-mirror.com
+
+      - name: Post-stage cleanup
+        if: always()
+        uses: ./.github/actions/omni-post-stage
+        with:
+          stage-label: thinker-length
+
+  stage-2-tts:
+    name: stage 2 - TTS (RTF perf + WER)
+    needs: [docs, stage-1-thinker]
+    runs-on: [self-hosted]
+    timeout-minutes: 60
+    container:
+      image: frankleeeee/sglang-omni:dev
+      options: --gpus all --rm -v /dev/shm:/dev/shm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/omni-setup
+        with:
+          venv-name: omni-ming
+
+      - name: Run TTS CI (perf + WER)
+        shell: bash
+        run: |
+          source omni-ming/bin/activate
+          export PYTHONPATH=$PWD
+          pytest tests/test_model/test_ming_omni_tts_ci.py -v -s -x
+        env:
+          HF_ENDPOINT: https://hf-mirror.com
+          SGLANG_SEEDTTS_MINI_DIR: /github/home/seedtts-mini
+
+      - name: Post-stage cleanup
+        if: always()
+        uses: ./.github/actions/omni-post-stage
+        with:
+          stage-label: TTS (RTF perf + WER)
+          artifact-path-globs: |
+            */speed_results.json
+            */wer_results.json
+          artifact-upload-name: ming-omni-tts-results
+          artifact-upload-path: /tmp/**/*_results.json
+
+  stage-3-mmmu:
+    name: stage 3 - MMMU accuracy + speed
+    needs: [docs, stage-1-thinker]
     runs-on: [self-hosted]
     timeout-minutes: 90
     container:
@@ -27,7 +138,6 @@ jobs:
       - uses: ./.github/actions/omni-setup
         with:
           venv-name: omni-ming
-          install-deps: "true"
 
       - name: Run MMMU CI (accuracy + speed)
         shell: bash
@@ -48,13 +158,38 @@ jobs:
           artifact-upload-name: ming-omni-mmmu-results
           artifact-upload-path: /tmp/**/mmmu_results.json
 
-      - name: Save cache
-        if: always()
+  stage-4-mmsu:
+    name: stage 4 - MMSU audio-in understanding
+    needs: [docs, stage-1-thinker]
+    runs-on: [self-hosted]
+    timeout-minutes: 45
+    container:
+      image: frankleeeee/sglang-omni:dev
+      options: --gpus all --rm -v /dev/shm:/dev/shm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/omni-setup
+        with:
+          venv-name: omni-ming
+
+      - name: Run MMSU CI (audio-in accuracy + speed)
         shell: bash
         run: |
-          if omni-ming/bin/python -c "import torch" 2>/dev/null; then
-            rm -rf /github/home/omni-ming
-            cp -p -r omni-ming /github/home/
-          else
-            echo "::warning::Skipping cache save - venv appears corrupted (torch not importable)"
-          fi
+          source omni-ming/bin/activate
+          export PYTHONPATH=$PWD
+          pytest tests/test_model/test_ming_omni_mmsu_ci.py -v -s -x
+        env:
+          HF_ENDPOINT: https://hf-mirror.com
+
+      - name: Post-stage cleanup
+        if: always()
+        uses: ./.github/actions/omni-post-stage
+        with:
+          stage-label: MMSU (audio-in accuracy + speed)
+          artifact-path-globs: |
+            */mmsu/mmsu_results.json
+          artifact-upload-name: ming-omni-mmsu-results
+          artifact-upload-path: /tmp/**/mmsu/mmsu_results.json
+          summary-only: "true"
