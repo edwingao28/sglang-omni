@@ -13,7 +13,9 @@ def _sched_req(**data_kwargs):
     return SimpleNamespace(data=data)
 
 
-def test_combine_feedback_embed_matches_legacy_step_index_for_projected_prefill() -> None:
+def test_combine_feedback_embed_matches_legacy_step_index_for_projected_prefill() -> (
+    None
+):
     sched_req = _sched_req(
         feedback_embeds=torch.tensor([1.0, 2.0]),
         feedback_step_index=1,
@@ -34,6 +36,8 @@ def test_combine_feedback_embed_matches_legacy_step_index_for_projected_prefill(
     )
 
     assert torch.equal(combined, torch.tensor([21.0, 22.0]))
+
+
 def test_combine_feedback_embed_falls_back_to_pad_when_stream_done() -> None:
     sched_req = _sched_req(
         feedback_embeds=torch.tensor([1.0, 2.0]),

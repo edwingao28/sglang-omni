@@ -10,9 +10,7 @@ from sglang_omni_v1.models.qwen3_omni.components.talker import Qwen3OmniTalker
 def test_sample_code_predictor_token_uses_top_k_top_p(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
-    def fake_sampler(
-        probs: torch.Tensor, top_k: int, top_p: float
-    ) -> torch.Tensor:
+    def fake_sampler(probs: torch.Tensor, top_k: int, top_p: float) -> torch.Tensor:
         captured["probs"] = probs.clone()
         captured["top_k"] = top_k
         captured["top_p"] = top_p

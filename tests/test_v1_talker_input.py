@@ -52,10 +52,13 @@ def test_build_assistant_part_tolerates_short_prefix() -> None:
     assert result["input_embeds"].shape == (9, 2)
     assert result["input_ids"].tolist() == [99] * 9
     assert torch.equal(result["input_embeds"][:3], assistant_embed)
-    assert torch.equal(result["input_embeds"][3:7], torch.tensor(
-        [[7.0, 8.0], [7.0, 8.0], [7.0, 8.0], [7.0, 8.0]],
-        dtype=torch.float32,
-    ))
+    assert torch.equal(
+        result["input_embeds"][3:7],
+        torch.tensor(
+            [[7.0, 8.0], [7.0, 8.0], [7.0, 8.0], [7.0, 8.0]],
+            dtype=torch.float32,
+        ),
+    )
     assert torch.equal(result["input_embeds"][7], torch.tensor([10.0, 11.0]))
     assert torch.equal(result["input_embeds"][8], torch.zeros(2, dtype=torch.float32))
     assert torch.equal(
