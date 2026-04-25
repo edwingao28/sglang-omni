@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 import torch
+import xxhash
 
 from sglang_omni_v1.models.qwen3_omni.components.talker_prefill import (
     TalkerPrefillBuilder,
@@ -184,7 +185,7 @@ def build_sglang_thinker_request(
 
     prompt = state.prompt
     input_ids = prompt["input_ids"]
-    input_ids_list = input_ids.to(dtype=torch.long).tolist()
+    original_input_ids = input_ids
 
     attention_mask = prompt.get("attention_mask")
     thinker_inputs = state.thinker_inputs or {}
@@ -192,11 +193,36 @@ def build_sglang_thinker_request(
     model_inputs = dict(thinker_inputs.get("model_inputs", {}))
     if not model_inputs:
         model_inputs = {
-            k: v for k, v in thinker_inputs.items() if k != "capture_model_output_keys"
+            k: v
+            for k, v in thinker_inputs.items()
+            if k not in ("capture_model_output_keys", "media_cache_keys")
         }
     capture_keys = thinker_inputs.get("capture_model_output_keys", ())
+    media_cache_keys = thinker_inputs.get("media_cache_keys", {})
+    pad_values: dict[str, int] = {}
+    if media_cache_keys and thinker_config is not None:
+        token_id_map: dict[int, int] = {}
+        for modality, orig_token_id in [
+            ("image", thinker_config.image_token_id),
+            ("video", thinker_config.video_token_id),
+            ("audio", thinker_config.audio_token_id),
+        ]:
+            cache_key = media_cache_keys.get(modality)
+            if cache_key is None:
+                continue
+            h = xxhash.xxh3_64(cache_key.encode()).intdigest()
+            pad_val = vocab_size + h % (1 << 30)
+            pad_values[modality] = pad_val
+            token_id_map[orig_token_id] = pad_val
+        if token_id_map:
+            input_ids = input_ids.clone()
+            for orig_id, pad_val in token_id_map.items():
+                input_ids[input_ids == orig_id] = pad_val
+        if pad_values:
+            model_inputs["pad_values"] = pad_values
     if "attention_mask" in model_inputs:
         model_inputs.pop("attention_mask", None)
+    input_ids_list = input_ids.to(dtype=torch.long).tolist()
 
     max_new_tokens = params.get("max_new_tokens", 2048)
     temperature = params.get("temperature", 0.0)
@@ -237,7 +263,7 @@ def build_sglang_thinker_request(
     # Compute M-RoPE positions and attach multimodal_inputs to Req
     if thinker_config is not None and model_inputs:
         mrope_result = _compute_mrope_positions(
-            input_ids.to(dtype=torch.long), model_inputs, thinker_config
+            original_input_ids.to(dtype=torch.long), model_inputs, thinker_config
         )
         if mrope_result is not None:
             mrope_positions, mrope_position_delta = mrope_result
