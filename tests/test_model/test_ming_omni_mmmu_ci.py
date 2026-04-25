@@ -29,6 +29,7 @@ MODEL_PATH = "inclusionAI/Ming-flash-omni-2.0"
 CONCURRENCY = 4
 STARTUP_TIMEOUT = 1200
 THINKER_TP_SIZE = 2
+MAX_TOKENS = 64
 
 # (wenyao) MMMU floor: conservative; tighten after first green CI baseline.
 MMMU_MIN_ACCURACY = 0.40
@@ -80,6 +81,7 @@ def test_mmmu_accuracy_and_speed(
         max_concurrency=CONCURRENCY,
         output_dir=str(tmp_path / "mmmu"),
         repo_id=DATASETS["mmmu-ci-50"],
+        max_tokens=MAX_TOKENS,
         # (wenyao) qwen3 mixed-batch regression guard (issue #299).
         warmup=2,
     )
@@ -87,7 +89,19 @@ def test_mmmu_accuracy_and_speed(
 
     summary = results["summary"]
     failed_count = summary.get("failed", 0)
-    assert failed_count == 0, f"{failed_count} requests failed; summary={summary}"
+    first_failures = [
+        {
+            "sample_id": sample.get("sample_id"),
+            "latency_s": sample.get("latency_s"),
+            "error": sample.get("error") or sample.get("raw_response"),
+        }
+        for sample in results.get("per_sample", [])
+        if not sample.get("is_success")
+    ][:3]
+    assert failed_count == 0, (
+        f"{failed_count} requests failed; summary={summary}; "
+        f"first_failures={first_failures}"
+    )
 
     assert summary["accuracy"] >= MMMU_MIN_ACCURACY, (
         f"MMMU accuracy {summary['accuracy']:.4f} "

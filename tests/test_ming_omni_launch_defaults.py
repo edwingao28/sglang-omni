@@ -68,3 +68,12 @@ def test_ming_ci_server_fixtures_pin_tp_size(relative_path: str) -> None:
     source = (PROJECT_ROOT / relative_path).read_text()
 
     assert '"--tp-size"' in source
+
+
+def test_ming_mmmu_ci_bounds_decode_tokens() -> None:
+    source = (
+        PROJECT_ROOT / "tests/test_model/test_ming_omni_mmmu_ci.py"
+    ).read_text()
+
+    assert "MAX_TOKENS = 64" in source
+    assert "max_tokens=MAX_TOKENS" in source
