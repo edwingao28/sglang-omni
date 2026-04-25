@@ -5,8 +5,9 @@ MMSU covers the Yuan voice-memo ASR requirement as a superset. PR #326 landed
 audio-in support for Ming-Omni, but did not add a standalone ASR evaluation
 path, so this stage uses the model-agnostic benchmark_omni_mmsu.py runner.
 
-Ming uses ``modalities="text+audio"`` here for true audio-in coverage, while
-qwen3 uses text in its own MMSU stage.
+Ming requests text output here because this stage uses the Talker OFF launcher;
+audio input is still supplied by the benchmark through the top-level ``audios``
+field.
 
 Usage:
     pytest tests/test_model/test_ming_omni_mmsu_ci.py -s -x
@@ -80,7 +81,9 @@ def _build_args(port: int, output_dir: str) -> argparse.Namespace:
         host="localhost",
         port=port,
         model="ming-omni",
-        modalities="text+audio",
+        # This selects output modalities. The audio input is still supplied by
+        # the benchmark via the top-level "audios" payload field.
+        modalities="text",
         output_dir=output_dir,
         max_samples=50,
         task_names=None,
@@ -111,9 +114,18 @@ def test_mmsu_accuracy_and_speed(
 
     failed = results["accuracy"].get("failed_samples", 0)
     total = results["accuracy"].get("total_samples", 0)
+    first_failures = [
+        {
+            "sample_id": sample.get("sample_id"),
+            "latency_s": sample.get("latency_s"),
+            "error": sample.get("error") or sample.get("raw_response"),
+        }
+        for sample in results.get("per_sample", [])
+        if not sample.get("is_success")
+    ][:3]
     assert failed == 0, (
         f"MMSU had {failed}/{total} failed requests (timeouts or empty responses); "
-        f"any failure fails the test"
+        f"any failure fails the test; first_failures={first_failures}"
     )
 
     accuracy = results["accuracy"]["overall_accuracy"]
