@@ -71,18 +71,14 @@ def test_ming_ci_server_fixtures_pin_tp_size(relative_path: str) -> None:
 
 
 def test_ming_mmmu_ci_bounds_decode_tokens() -> None:
-    source = (
-        PROJECT_ROOT / "tests/test_model/test_ming_omni_mmmu_ci.py"
-    ).read_text()
+    source = (PROJECT_ROOT / "tests/test_model/test_ming_omni_mmmu_ci.py").read_text()
 
     assert "MAX_TOKENS = 64" in source
     assert "max_tokens=MAX_TOKENS" in source
 
 
 def test_ming_mmsu_ci_uses_text_output_with_audio_input() -> None:
-    source = (
-        PROJECT_ROOT / "tests/test_model/test_ming_omni_mmsu_ci.py"
-    ).read_text()
+    source = (PROJECT_ROOT / "tests/test_model/test_ming_omni_mmsu_ci.py").read_text()
 
     assert 'modalities="text"' in source
     assert "audio input is still supplied by the benchmark" in source
