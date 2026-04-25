@@ -82,3 +82,13 @@ def test_ming_mmsu_ci_uses_text_output_with_audio_input() -> None:
 
     assert 'modalities="text"' in source
     assert "audio input is still supplied by the benchmark" in source
+
+
+def test_ming_docs_ci_allows_cold_model_startup() -> None:
+    docs_test = (
+        PROJECT_ROOT / "tests/docs/ming_omni/test_docs_ming_omni.py"
+    ).read_text()
+    workflow = (PROJECT_ROOT / ".github/workflows/test-ming-omni-ci.yaml").read_text()
+
+    assert "STARTUP_TIMEOUT = 2400" in docs_test
+    assert "timeout-minutes: 60" in workflow

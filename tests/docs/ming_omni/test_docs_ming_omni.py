@@ -21,7 +21,7 @@ from sglang_omni.utils import find_available_port
 from tests.utils import start_server_from_cmd, stop_server
 
 MODEL_PATH = "inclusionAI/Ming-flash-omni-2.0"
-STARTUP_TIMEOUT = 1200
+STARTUP_TIMEOUT = 2400
 THINKER_TP_SIZE = 2
 
 
