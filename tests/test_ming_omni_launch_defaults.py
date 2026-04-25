@@ -84,11 +84,53 @@ def test_ming_mmsu_ci_uses_text_output_with_audio_input() -> None:
     assert "audio input is still supplied by the benchmark" in source
 
 
-def test_ming_docs_ci_allows_cold_model_startup() -> None:
-    docs_test = (
-        PROJECT_ROOT / "tests/docs/ming_omni/test_docs_ming_omni.py"
-    ).read_text()
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "tests/docs/ming_omni/test_docs_ming_omni.py",
+        "tests/test_model/test_ming_omni_thinker_length.py",
+        "tests/test_model/test_ming_omni_tts_ci.py",
+        "tests/test_model/test_ming_omni_mmmu_ci.py",
+        "tests/test_model/test_ming_omni_mmsu_ci.py",
+    ],
+)
+def test_ming_ci_allows_cold_model_startup(relative_path: str) -> None:
+    source = (PROJECT_ROOT / relative_path).read_text()
+
+    assert "STARTUP_TIMEOUT = 2400" in source
+
+
+def test_ming_workflow_stage_timeouts_allow_cold_model_startup() -> None:
     workflow = (PROJECT_ROOT / ".github/workflows/test-ming-omni-ci.yaml").read_text()
 
-    assert "STARTUP_TIMEOUT = 2400" in docs_test
-    assert "timeout-minutes: 60" in workflow
+    expected_job_headers = [
+        (
+            "docs",
+            "docs",
+            60,
+        ),
+        (
+            "stage-1-thinker",
+            "stage 1 - thinker length integration",
+            80,
+        ),
+        (
+            "stage-2-tts",
+            "stage 2 - TTS (RTF perf + WER)",
+            120,
+        ),
+        (
+            "stage-3-mmmu",
+            "stage 3 - MMMU accuracy + speed",
+            180,
+        ),
+        (
+            "stage-4-mmsu",
+            "stage 4 - MMSU audio-in understanding",
+            90,
+        ),
+    ]
+    for job_id, job_name, timeout_minutes in expected_job_headers:
+        expected = f"  {job_id}:\n" f"    name: {job_name}\n" f"    "
+        assert expected in workflow
+        assert f"    timeout-minutes: {timeout_minutes}" in workflow

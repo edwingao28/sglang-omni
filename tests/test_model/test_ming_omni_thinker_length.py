@@ -21,7 +21,7 @@ from tests.utils import start_server_from_cmd, stop_server
 MODEL_PATH = "inclusionAI/Ming-flash-omni-2.0"
 MODEL_NAME = "ming-omni"
 THINKER_MAX_SEQ_LEN = 128
-STARTUP_TIMEOUT = 1200
+STARTUP_TIMEOUT = 2400
 REQUEST_TIMEOUT = 180
 THINKER_TP_SIZE = 2
 
