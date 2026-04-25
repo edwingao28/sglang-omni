@@ -335,6 +335,8 @@ def create_sglang_thinker_executor_from_config(
         overrides["json_model_override_args"] = model_override
         overrides.setdefault("base_gpu_id", gpu_id)
 
+    overrides.setdefault("disable_cuda_graph", False)
+
     pre_load_avail_mem = avail_gpu_mem(gpu_id)
     server_args = build_sglang_server_args(
         local_path,

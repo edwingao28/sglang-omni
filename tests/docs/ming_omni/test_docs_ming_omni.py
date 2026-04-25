@@ -65,16 +65,16 @@ def test_readme_chat_completion_smoke(server_process: subprocess.Popen) -> None:
     with httpx.Client(trust_env=False, timeout=120) as client:
         response = client.post(url, json=payload)
 
-    assert response.status_code == 200, (
-        f"Expected HTTP 200 from {url}; got {response.status_code}: {response.text}"
-    )
+    assert (
+        response.status_code == 200
+    ), f"Expected HTTP 200 from {url}; got {response.status_code}: {response.text}"
     result = response.json()
     choices = result.get("choices")
     assert choices, f"Expected non-empty choices in response: {result}"
     content = choices[0]["message"]["content"]
-    assert isinstance(content, str) and content.strip(), (
-        f"Expected non-empty string content in first choice: {choices[0]}"
-    )
+    assert (
+        isinstance(content, str) and content.strip()
+    ), f"Expected non-empty string content in first choice: {choices[0]}"
 
 
 if __name__ == "__main__":

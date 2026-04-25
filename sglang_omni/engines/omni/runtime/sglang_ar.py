@@ -739,7 +739,7 @@ class SGLangModelRunner:
         )
         return GenerationBatchResult(
             logits_output=logits_output,
-            can_run_cuda_graph=False,
+            can_run_cuda_graph=not forward_batch.forward_mode.is_extend(),
         )
 
     def _forward_talker(
@@ -782,7 +782,7 @@ class SGLangModelRunner:
         )
         return GenerationBatchResult(
             logits_output=logits_output,
-            can_run_cuda_graph=False,
+            can_run_cuda_graph=True,
         )
 
     def _build_feedback_input_embeds(

@@ -38,9 +38,7 @@ STARTUP_TIMEOUT = 1200
 THINKER_TP_SIZE = 2
 MMSU_MIN_ACCURACY = 0.40
 
-# TODO: Thresholds are placeholders; replace with H20/H100 CI-measured P95
-# values in a follow-up reference-run PR. Ming MMSU baselines do not exist yet,
-# so these loose bounds only catch catastrophic regressions.
+# TODO (wenyao): Placeholder P95 — Ming MMSU has no baseline yet; loose bounds.
 _MMSU_P95 = {
     4: {
         "throughput_qps": 0.10,
@@ -82,8 +80,6 @@ def _build_args(port: int, output_dir: str) -> argparse.Namespace:
         host="localhost",
         port=port,
         model="ming-omni",
-        # Ming-specific divergence for true audio-in coverage / Yuan
-        # voice-memo ASR requirement.
         modalities="text+audio",
         output_dir=output_dir,
         max_samples=50,

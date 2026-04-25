@@ -14,7 +14,7 @@ Usage::
         --model-path inclusionAI/Ming-flash-omni-2.0 \
         --gpu-thinker 0 --gpu-talker 1
 
-    # Tensor parallel thinker (talker must not overlap thinker GPUs):
+    # (wenyao) Tensor parallel thinker — talker must not overlap thinker GPUs.
     python examples/run_ming_omni_speech_server.py \
         --model-path inclusionAI/Ming-flash-omni-2.0 \
         --gpu-thinker 0 --gpu-talker 2 --tp-size 2

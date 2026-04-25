@@ -48,12 +48,9 @@ WER_TIMEOUT = 600
 THINKER_TP_SIZE = 2
 TALKER_GPU_ID = 2
 
-# Placeholder thresholds for the first Ming-Omni TTS CI pass.
-# Replace these P95 values with H20 CI-measured values in a follow-up
-# reference-run PR. Yuan's 2026-04-23 voice memo reported Ming TTS
-# end-to-end RTF around 0.06 with wall-clock jitter.
-# rtf_mean = wall_time / audio_duration; higher is worse, so the
-# lower-is-better slack coefficient 1.25 becomes the fail-bound multiplier.
+# TODO (wenyao): Placeholder P95 — replace with measured values in follow-up
+# reference-run PR. Anchored to RTF≈0.06.
+# (wenyao) rtf_mean = wall_time / audio_duration (higher worse); slack 1.25 = fail-bound multiplier.
 _VC_NON_STREAM_P95 = {
     1: {
         "throughput_qps": 0.15,
@@ -89,9 +86,9 @@ def _assert_ttfa_diagnostics(summary: dict, per_request: list[dict]) -> None:
     for req in per_request:
         rid = req["id"]
         ttfa = req.get("ttfa_s")
-        assert ttfa is not None and ttfa > 0, (
-            f"Request {rid}: ttfa_s={ttfa}, expected > 0"
-        )
+        assert (
+            ttfa is not None and ttfa > 0
+        ), f"Request {rid}: ttfa_s={ttfa}, expected > 0"
 
 
 def _run_benchmark(
@@ -105,7 +102,7 @@ def _run_benchmark(
         meta=meta,
         output_dir=output_dir,
         max_samples=MAX_SAMPLES,
-        # Ming has no per-request voice-clone path (Gate B/spec section 3.5).
+        # (wenyao) Ming has no per-request voice-clone codepath.
         voice_clone=False,
     )
     speed_results = asyncio.run(run_omni_seedtts_benchmark(config))

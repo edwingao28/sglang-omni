@@ -30,14 +30,11 @@ CONCURRENCY = 4
 STARTUP_TIMEOUT = 1200
 THINKER_TP_SIZE = 2
 
-# MMMU accuracy floor - conservative starting value; tighten after first
-# green CI run yields a baseline (separate reference-run PR).
+# (wenyao) MMMU floor: conservative; tighten after first green CI baseline.
 MMMU_MIN_ACCURACY = 0.40
 
-# TODO (wenyao): Thresholds are placeholders; replace with H20/H100 CI-measured
-# P95 values in the follow-up reference-run PR. Baseline source for first
-# CI run: mirror qwen3 pattern at tests/test_model/test_qwen3_omni_mmmu_ci.py:37-39
-# (which cites PR#265 comment for its own reference measurements).
+# TODO (wenyao): Placeholder P95 — replace with measured values in follow-up
+# reference-run PR. See test_qwen3_omni_mmmu_ci.py:37-39.
 _MMMU_P95 = {
     4: {
         "throughput_qps": 0.05,
@@ -83,16 +80,14 @@ def test_mmmu_accuracy_and_speed(
         max_concurrency=CONCURRENCY,
         output_dir=str(tmp_path / "mmmu"),
         repo_id=DATASETS["mmmu-ci-50"],
-        # Borrow qwen3 mixed-batch regression guard for issue #299.
+        # (wenyao) qwen3 mixed-batch regression guard (issue #299).
         warmup=2,
     )
     results = asyncio.run(run_mmmu_eval(config))
 
     summary = results["summary"]
     failed_count = summary.get("failed", 0)
-    assert failed_count == 0, (
-        f"{failed_count} requests failed; summary={summary}"
-    )
+    assert failed_count == 0, f"{failed_count} requests failed; summary={summary}"
 
     assert summary["accuracy"] >= MMMU_MIN_ACCURACY, (
         f"MMMU accuracy {summary['accuracy']:.4f} "

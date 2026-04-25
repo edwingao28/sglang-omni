@@ -5,15 +5,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import io
-import json
 import importlib.machinery
 import importlib.util
+import io
+import json
 import sys
 import types
 import wave
 
 import pytest
+
 
 def _stub_module(name: str, **attrs):
     module = types.ModuleType(name)
@@ -131,9 +132,7 @@ def test_speed_results_serialize_ttfa(tmp_path) -> None:
     assert "0.3457" in csv_text
 
 
-def test_omni_send_fn_records_non_stream_ttfa(
-    monkeypatch, tmp_path
-) -> None:
+def test_omni_send_fn_records_non_stream_ttfa(monkeypatch, tmp_path) -> None:
     wav_bytes = _wav_bytes()
 
     async def fake_generate_speech(
