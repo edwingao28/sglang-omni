@@ -16,7 +16,8 @@ from sglang_omni.models.ming_omni.components.common import (
 )
 from sglang_omni.models.ming_omni.io import PipelineState, PromptInputs
 from sglang_omni.models.ming_omni.pipeline.next_stage import AUDIO_STAGE, IMAGE_STAGE
-from sglang_omni.preprocessing.audio import load_audio_path
+from sglang_omni.preprocessing.audio import compute_audio_cache_key, load_audio_path
+from sglang_omni.preprocessing.image import compute_image_cache_key
 from sglang_omni.preprocessing.image import ensure_image_list_async
 from sglang_omni.proto import StagePayload
 
@@ -160,6 +161,17 @@ def _inject_top_level_audios(
     return messages
 
 
+def _contextualize_cache_key(base_key: str | None, **context: Any) -> str | None:
+    if base_key is None:
+        return None
+    parts = [base_key]
+    for key in sorted(context):
+        value = context[key]
+        if value is not None:
+            parts.append(f"{key}={value}")
+    return "|".join(parts)
+
+
 class MingPreprocessor:
     """Preprocessor for Ming-Omni model.
 
@@ -271,6 +283,9 @@ class MingPreprocessor:
                             if url:
                                 audio_urls.append(url)
 
+        image_cache_key = compute_image_cache_key(raw_images) if raw_images else None
+        audio_cache_key = compute_audio_cache_key(audio_urls) if audio_urls else None
+
         # --- Load images and audio concurrently ---
         image_coro = ensure_image_list_async(raw_images) if raw_images else None
         audio_coros = (
@@ -377,12 +392,20 @@ class MingPreprocessor:
                 "audio_feats_lengths": mel_lens,
                 "audio_placeholder_loc_lens": placeholder_locs,
             }
+            contextual_audio_cache_key = _contextualize_cache_key(
+                audio_cache_key,
+                target_sr=WHISPER_SAMPLE_RATE,
+            )
+            if contextual_audio_cache_key:
+                encoder_inputs[AUDIO_STAGE]["cache_key"] = contextual_audio_cache_key
 
         if pixel_values is not None and image_grid_thw is not None:
             encoder_inputs[IMAGE_STAGE] = {
                 "pixel_values": pixel_values,
                 "image_grid_thw": image_grid_thw,
             }
+            if image_cache_key:
+                encoder_inputs[IMAGE_STAGE]["cache_key"] = image_cache_key
 
         state = PipelineState(
             raw_inputs=raw_inputs,

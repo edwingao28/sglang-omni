@@ -335,9 +335,6 @@ def create_sglang_thinker_executor_from_config(
         overrides["json_model_override_args"] = model_override
         overrides.setdefault("base_gpu_id", gpu_id)
 
-    # Ming thinker reuses placeholder token IDs across different media, so
-    # RadixCache can incorrectly share multimodal prefixes across requests.
-    overrides["disable_radix_cache"] = True
     overrides.setdefault("disable_cuda_graph", False)
 
     pre_load_avail_mem = avail_gpu_mem(gpu_id)

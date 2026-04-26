@@ -7,6 +7,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 import torch
+import xxhash
 
 from sglang_omni.engines.omni.runtime import ARRequestData, EncoderRequestData
 from sglang_omni.models.ming_omni.io import PipelineState, ThinkerOutput
@@ -17,6 +18,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _DEFAULT_THINKER_MAX_NEW_TOKENS = 2048
+_IMAGE_PATCH_TOKEN = "<imagePatch>"
+_AUDIO_PATCH_TOKEN = "<audioPatch>"
 
 
 def _validate_prompt_seq_len(
@@ -115,7 +118,9 @@ def build_thinker_request(
     model_inputs = dict(thinker_inputs.get("model_inputs", {}))
     if not model_inputs:
         model_inputs = {
-            k: v for k, v in thinker_inputs.items() if k != "capture_model_output_keys"
+            k: v
+            for k, v in thinker_inputs.items()
+            if k not in ("capture_model_output_keys", "media_cache_keys")
         }
 
     capture_keys = thinker_inputs.get("capture_model_output_keys", ())
@@ -166,7 +171,6 @@ def build_sglang_thinker_request(
         max_new_tokens=max_new_tokens,
         request_id=request_id,
     )
-
     input_ids_list = input_ids.to(dtype=torch.long).flatten().tolist()
 
     attention_mask = prompt.get("attention_mask")
@@ -175,10 +179,19 @@ def build_sglang_thinker_request(
     model_inputs = dict(thinker_inputs.get("model_inputs", {}))
     if not model_inputs:
         model_inputs = {
-            k: v for k, v in thinker_inputs.items() if k != "capture_model_output_keys"
+            k: v
+            for k, v in thinker_inputs.items()
+            if k not in ("capture_model_output_keys", "media_cache_keys")
         }
     capture_keys = thinker_inputs.get("capture_model_output_keys", ())
     model_inputs.pop("attention_mask", None)
+
+    media_cache_keys = thinker_inputs.get("media_cache_keys", {})
+    pad_values = _build_pad_values(media_cache_keys, vocab_size=vocab_size)
+    if pad_values:
+        replacements = _build_pad_replacements(tokenizer, pad_values)
+        input_ids_list = _rewrite_input_id_list(input_ids_list, replacements)
+        model_inputs["pad_values"] = pad_values
 
     temperature = params.get("temperature", 0.0)
 
@@ -207,7 +220,7 @@ def build_sglang_thinker_request(
     req._omni_consumed = None
 
     data = SGLangARRequestData(
-        input_ids=input_ids.to(dtype=torch.long).flatten(),
+        input_ids=torch.tensor(input_ids_list, dtype=torch.long),
         attention_mask=(
             attention_mask if isinstance(attention_mask, torch.Tensor) else None
         ),
@@ -219,6 +232,43 @@ def build_sglang_thinker_request(
         req=req,
     )
     return data
+
+
+def _build_pad_values(
+    media_cache_keys: dict[str, str] | Any,
+    *,
+    vocab_size: int,
+) -> dict[str, int]:
+    if not isinstance(media_cache_keys, dict):
+        return {}
+
+    pad_values: dict[str, int] = {}
+    for modality, cache_key in media_cache_keys.items():
+        if not isinstance(cache_key, str) or not cache_key:
+            continue
+        h = xxhash.xxh3_64(cache_key.encode()).intdigest()
+        pad_values[modality] = vocab_size + h % (1 << 30)
+    return pad_values
+
+
+def _build_pad_replacements(tokenizer: Any, pad_values: dict[str, int]) -> dict[int, int]:
+    replacements: dict[int, int] = {}
+    image_pad = pad_values.get("image")
+    if image_pad is not None:
+        replacements[tokenizer.convert_tokens_to_ids(_IMAGE_PATCH_TOKEN)] = image_pad
+    audio_pad = pad_values.get("audio")
+    if audio_pad is not None:
+        replacements[tokenizer.convert_tokens_to_ids(_AUDIO_PATCH_TOKEN)] = audio_pad
+    return replacements
+
+
+def _rewrite_input_id_list(
+    input_ids: list[int],
+    replacements: dict[int, int],
+) -> list[int]:
+    if not replacements:
+        return list(input_ids)
+    return [replacements.get(token_id, token_id) for token_id in input_ids]
 
 
 def apply_thinker_result(

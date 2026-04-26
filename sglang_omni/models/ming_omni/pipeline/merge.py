@@ -27,6 +27,19 @@ def _non_empty(tensor: torch.Tensor | None) -> bool:
     return isinstance(tensor, torch.Tensor) and tensor.numel() > 0
 
 
+def _build_media_cache_keys(state: PipelineState) -> dict[str, str]:
+    encoder_inputs = state.encoder_inputs or {}
+    image_ck = (encoder_inputs.get(IMAGE_STAGE) or {}).get("cache_key")
+    audio_ck = (encoder_inputs.get(AUDIO_STAGE) or {}).get("cache_key")
+
+    media_cache_keys: dict[str, str] = {}
+    if image_ck:
+        media_cache_keys["image"] = f"image:{image_ck}"
+    if audio_ck:
+        media_cache_keys["audio"] = f"audio:{audio_ck}"
+    return media_cache_keys
+
+
 def merge_for_thinker(payloads: dict[str, StagePayload]) -> StagePayload:
     """Aggregate preprocessing + audio encoder outputs into thinker inputs.
 
@@ -104,7 +117,11 @@ def build_thinker_inputs(
 
     if not thinker_model_inputs:
         return {}
-    return {"model_inputs": thinker_model_inputs}
+    result: dict[str, Any] = {"model_inputs": thinker_model_inputs}
+    media_cache_keys = _build_media_cache_keys(state)
+    if media_cache_keys:
+        result["media_cache_keys"] = media_cache_keys
+    return result
 
 
 def decode_events(
