@@ -112,7 +112,7 @@ def create_image_encoder_executor(
     engine = create_single_pass_engine(
         model,
         device=device,
-        use_cache=True,
+        use_cache=False,
         cache_size=64,
     )
     return EngineExecutor(

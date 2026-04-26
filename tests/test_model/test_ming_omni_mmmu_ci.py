@@ -26,7 +26,7 @@ from tests.utils import (
 
 MODEL_PATH = "inclusionAI/Ming-flash-omni-2.0"
 
-CONCURRENCY = 1
+CONCURRENCY = 4
 STARTUP_TIMEOUT = 2400
 THINKER_TP_SIZE = 2
 CPU_OFFLOAD_GB = 0
