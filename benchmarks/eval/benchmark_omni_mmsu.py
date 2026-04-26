@@ -80,6 +80,7 @@ import asyncio
 import logging
 import os
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -157,7 +158,11 @@ async def run(
 
     print_mmsu_summary(metrics, args.model, speed_metrics=speed)
 
-    output: dict = {"accuracy": metrics, "speed": speed}
+    output: dict = {
+        "accuracy": metrics,
+        "speed": speed,
+        "per_sample": [asdict(r) for r in results],
+    }
     wer_results = None
     if audio_mode:
         wer_results = compute_text_audio_consistency(
