@@ -26,7 +26,7 @@ from tests.utils import (
 
 MODEL_PATH = "inclusionAI/Ming-flash-omni-2.0"
 
-CONCURRENCY = 4
+CONCURRENCY = 1
 STARTUP_TIMEOUT = 2400
 THINKER_TP_SIZE = 2
 CPU_OFFLOAD_GB = 0
@@ -84,7 +84,6 @@ def test_mmmu_accuracy_and_speed(
         max_concurrency=CONCURRENCY,
         output_dir=str(tmp_path / "mmmu"),
         repo_id=DATASETS["mmmu-ci-50"],
-        max_samples=10,
         max_tokens=MAX_TOKENS,
         # (wenyao) qwen3 mixed-batch regression guard (issue #299).
         warmup=2,
@@ -102,6 +101,13 @@ def test_mmmu_accuracy_and_speed(
         for sample in results.get("per_sample", [])
         if not sample.get("is_success")
     ][:3]
+    print(
+        f"\n[MMMU] accuracy={summary['accuracy']:.4f} "
+        f"correct={summary.get('correct')}/{summary.get('total_samples')} "
+        f"mc_fallback={summary.get('mc_fallback')} failed={failed_count} "
+        f"threshold={MMMU_MIN_ACCURACY}"
+    )
+
     assert failed_count == 0, (
         f"{failed_count} requests failed; summary={summary}; "
         f"first_failures={first_failures}"
