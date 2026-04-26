@@ -601,14 +601,30 @@ class SGLangModelRunner:
                 ("video", video_token_id),
                 ("audio", audio_token_id),
             ]:
-                if token_id is None:
-                    continue
                 embeds = omni_inputs.get(f"{modality}_embeds")
+                if token_id is None:
+                    if embeds is not None:
+                        logger.warning(
+                            "rid=%s: %s_token_id is None; dropping %d %s embedding rows",
+                            getattr(req, "rid", "?"),
+                            modality,
+                            int(embeds.shape[0]) if hasattr(embeds, "shape") else -1,
+                            modality,
+                        )
+                    continue
                 if embeds is None:
                     continue
                 match_id = pad_values.get(modality, token_id)
                 mask = req_input_ids == match_id
                 if not mask.any():
+                    if embeds.numel() > 0:
+                        logger.warning(
+                            "rid=%s: %s_embeds has %d rows but no <%s> placeholder in input_ids",
+                            getattr(req, "rid", "?"),
+                            modality,
+                            int(embeds.shape[0]) if hasattr(embeds, "shape") else -1,
+                            modality,
+                        )
                     continue
                 n_tokens = int(mask.sum().item())
                 offset = consumed.get(modality, 0)
