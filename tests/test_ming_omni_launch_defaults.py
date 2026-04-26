@@ -73,7 +73,7 @@ def test_ming_ci_server_fixtures_pin_tp_size(relative_path: str) -> None:
 def test_ming_mmmu_ci_bounds_decode_tokens() -> None:
     source = (PROJECT_ROOT / "tests/test_model/test_ming_omni_mmmu_ci.py").read_text()
 
-    assert "MAX_TOKENS = 256" in source
+    assert "MAX_TOKENS = 512" in source
     assert "max_tokens=MAX_TOKENS" in source
     assert "CPU_OFFLOAD_GB = 0" in source
     assert '"--cpu-offload-gb"' in source
