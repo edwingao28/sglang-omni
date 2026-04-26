@@ -138,6 +138,28 @@ def _inject_top_level_images(
     return messages
 
 
+def _inject_top_level_audios(
+    messages: list[dict[str, Any]],
+    audios: list[str],
+) -> list[dict[str, Any]]:
+    """Convert top-level ``audios`` into inline ``audio_url`` content items."""
+    messages = list(messages)
+    for idx, msg in enumerate(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        new_content: list[dict[str, Any]] = [
+            {"type": "audio_url", "audio_url": {"url": url}} for url in audios
+        ]
+        if isinstance(content, str):
+            new_content.append({"type": "text", "text": content})
+        elif isinstance(content, list):
+            new_content.extend(content)
+        messages[idx] = {**msg, "content": new_content}
+        break
+    return messages
+
+
 class MingPreprocessor:
     """Preprocessor for Ming-Omni model.
 
@@ -213,14 +235,13 @@ class MingPreprocessor:
             audio_urls = raw_inputs.get("audios", [])
             top_level_images = raw_inputs.get("images") or []
 
-        # If top-level images are provided (e.g. {"images": ["url1", ...]}),
-        # inject them as inline content items in the first user message so that
-        # placeholder insertion and image extraction use a single code path.
         if top_level_images:
             messages = _inject_top_level_images(messages, top_level_images)
+        if audio_urls:
+            messages = _inject_top_level_audios(messages, audio_urls)
 
-        # --- Extract image URLs/data from messages ---
         raw_images: list[Any] = []
+        audio_urls = []
         for msg in messages:
             content = msg.get("content", "")
             if isinstance(content, list):
@@ -240,6 +261,15 @@ class MingPreprocessor:
                             img = item.get("image", "")
                             if img:
                                 raw_images.append(img)
+                        elif item_type == "audio_url":
+                            url_data = item.get("audio_url", {})
+                            url = (
+                                url_data.get("url", "")
+                                if isinstance(url_data, dict)
+                                else str(url_data)
+                            )
+                            if url:
+                                audio_urls.append(url)
 
         # --- Load images and audio concurrently ---
         image_coro = ensure_image_list_async(raw_images) if raw_images else None
