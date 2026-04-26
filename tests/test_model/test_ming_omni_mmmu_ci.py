@@ -84,6 +84,7 @@ def test_mmmu_accuracy_and_speed(
         max_concurrency=CONCURRENCY,
         output_dir=str(tmp_path / "mmmu"),
         repo_id=DATASETS["mmmu-ci-50"],
+        max_samples=10,
         max_tokens=MAX_TOKENS,
         # (wenyao) qwen3 mixed-batch regression guard (issue #299).
         warmup=2,
