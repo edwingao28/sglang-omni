@@ -37,6 +37,7 @@ MODEL_PATH = "inclusionAI/Ming-flash-omni-2.0"
 CONCURRENCY = 4
 STARTUP_TIMEOUT = 2400
 THINKER_TP_SIZE = 2
+CPU_OFFLOAD_GB = 0
 MMSU_MIN_ACCURACY = 0.40
 
 # TODO (wenyao): Placeholder P95 — Ming MMSU has no baseline yet; loose bounds.
@@ -67,6 +68,8 @@ def server_process(tmp_path_factory: pytest.TempPathFactory):
         str(port),
         "--tp-size",
         str(THINKER_TP_SIZE),
+        "--cpu-offload-gb",
+        str(CPU_OFFLOAD_GB),
         "--model-name",
         "ming-omni",
     ]

@@ -24,6 +24,7 @@ THINKER_MAX_SEQ_LEN = 128
 STARTUP_TIMEOUT = 2400
 REQUEST_TIMEOUT = 180
 THINKER_TP_SIZE = 2
+CPU_OFFLOAD_GB = 0
 
 
 def _post_chat(
@@ -53,6 +54,8 @@ def server_process(tmp_path_factory: pytest.TempPathFactory):
         str(port),
         "--tp-size",
         str(THINKER_TP_SIZE),
+        "--cpu-offload-gb",
+        str(CPU_OFFLOAD_GB),
     ]
     proc = start_server_from_cmd(cmd, log_file, port, timeout=STARTUP_TIMEOUT)
     proc.port = port
