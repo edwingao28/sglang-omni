@@ -9,7 +9,8 @@ import torch
 @dataclass
 class Payload:
     embeds: torch.Tensor | None = None
-    deepstack: list[torch.Tensor] | None = None
+    deepstack: list[object] | None = None
+    extra: object | None = None
 
 
 def test_relocate_moves_top_level_tensor():
@@ -52,3 +53,47 @@ def test_relocate_handles_cycle():
     p["self"] = p
     relocate_request_tensors(p, torch.device("cpu"))
     assert p["t"].device.type == "cpu"
+
+
+def test_relocate_replaces_tuple_attr_with_moved_tensor():
+    from sglang_omni_v1.scheduling.omni_request_relocate import (
+        relocate_request_tensors,
+    )
+
+    original_tuple = (torch.randn(4),)
+    p = Payload(extra=original_tuple)
+
+    relocate_request_tensors(p, torch.device("cpu"))
+
+    assert p.extra is not original_tuple
+    assert isinstance(p.extra, tuple)
+    assert p.extra[0].device.type == "cpu"
+
+
+def test_relocate_preserves_shared_tuple_identity():
+    from sglang_omni_v1.scheduling.omni_request_relocate import (
+        relocate_request_tensors,
+    )
+
+    shared_tuple = (torch.randn(4),)
+    p = Payload(deepstack=[shared_tuple], extra=shared_tuple)
+
+    relocate_request_tensors(p, torch.device("cpu"))
+
+    assert p.extra is p.deepstack[0]
+    assert p.extra is not shared_tuple
+    assert p.extra[0].device.type == "cpu"
+
+
+def test_relocate_preserves_tuple_list_cycle_backref():
+    from sglang_omni_v1.scheduling.omni_request_relocate import (
+        relocate_request_tensors,
+    )
+
+    holder = []
+    p = Payload(deepstack=None, extra=(holder,))
+    holder.append(p.extra)
+
+    relocate_request_tensors(p, torch.device("cpu"))
+
+    assert p.extra[0][0] is p.extra
