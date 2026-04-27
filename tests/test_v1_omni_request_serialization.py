@@ -31,6 +31,11 @@ class OuterPayload:
     ids: list[int]
 
 
+@dataclass
+class TupleCyclePayload:
+    items: tuple
+
+
 def test_sanitize_payload_is_pickle_safe():
     from sglang_omni_v1.scheduling.omni_request_serialization import (
         sanitize_request_payload,
@@ -74,6 +79,23 @@ def test_sanitize_payload_handles_cycle_via_memo():
     p["self"] = p
     out = sanitize_request_payload(p)
     assert out["self"] is out
+
+
+def test_sanitize_payload_handles_tuple_cycle_via_memo_placeholder():
+    from sglang_omni_v1.scheduling.omni_request_serialization import (
+        sanitize_request_payload,
+    )
+
+    holder = []
+    payload = TupleCyclePayload(items=(holder,))
+    holder.append(payload.items)
+
+    out = sanitize_request_payload(payload)
+
+    assert isinstance(out.items, tuple)
+    assert out.items is not payload.items
+    assert out.items[0] is not holder
+    assert isinstance(out.items[0], list)
 
 
 def test_sanitize_payload_traverses_nested_dataclass_attrs():

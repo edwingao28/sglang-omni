@@ -43,7 +43,11 @@ def _to_cpu_copy(obj: Any, memo: dict[int, Any]) -> Any:
         return new_list
 
     if isinstance(obj, tuple):
-        new_tuple = tuple(_to_cpu_copy(value, memo) for value in obj)
+        placeholder: list[Any] = []
+        memo[obj_id] = placeholder
+        for value in obj:
+            placeholder.append(_to_cpu_copy(value, memo))
+        new_tuple = tuple(placeholder)
         memo[obj_id] = new_tuple
         return new_tuple
 
