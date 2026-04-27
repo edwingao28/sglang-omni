@@ -206,7 +206,12 @@ def _run_tp_replica(
         spec.tp_rank,
     )
 
-    if hasattr(scheduler, "event_loop"):
+    # Replica ranks are fed by OmniScheduler.recv_requests TP broadcasts (B5).
+    # Start the scheduler through the same lifecycle API used by Stage when
+    # possible, then fall back to older loop entry points for compatibility.
+    if hasattr(scheduler, "start"):
+        scheduler.start()
+    elif hasattr(scheduler, "event_loop"):
         scheduler.event_loop()
     elif hasattr(scheduler, "_event_loop_normal"):
         scheduler._running = True
