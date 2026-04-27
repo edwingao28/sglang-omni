@@ -531,6 +531,8 @@ def create_sglang_thinker_executor_from_config(
     model_path: str,
     *,
     gpu_id: int = 0,
+    tp_rank: int = 0,
+    tp_size: int = 1,
     thinker_max_seq_len: int = 8192,
     server_args_overrides: dict[str, Any] | None = None,
     speech_enabled: bool = False,
@@ -538,9 +540,10 @@ def create_sglang_thinker_executor_from_config(
     """Returns OmniScheduler for thinker."""
     from sglang_omni_v1.models.qwen3_omni.bootstrap import create_thinker_scheduler
 
-    overrides = {"disable_cuda_graph": True}
+    overrides = {"disable_cuda_graph": True, "tp_size": tp_size}
     if server_args_overrides:
         overrides.update(server_args_overrides)
+    overrides["tp_size"] = tp_size
     server_args = build_sglang_server_args(
         model_path,
         context_length=thinker_max_seq_len,
@@ -549,6 +552,8 @@ def create_sglang_thinker_executor_from_config(
     return create_thinker_scheduler(
         server_args,
         gpu_id,
+        tp_rank=tp_rank,
+        tp_size=tp_size,
         speech_enabled=speech_enabled,
     )
 
@@ -557,6 +562,8 @@ def create_talker_ar_executor_from_config(
     model_path: str,
     *,
     gpu_id: int = 0,
+    tp_rank: int = 0,
+    tp_size: int = 1,
     talker_max_seq_len: int = 4096,
     server_args_overrides: dict[str, Any] | None = None,
     speech_enabled: bool = True,
@@ -566,9 +573,10 @@ def create_talker_ar_executor_from_config(
     """Returns OmniScheduler for talker."""
     from sglang_omni_v1.models.qwen3_omni.bootstrap import create_talker_scheduler
 
-    overrides = {"disable_cuda_graph": True}
+    overrides = {"disable_cuda_graph": True, "tp_size": tp_size}
     if server_args_overrides:
         overrides.update(server_args_overrides)
+    overrides["tp_size"] = tp_size
     server_args = build_sglang_server_args(
         model_path,
         context_length=talker_max_seq_len,
@@ -577,6 +585,8 @@ def create_talker_ar_executor_from_config(
     return create_talker_scheduler(
         server_args,
         gpu_id,
+        tp_rank=tp_rank,
+        tp_size=tp_size,
         weight_prefix=weight_prefix,
         speech_enabled=speech_enabled,
         feedback_enabled=feedback_enabled,

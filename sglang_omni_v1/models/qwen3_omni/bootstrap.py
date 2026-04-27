@@ -10,9 +10,21 @@ def create_thinker_scheduler(
     server_args: Any,
     gpu_id: int = 0,
     *,
+    tp_rank: int = 0,
+    tp_size: int = 1,
     speech_enabled: bool = False,
 ):
     """Create the Qwen thinker scheduler."""
+    assert tp_size == server_args.tp_size, (
+        f"tp_size kwarg ({tp_size}) != server_args.tp_size ({server_args.tp_size}) "
+        "-- stage entry point must pass tp_size into overrides"
+    )
+    if tp_size > 1:
+        server_args.disable_overlap_schedule = True
+    enable_overlap = not getattr(server_args, "disable_overlap_schedule", False) and (
+        tp_size == 1
+    )
+
     from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
     from sglang_omni_v1.model_runner.thinker_model_runner import ThinkerModelRunner
@@ -42,6 +54,7 @@ def create_thinker_scheduler(
     ) = create_sglang_infrastructure(
         server_args,
         gpu_id,
+        tp_rank=tp_rank,
         capture_hidden_layers=capture_hidden_layers,
     )
 
@@ -82,6 +95,7 @@ def create_thinker_scheduler(
         request_builder=request_builder,
         result_adapter=result_adapter,
         stream_output_builder=stream_output_builder,
+        enable_overlap=enable_overlap,
     )
 
 
@@ -89,11 +103,20 @@ def create_talker_scheduler(
     server_args: Any,
     gpu_id: int = 0,
     *,
+    tp_rank: int = 0,
+    tp_size: int = 1,
     weight_prefix: str = "talker.",
     speech_enabled: bool = True,
     feedback_enabled: bool = True,
 ):
     """Create the Qwen talker scheduler."""
+    assert tp_size == server_args.tp_size, (
+        f"tp_size kwarg ({tp_size}) != server_args.tp_size ({server_args.tp_size}) "
+        "-- stage entry point must pass tp_size into overrides"
+    )
+    if tp_size != 1:
+        raise NotImplementedError("Qwen3 talker TP is not supported in this milestone")
+
     del speech_enabled
     from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
@@ -126,6 +149,7 @@ def create_talker_scheduler(
     ) = create_sglang_infrastructure(
         server_args,
         gpu_id,
+        tp_rank=tp_rank,
         model_arch_override="Qwen3OmniTalker",
         weight_prefix=weight_prefix,
     )

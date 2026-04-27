@@ -10,6 +10,7 @@ def create_sglang_infrastructure(
     server_args: Any,
     gpu_id: int,
     *,
+    tp_rank: int = 0,
     model_arch_override: str | None = None,
     weight_prefix: str | None = None,
     capture_hidden_layers: list[int] | None = None,
@@ -29,6 +30,7 @@ def create_sglang_infrastructure(
         ),
         server_args=server_args,
         gpu_id=gpu_id,
+        tp_rank=tp_rank,
     )
 
     if capture_hidden_layers:
