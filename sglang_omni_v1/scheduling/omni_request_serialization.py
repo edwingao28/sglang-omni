@@ -20,6 +20,7 @@ import torch
 logger = logging.getLogger(__name__)
 
 _pickle_verified = False
+_TUPLE_PLACEHOLDER_RESOLUTION_PASSES = 8
 
 
 class _TuplePlaceholder:
@@ -98,7 +99,7 @@ def _resolve_tuple_placeholders(obj: Any, seen: set[int] | None = None) -> Any:
             obj.resolving = False
 
         for item in obj.value:
-            _replace_tuple_placeholder_refs(item, obj, obj.value, seen=set())
+            _replace_object_refs(item, obj, obj.value, seen=set())
         return obj.value
 
     obj_id = id(obj)
@@ -138,13 +139,13 @@ def _resolve_tuple_placeholders(obj: Any, seen: set[int] | None = None) -> Any:
     return obj
 
 
-def _replace_tuple_placeholder_refs(
+def _replace_object_refs(
     obj: Any,
-    target: _TuplePlaceholder,
-    replacement: tuple[Any, ...],
+    target: Any,
+    replacement: Any,
     seen: set[int],
 ) -> None:
-    """Replace in-progress tuple backrefs inside mutable descendants."""
+    """Replace object identity backrefs inside mutable descendants."""
     if obj is target:
         return
 
@@ -158,7 +159,7 @@ def _replace_tuple_placeholder_refs(
             if value is target:
                 obj[i] = replacement
             else:
-                _replace_tuple_placeholder_refs(value, target, replacement, seen)
+                _replace_object_refs(value, target, replacement, seen)
         return
 
     if isinstance(obj, dict):
@@ -169,20 +170,18 @@ def _replace_tuple_placeholder_refs(
                 obj[replacement] = value
                 current_key = replacement
             else:
-                _replace_tuple_placeholder_refs(key, target, replacement, seen)
+                _replace_object_refs(key, target, replacement, seen)
 
             current_value = obj[current_key]
             if current_value is target:
                 obj[current_key] = replacement
             else:
-                _replace_tuple_placeholder_refs(
-                    current_value, target, replacement, seen
-                )
+                _replace_object_refs(current_value, target, replacement, seen)
         return
 
     if isinstance(obj, tuple):
         for value in obj:
-            _replace_tuple_placeholder_refs(value, target, replacement, seen)
+            _replace_object_refs(value, target, replacement, seen)
         return
 
     if hasattr(obj, "__dict__"):
@@ -190,7 +189,143 @@ def _replace_tuple_placeholder_refs(
             if value is target:
                 setattr(obj, attr, replacement)
             else:
-                _replace_tuple_placeholder_refs(value, target, replacement, seen)
+                _replace_object_refs(value, target, replacement, seen)
+
+
+def _replace_remaining_tuple_placeholders(
+    obj: Any,
+    seen: set[int],
+    tuple_replacements: dict[int, tuple[Any, ...]],
+) -> tuple[Any, bool]:
+    """Replace leftover placeholders, rebuilding tuples when needed."""
+    obj_id = id(obj)
+    if obj_id in tuple_replacements:
+        return tuple_replacements[obj_id], True
+
+    if isinstance(obj, _TuplePlaceholder):
+        value = _resolve_tuple_placeholders(obj)
+        if value is obj:
+            return obj, False
+        new_value, _ = _replace_remaining_tuple_placeholders(
+            value, seen, tuple_replacements
+        )
+        return new_value, True
+
+    if obj_id in seen:
+        return obj, False
+
+    if isinstance(obj, list):
+        seen.add(obj_id)
+        changed = False
+        for i, value in enumerate(obj):
+            new_value, value_changed = _replace_remaining_tuple_placeholders(
+                value, seen, tuple_replacements
+            )
+            changed = changed or value_changed or new_value is not value
+            obj[i] = new_value
+        return obj, changed
+
+    if isinstance(obj, dict):
+        seen.add(obj_id)
+        changed = False
+        for key, value in list(obj.items()):
+            new_key, key_changed = _replace_remaining_tuple_placeholders(
+                key, seen, tuple_replacements
+            )
+            new_value, value_changed = _replace_remaining_tuple_placeholders(
+                value, seen, tuple_replacements
+            )
+            changed = (
+                changed
+                or key_changed
+                or value_changed
+                or new_key is not key
+                or new_value is not value
+            )
+            if new_key is key:
+                obj[key] = new_value
+            else:
+                del obj[key]
+                obj[new_key] = new_value
+        return obj, changed
+
+    if isinstance(obj, tuple):
+        seen.add(obj_id)
+        changed = False
+        items = []
+        for value in obj:
+            new_value, value_changed = _replace_remaining_tuple_placeholders(
+                value, seen, tuple_replacements
+            )
+            changed = changed or value_changed or new_value is not value
+            items.append(new_value)
+
+        if not changed:
+            return obj, False
+
+        new_tuple = tuple(items)
+        tuple_replacements[obj_id] = new_tuple
+        for item in new_tuple:
+            _replace_object_refs(item, obj, new_tuple, seen=set())
+        return new_tuple, True
+
+    if hasattr(obj, "__dict__"):
+        seen.add(obj_id)
+        changed = False
+        for attr, value in vars(obj).items():
+            new_value, value_changed = _replace_remaining_tuple_placeholders(
+                value, seen, tuple_replacements
+            )
+            changed = changed or value_changed or new_value is not value
+            setattr(obj, attr, new_value)
+        return obj, changed
+
+    return obj, False
+
+
+def _contains_tuple_placeholder(obj: Any, seen: set[int] | None = None) -> bool:
+    """Return whether any tuple placeholder remains reachable from obj."""
+    if seen is None:
+        seen = set()
+
+    if isinstance(obj, _TuplePlaceholder):
+        return True
+
+    obj_id = id(obj)
+    if obj_id in seen:
+        return False
+    seen.add(obj_id)
+
+    if isinstance(obj, dict):
+        return any(
+            _contains_tuple_placeholder(key, seen)
+            or _contains_tuple_placeholder(value, seen)
+            for key, value in obj.items()
+        )
+
+    if isinstance(obj, (list, tuple)):
+        return any(_contains_tuple_placeholder(value, seen) for value in obj)
+
+    if hasattr(obj, "__dict__"):
+        return any(
+            _contains_tuple_placeholder(value, seen)
+            for value in vars(obj).values()
+        )
+
+    return False
+
+
+def _resolve_all_tuple_placeholders(obj: Any) -> Any:
+    """Resolve tuple placeholders until none remain in the sanitized graph."""
+    resolved = _resolve_tuple_placeholders(obj)
+    for _ in range(_TUPLE_PLACEHOLDER_RESOLUTION_PASSES):
+        resolved, _ = _replace_remaining_tuple_placeholders(
+            resolved, seen=set(), tuple_replacements={}
+        )
+        if not _contains_tuple_placeholder(resolved):
+            return resolved
+
+    raise RuntimeError("Tuple placeholder remained after request sanitization")
 
 
 def _verify_pickle_safe(payload: Any) -> None:
@@ -224,7 +359,7 @@ def sanitize_request_payload(payload: Any) -> Any:
     """Return a pickle-safe, CPU-backed copy of a request broadcast payload."""
     global _pickle_verified
 
-    sanitized = _resolve_tuple_placeholders(_to_cpu_copy(payload, memo={}))
+    sanitized = _resolve_all_tuple_placeholders(_to_cpu_copy(payload, memo={}))
     if not _pickle_verified:
         _verify_pickle_safe(sanitized)
         _pickle_verified = True

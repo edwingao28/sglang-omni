@@ -36,6 +36,29 @@ class TupleCyclePayload:
     items: tuple
 
 
+def _assert_no_tuple_placeholder(obj, seen=None):
+    if seen is None:
+        seen = set()
+
+    assert type(obj).__name__ != "_TuplePlaceholder"
+
+    obj_id = id(obj)
+    if obj_id in seen:
+        return
+    seen.add(obj_id)
+
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            _assert_no_tuple_placeholder(key, seen)
+            _assert_no_tuple_placeholder(value, seen)
+    elif isinstance(obj, (list, tuple)):
+        for value in obj:
+            _assert_no_tuple_placeholder(value, seen)
+    elif hasattr(obj, "__dict__"):
+        for value in vars(obj).values():
+            _assert_no_tuple_placeholder(value, seen)
+
+
 def test_sanitize_payload_is_pickle_safe():
     from sglang_omni_v1.scheduling.omni_request_serialization import (
         sanitize_request_payload,
@@ -97,6 +120,25 @@ def test_sanitize_payload_handles_tuple_cycle_via_memo_placeholder():
     assert out.items[0] is not holder
     assert isinstance(out.items[0], list)
     assert out.items[0][0] is out.items
+
+
+def test_sanitize_payload_resolves_nested_tuple_cycle_placeholders():
+    from sglang_omni_v1.scheduling.omni_request_serialization import (
+        sanitize_request_payload,
+    )
+
+    holder = []
+    a = (holder,)
+    b = (a,)
+    holder.append(b)
+
+    out = sanitize_request_payload(b)
+
+    _assert_no_tuple_placeholder(out)
+    assert isinstance(out, tuple)
+    assert isinstance(out[0], tuple)
+    assert isinstance(out[0][0], list)
+    assert out[0][0][0] is out
 
 
 def test_sanitize_payload_traverses_nested_dataclass_attrs():
