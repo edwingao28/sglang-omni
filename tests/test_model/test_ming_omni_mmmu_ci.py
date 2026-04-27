@@ -30,7 +30,9 @@ CONCURRENCY = 4
 STARTUP_TIMEOUT = 2400
 THINKER_TP_SIZE = 2
 CPU_OFFLOAD_GB = 0
-MAX_TOKENS = 512
+# MMMU prompts request step-by-step reasoning before the final "Answer: X".
+# 512 tokens often truncates before the final answer line, inflating MC fallback.
+MAX_TOKENS = 2048
 
 # (wenyao) MMMU floor: conservative; tighten after first green CI baseline.
 MMMU_MIN_ACCURACY = 0.40
