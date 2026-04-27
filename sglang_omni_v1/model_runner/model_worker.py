@@ -113,6 +113,14 @@ class ModelWorker:
         )
         return batch_result
 
+    @property
+    def tp_cpu_group(self):
+        return self.model_runner.tp_group.cpu_group
+
+    @property
+    def tp_size(self) -> int:
+        return self.server_args.tp_size
+
 
 def _resolve_nccl_port() -> int:
     master_port = os.environ.get("MASTER_PORT")
