@@ -144,13 +144,29 @@ def _inject_top_level_audios(
     audios: list[str],
 ) -> list[dict[str, Any]]:
     """Convert top-level ``audios`` into inline ``audio_url`` content items."""
+    if not audios:
+        return messages
     messages = list(messages)
     for idx, msg in enumerate(messages):
         if msg.get("role") != "user":
             continue
         content = msg.get("content", "")
+        existing_urls: set[str] = set()
+        if isinstance(content, list):
+            for item in content:
+                if not isinstance(item, dict) or item.get("type") != "audio_url":
+                    continue
+                url_data = item.get("audio_url", {})
+                url = (
+                    url_data.get("url", "")
+                    if isinstance(url_data, dict)
+                    else str(url_data)
+                )
+                if url:
+                    existing_urls.add(url)
+        missing_audios = [url for url in audios if url not in existing_urls]
         new_content: list[dict[str, Any]] = [
-            {"type": "audio_url", "audio_url": {"url": url}} for url in audios
+            {"type": "audio_url", "audio_url": {"url": url}} for url in missing_audios
         ]
         if isinstance(content, str):
             new_content.append({"type": "text", "text": content})
