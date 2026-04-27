@@ -72,22 +72,42 @@ def stage_process_main(
     spec: StageProcessSpec,
     ready_event: multiprocessing.Event,
 ) -> None:
-    """Subprocess entrypoint: construct a Stage from *spec* and run it.
+    """Subprocess entrypoint for one logical stage rank.
 
     No pipeline re-compilation happens here — *spec* already contains every
-    resolved parameter the Stage needs.
+    resolved parameter the Stage needs. TP rank 0 owns the external Stage
+    sockets; peer ranks run only the scheduler replica.
     """
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
     tp_suffix = f"-tp{spec.tp_rank}" if spec.tp_size > 1 else ""
     log = logging.getLogger(f"stage.{spec.stage_name}{tp_suffix}")
 
     try:
-        _run_stage(spec, ready_event, log)
+        _setup_cuda_device(spec, log)
+        if spec.tp_size > 1:
+            _init_torch_distributed(spec, log)
+
+        if spec.tp_rank == 0:
+            _run_stage(spec, ready_event, log)
+        else:
+            _run_tp_replica(spec, ready_event, log)
     except Exception:
         import traceback
 
         log.error("Stage process failed:\n%s", traceback.format_exc())
         sys.exit(1)
+
+
+def _setup_cuda_device(spec: StageProcessSpec, log: logging.Logger) -> None:
+    """Set the current CUDA device when this stage has an explicit GPU."""
+    gpu_id = spec.relay_config.get("gpu_id")
+    if gpu_id is None:
+        gpu_id = spec.factory_args.get("gpu_id")
+    if gpu_id is not None:
+        import torch
+
+        torch.cuda.set_device(int(gpu_id))
+        log.info("Set current CUDA device to %s for stage %s", gpu_id, spec.stage_name)
 
 
 def _run_stage(
@@ -99,19 +119,6 @@ def _run_stage(
     from sglang_omni_v1.pipeline.stage.runtime import Stage
     from sglang_omni_v1.pipeline.stage.stream_queue import StreamQueue
     from sglang_omni_v1.utils import import_string
-
-    gpu_id = spec.relay_config.get("gpu_id")
-    if gpu_id is None:
-        gpu_id = spec.factory_args.get("gpu_id")
-    if gpu_id is not None:
-        import torch
-
-        torch.cuda.set_device(int(gpu_id))
-        log.info("Set current CUDA device to %s for stage %s", gpu_id, spec.stage_name)
-
-    # --- TP: initialise torch.distributed for this stage's NCCL group ---
-    if spec.tp_size > 1:
-        _init_torch_distributed(spec, log)
 
     # --- Build scheduler via factory ---
     log.info(
@@ -173,6 +180,39 @@ def _run_stage(
         await stage.run()
 
     asyncio.run(_start_and_run())
+
+
+def _run_tp_replica(
+    spec: StageProcessSpec,
+    ready_event: multiprocessing.Event,
+    log: logging.Logger,
+) -> None:
+    """Rank >=1 path: build scheduler only; no Stage, no recv_endpoint bind."""
+    from sglang_omni_v1.utils import import_string
+
+    log.info(
+        "Building scheduler replica for %s (tp_rank=%d/%d) ...",
+        spec.stage_name,
+        spec.tp_rank,
+        spec.tp_size,
+    )
+    factory = import_string(spec.factory)
+    scheduler = factory(**spec.factory_args)
+
+    ready_event.set()
+    log.info(
+        "Scheduler replica %s (tp_rank=%d) ready",
+        spec.stage_name,
+        spec.tp_rank,
+    )
+
+    if hasattr(scheduler, "event_loop"):
+        scheduler.event_loop()
+    elif hasattr(scheduler, "_event_loop_normal"):
+        scheduler._running = True
+        scheduler._event_loop_normal()
+    else:
+        raise AttributeError("Scheduler replica has no event loop entry point")
 
 
 def _init_torch_distributed(spec: StageProcessSpec, log: logging.Logger) -> None:

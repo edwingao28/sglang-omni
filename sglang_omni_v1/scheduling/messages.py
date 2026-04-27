@@ -10,7 +10,9 @@ from typing import Any, Literal
 @dataclass
 class IncomingMessage:
     request_id: str
-    type: Literal["new_request", "stream_chunk", "stream_done"]
+    type: Literal[
+        "new_request", "stream_chunk", "stream_done", "abort", "shutdown"
+    ]
     data: Any = None
 
 
