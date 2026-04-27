@@ -108,7 +108,9 @@ class Qwen3OmniSpeechPipelineConfig(PipelineConfig):
             name="talker_ar",
             factory=f"{_PKG}.stages.create_talker_ar_executor_from_config",
             factory_args={
-                "talker_max_seq_len": 4096,
+                # Note (Xuesong): must exceed talker_max_new_tokens (4096) +
+                # prefill, else req_to_token_pool OOBs and crashes talker_ar.
+                "talker_max_seq_len": 8192,
                 "speech_enabled": True,
                 "feedback_enabled": True,
             },
