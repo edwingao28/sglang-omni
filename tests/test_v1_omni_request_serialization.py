@@ -96,6 +96,7 @@ def test_sanitize_payload_handles_tuple_cycle_via_memo_placeholder():
     assert out.items is not payload.items
     assert out.items[0] is not holder
     assert isinstance(out.items[0], list)
+    assert out.items[0][0] is out.items
 
 
 def test_sanitize_payload_traverses_nested_dataclass_attrs():
