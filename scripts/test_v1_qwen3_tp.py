@@ -83,20 +83,38 @@ def ensure_port_available(host: str, port: int) -> None:
 
 
 def send_server_signal(proc: subprocess.Popen[bytes], sig: signal.Signals) -> None:
+    # The server is started with start_new_session=True, so the original
+    # parent PID is also the process-group ID even if the parent exits first.
+    process_group_id = proc.pid
     try:
-        process_group_id = os.getpgid(proc.pid)
-    except ProcessLookupError:
-        process_group_id = None
-
-    try:
-        if process_group_id is not None:
-            os.killpg(process_group_id, sig)
-        elif sig == signal.SIGTERM:
-            proc.terminate()
-        else:
-            proc.kill()
-    except ProcessLookupError:
+        os.killpg(process_group_id, sig)
+    except (ProcessLookupError, PermissionError):
         pass
+
+
+def process_group_exists(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def wait_for_server_group_exit(
+    proc: subprocess.Popen[bytes],
+    process_group_id: int,
+    *,
+    timeout: float,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while process_group_exists(process_group_id):
+        proc.poll()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(proc.args, timeout)
+        time.sleep(min(0.2, remaining))
 
 
 def wait_until_ready(
@@ -190,15 +208,19 @@ def start_server(
 
 
 def stop_server(proc: subprocess.Popen[bytes], *, shutdown_timeout: float = 20.0) -> None:
-    if proc.poll() is not None:
-        return
+    process_group_id = proc.pid
     send_server_signal(proc, signal.SIGTERM)
     try:
-        proc.wait(timeout=shutdown_timeout)
+        wait_for_server_group_exit(proc, process_group_id, timeout=shutdown_timeout)
     except subprocess.TimeoutExpired:
         print("Server did not terminate promptly; killing it.", file=sys.stderr, flush=True)
         send_server_signal(proc, signal.SIGKILL)
-        proc.wait(timeout=shutdown_timeout)
+        wait_for_server_group_exit(proc, process_group_id, timeout=shutdown_timeout)
+    finally:
+        try:
+            proc.wait(timeout=0)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def collect_results(
