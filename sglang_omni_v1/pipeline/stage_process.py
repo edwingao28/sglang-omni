@@ -231,8 +231,10 @@ def _init_torch_distributed(spec: StageProcessSpec, log: logging.Logger) -> None
     if spec.nccl_port is not None:
         os.environ["MASTER_PORT"] = str(spec.nccl_port)
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(spec.gpu_id)
-    torch.cuda.set_device(0)  # after CUDA_VISIBLE_DEVICES, local device is 0
+    # The stage config already stores the CUDA-visible logical device id.
+    # Do not remap CUDA_VISIBLE_DEVICES here; model runner and relay code also
+    # address the configured device as cuda:{spec.gpu_id}.
+    torch.cuda.set_device(int(spec.gpu_id))
 
     log.info(
         "Initialising torch.distributed for stage=%s tp_rank=%d/%d nccl_port=%s",

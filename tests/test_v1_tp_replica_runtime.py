@@ -2,9 +2,17 @@
 """Rank 0 owns the external Stage; rank >=1 runs scheduler-replica only."""
 from __future__ import annotations
 
+import logging
+import os
+import sys
+import types
 from unittest.mock import MagicMock, patch
 
-from sglang_omni_v1.pipeline.stage_process import StageProcessSpec, stage_process_main
+from sglang_omni_v1.pipeline.stage_process import (
+    StageProcessSpec,
+    _init_torch_distributed,
+    stage_process_main,
+)
 from sglang_omni_v1.scheduling.messages import IncomingMessage
 
 
@@ -58,3 +66,39 @@ def test_incoming_message_supports_abort_and_shutdown() -> None:
     shutdown = IncomingMessage(request_id="__tp__", type="shutdown")
     assert abort.type == "abort"
     assert shutdown.type == "shutdown"
+
+
+def test_init_torch_distributed_keeps_visible_devices_and_uses_spec_gpu(
+    monkeypatch,
+) -> None:
+    set_device_calls = []
+    init_process_group_calls = []
+
+    class FakeCuda:
+        def set_device(self, device: int) -> None:
+            set_device_calls.append(device)
+
+    fake_torch = types.ModuleType("torch")
+    fake_torch.__path__ = []
+    fake_torch.cuda = FakeCuda()
+
+    fake_dist = types.ModuleType("torch.distributed")
+
+    def fake_init_process_group(**kwargs):
+        init_process_group_calls.append(kwargs)
+
+    fake_dist.init_process_group = fake_init_process_group
+    fake_torch.distributed = fake_dist
+
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "torch.distributed", fake_dist)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+
+    spec = _spec(tp_rank=1)
+    _init_torch_distributed(spec, logging.getLogger("test.v1.tp"))
+
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "0,1"
+    assert set_device_calls == [spec.gpu_id]
+    assert init_process_group_calls == [
+        {"backend": "nccl", "world_size": spec.tp_size, "rank": spec.tp_rank}
+    ]
