@@ -1,8 +1,11 @@
+import pytest
+import typer
 from typer.testing import CliRunner
 
 from sglang_omni_v1.cli.cli import app
 from sglang_omni_v1.cli.serve import apply_thinker_tp_size_cli_override
 from sglang_omni_v1.config import PipelineConfig, StageConfig
+from sglang_omni_v1.models.qwen3_omni.config import Qwen3OmniSpeechPipelineConfig
 
 
 def test_thinker_tp_size_flag_appears_in_help():
@@ -52,3 +55,10 @@ def test_thinker_tp_size_override_leaves_gpu_list_unchanged():
     apply_thinker_tp_size_cli_override(config, thinker_tp_size=2)
 
     assert config.stages[0].gpu == [4, 6]
+
+
+def test_thinker_tp_size_override_rejects_qwen3_speech_gpu_collision():
+    config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
+
+    with pytest.raises(typer.BadParameter, match="GPU placement"):
+        apply_thinker_tp_size_cli_override(config, thinker_tp_size=2)

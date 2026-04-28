@@ -165,6 +165,15 @@ def apply_thinker_tp_size_cli_override(
         if isinstance(stage.gpu, int):
             stage.gpu = [stage.gpu + rank for rank in range(thinker_tp_size)]
 
+    validate_gpu_placement = getattr(
+        pipeline_config, "validate_thinker_tp_gpu_placement", None
+    )
+    if callable(validate_gpu_placement):
+        try:
+            validate_gpu_placement(tp_size=thinker_tp_size)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+
     return pipeline_config
 
 
