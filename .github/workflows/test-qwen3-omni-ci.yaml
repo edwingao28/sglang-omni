@@ -18,6 +18,7 @@ permissions:
 #                              ├─► stage-4-mmmu-tts-consistency
 #                              ├─► stage-5-mmsu
 #                              └─► stage-6-mmsu-tts-consistency
+#        └─► thinker-tp2
 
 jobs:
   docs:
@@ -120,6 +121,34 @@ jobs:
         uses: ./.github/actions/omni-post-stage
         with:
           stage-label: thinker-length (v1)
+
+  thinker-tp2:
+    name: thinker TP=2 text-only
+    needs: docs
+    runs-on: [self-hosted]
+    timeout-minutes: 90
+    container:
+      image: frankleeeee/sglang-omni:dev
+      options: --gpus all --rm -v /dev/shm:/dev/shm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: ./.github/actions/omni-setup
+        with:
+          venv-name: omni-qwen3
+
+      - name: Run Qwen3-Omni TP=2 text-only harness
+        shell: bash
+        run: |
+          source omni-qwen3/bin/activate
+          python scripts/test_v1_qwen3_tp.py \
+            --model-path "$MODEL_PATH" \
+            --tp-baseline 1 \
+            --tp-test 2
+        env:
+          HF_ENDPOINT: https://hf-mirror.com
+          MODEL_PATH: Qwen/Qwen3-Omni-30B-A3B-Instruct
 
   stage-2-tts:
     name: stage 2 - TTS speed + WER
