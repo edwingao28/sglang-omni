@@ -10,6 +10,33 @@ from sglang_omni_v1.config import PipelineConfig, StageConfig
 _PKG = "sglang_omni_v1.models.qwen3_omni"
 
 
+def _validate_qwen3_speech_gpu_placement(
+    gpu_placement: dict[str, int],
+    *,
+    tp_size: int,
+) -> None:
+    """Reject configs where speech stages collide with the thinker's TP rank range.
+
+    The thinker TP range is [thinker_gpu, thinker_gpu + tp_size).
+    """
+    thinker_gpu = gpu_placement.get("thinker", 0)
+    thinker_gpu_end = thinker_gpu + tp_size
+    thinker_gpu_range = range(thinker_gpu, thinker_gpu_end)
+
+    for stage_name in ("talker_ar", "code_predictor", "code2wav"):
+        stage_gpu = gpu_placement.get(stage_name)
+        if stage_gpu is None:
+            continue
+        if stage_gpu in thinker_gpu_range:
+            raise ValueError(
+                "GPU placement for Qwen3 speech pipeline is invalid: "
+                f"{stage_name!r} is on GPU {stage_gpu}, which collides with "
+                f"the thinker TP rank range [{thinker_gpu}, {thinker_gpu_end}). "
+                f"Move {stage_name!r} to a GPU outside that range or reduce "
+                "the thinker tp_size."
+            )
+
+
 class Qwen3OmniPipelineConfig(PipelineConfig):
     """6-stage text-only pipeline."""
 
