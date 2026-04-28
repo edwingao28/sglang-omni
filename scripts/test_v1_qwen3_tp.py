@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
+import socket
 import subprocess
 import sys
 import time
@@ -51,12 +54,71 @@ def http_json(
         return json.loads(response.read().decode("utf-8"))
 
 
-def wait_until_ready(port: int, *, startup_timeout: float, request_timeout: float) -> None:
-    url = f"http://127.0.0.1:{port}/v1/models"
+def ensure_port_available(host: str, port: int) -> None:
+    try:
+        addrinfos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise RuntimeError(f"Unable to resolve requested server host {host!r}: {exc}") from exc
+
+    sockets: list[socket.socket] = []
+    seen_addresses = set()
+    try:
+        for family, socktype, proto, _, sockaddr in addrinfos:
+            address_key = (family, sockaddr)
+            if address_key in seen_addresses:
+                continue
+            seen_addresses.add(address_key)
+            sock = socket.socket(family, socktype, proto)
+            try:
+                sock.bind(sockaddr)
+            except OSError as exc:
+                sock.close()
+                raise RuntimeError(
+                    f"Requested server address {host}:{port} is not available for binding: {exc}"
+                ) from exc
+            sockets.append(sock)
+    finally:
+        for sock in sockets:
+            sock.close()
+
+
+def send_server_signal(proc: subprocess.Popen[bytes], sig: signal.Signals) -> None:
+    try:
+        process_group_id = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        process_group_id = None
+
+    try:
+        if process_group_id is not None:
+            os.killpg(process_group_id, sig)
+        elif sig == signal.SIGTERM:
+            proc.terminate()
+        else:
+            proc.kill()
+    except ProcessLookupError:
+        pass
+
+
+def wait_until_ready(
+    proc: subprocess.Popen[bytes],
+    command: list[str],
+    host: str,
+    port: int,
+    *,
+    startup_timeout: float,
+    request_timeout: float,
+) -> None:
+    url = f"http://{host}:{port}/v1/models"
     deadline = time.monotonic() + startup_timeout
     last_error: Exception | None = None
 
     while time.monotonic() < deadline:
+        exit_code = proc.poll()
+        if exit_code is not None:
+            raise RuntimeError(
+                "Server process exited before readiness "
+                f"(exit code {exit_code}): {' '.join(command)}"
+            )
         try:
             http_json(url, timeout=request_timeout)
             return
@@ -71,6 +133,7 @@ def wait_until_ready(port: int, *, startup_timeout: float, request_timeout: floa
 
 
 def chat_completion(
+    host: str,
     port: int,
     prompt: str,
     *,
@@ -82,10 +145,11 @@ def chat_completion(
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": 0.0,
+        "seed": 0,
         "stream": False,
     }
     response = http_json(
-        f"http://127.0.0.1:{port}/v1/chat/completions",
+        f"http://{host}:{port}/v1/chat/completions",
         method="POST",
         payload=body,
         timeout=request_timeout,
@@ -99,7 +163,13 @@ def chat_completion(
     return content
 
 
-def start_server(model_path: str, port: int, tp_size: int) -> subprocess.Popen[bytes]:
+def start_server(
+    model_path: str,
+    host: str,
+    port: int,
+    tp_size: int,
+) -> tuple[subprocess.Popen[bytes], list[str]]:
+    ensure_port_available(host, port)
     cmd = [
         sys.executable,
         "-m",
@@ -108,30 +178,33 @@ def start_server(model_path: str, port: int, tp_size: int) -> subprocess.Popen[b
         "--model-path",
         model_path,
         "--text-only",
+        "--host",
+        host,
         "--port",
         str(port),
         "--thinker-tp-size",
         str(tp_size),
     ]
-    print(f"Starting TP={tp_size} server on port {port}: {' '.join(cmd)}", flush=True)
-    return subprocess.Popen(cmd)
+    print(f"Starting TP={tp_size} server on {host}:{port}: {' '.join(cmd)}", flush=True)
+    return subprocess.Popen(cmd, start_new_session=True), cmd
 
 
 def stop_server(proc: subprocess.Popen[bytes], *, shutdown_timeout: float = 20.0) -> None:
     if proc.poll() is not None:
         return
-    proc.terminate()
+    send_server_signal(proc, signal.SIGTERM)
     try:
         proc.wait(timeout=shutdown_timeout)
     except subprocess.TimeoutExpired:
         print("Server did not terminate promptly; killing it.", file=sys.stderr, flush=True)
-        proc.kill()
+        send_server_signal(proc, signal.SIGKILL)
         proc.wait(timeout=shutdown_timeout)
 
 
 def collect_results(
     *,
     model_path: str,
+    host: str,
     port: int,
     tp_size: int,
     prompts: list[str],
@@ -139,9 +212,12 @@ def collect_results(
     startup_timeout: float,
     request_timeout: float,
 ) -> list[CompletionResult]:
-    proc = start_server(model_path, port, tp_size)
+    proc, command = start_server(model_path, host, port, tp_size)
     try:
         wait_until_ready(
+            proc,
+            command,
+            host,
             port,
             startup_timeout=startup_timeout,
             request_timeout=request_timeout,
@@ -152,6 +228,7 @@ def collect_results(
         for index, prompt in enumerate(prompts, start=1):
             print(f"TP={tp_size} prompt {index}/{len(prompts)}: {prompt}", flush=True)
             output = chat_completion(
+                host,
                 port,
                 prompt,
                 max_tokens=max_tokens,
@@ -189,6 +266,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--tp-baseline", type=int, default=1)
     parser.add_argument("--tp-test", type=int, default=2)
+    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port-baseline", type=int, default=18001)
     parser.add_argument("--port-test", type=int, default=18002)
     parser.add_argument("--max-tokens", type=int, default=64)
@@ -202,6 +280,7 @@ def main() -> int:
 
     baseline = collect_results(
         model_path=args.model_path,
+        host=args.host,
         port=args.port_baseline,
         tp_size=args.tp_baseline,
         prompts=PROMPTS,
@@ -211,6 +290,7 @@ def main() -> int:
     )
     test = collect_results(
         model_path=args.model_path,
+        host=args.host,
         port=args.port_test,
         tp_size=args.tp_test,
         prompts=PROMPTS,
