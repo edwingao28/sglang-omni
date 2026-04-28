@@ -141,6 +141,33 @@ def apply_torch_compile_cli_overrides(
     return pipeline_config
 
 
+def apply_thinker_tp_size_cli_override(
+    pipeline_config: PipelineConfig,
+    *,
+    thinker_tp_size: int,
+) -> PipelineConfig:
+    if thinker_tp_size < 1:
+        raise typer.BadParameter("thinker_tp_size must be >= 1")
+    if thinker_tp_size == 1:
+        return pipeline_config
+
+    _apply_stage_server_args_override(
+        pipeline_config,
+        stage_name="thinker",
+        updates={"tp_size": thinker_tp_size},
+        reason=f"--thinker-tp-size {thinker_tp_size}",
+    )
+
+    for stage in pipeline_config.stages:
+        if stage.name != "thinker":
+            continue
+        stage.tp_size = thinker_tp_size
+        if isinstance(stage.gpu, int):
+            stage.gpu = [stage.gpu + rank for rank in range(thinker_tp_size)]
+
+    return pipeline_config
+
+
 def serve(
     ctx: typer.Context,
     model_path: Annotated[
@@ -220,8 +247,19 @@ def serve(
             help="Override torch_compile_max_bs for talker_ar stage.",
         ),
     ] = None,
+    thinker_tp_size: Annotated[
+        int,
+        typer.Option(
+            "--thinker-tp-size",
+            "--thinker_tp_size",
+            help="Tensor-parallel size for thinker stage (default: 1).",
+        ),
+    ] = 1,
 ) -> None:
     """Serve the pipeline."""
+    if thinker_tp_size < 1:
+        raise typer.BadParameter("thinker_tp_size must be >= 1")
+
     logging.basicConfig(
         level=getattr(logging, log_level.upper()),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -251,6 +289,10 @@ def serve(
         talker_torch_compile=talker_torch_compile,
         thinker_torch_compile_max_bs=thinker_torch_compile_max_bs,
         talker_torch_compile_max_bs=talker_torch_compile_max_bs,
+    )
+    merged_config = apply_thinker_tp_size_cli_override(
+        merged_config,
+        thinker_tp_size=thinker_tp_size,
     )
 
     # print merged configuration
