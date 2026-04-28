@@ -92,7 +92,9 @@ def test_recv_requests_rank0_broadcasts_full_envelope(monkeypatch):
     sched.inbox.put(
         IncomingMessage(request_id="r0", type="stream_chunk", data="chunk-0")
     )
+    sched.inbox.put(IncomingMessage(request_id="r0", type="stream_done"))
     sched.inbox.put(IncomingMessage(request_id="r1", type="abort"))
+    sched.inbox.put(IncomingMessage(request_id="__tp__", type="shutdown"))
 
     sent = {}
 
@@ -109,7 +111,13 @@ def test_recv_requests_rank0_broadcasts_full_envelope(monkeypatch):
     )
     sched.recv_requests()
 
-    assert [m.type for m in sent["data"]] == ["new_request", "stream_chunk", "abort"]
+    assert [m.type for m in sent["data"]] == [
+        "new_request",
+        "stream_chunk",
+        "stream_done",
+        "abort",
+        "shutdown",
+    ]
     assert sent["rank"] == 0
     assert sent["src"] == 0
 

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import queue
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import sglang_omni_v1.pipeline.stage.runtime as stage_runtime
 from sglang_omni_v1.pipeline.stage.runtime import Stage
 from sglang_omni_v1.scheduling.messages import IncomingMessage
 
@@ -112,3 +114,34 @@ def test_stop_does_not_preempt_pending_tp_shutdown_envelope():
     asyncio.run(stage.stop())
 
     scheduler.stop.assert_not_called()
+
+
+def test_wait_for_tp_shutdown_broadcast_times_out_and_stops_scheduler(
+    monkeypatch, caplog
+):
+    scheduler = SimpleNamespace(
+        inbox=queue.Queue(),
+        stop=MagicMock(),
+        tp_size=2,
+        tp_rank=0,
+        _apply_envelope=MagicMock(),
+        _tp_shutdown_requested=False,
+    )
+    stage = _make_stage(scheduler)
+    stage._running = True
+    stage._scheduler_shutdown_enqueued = True
+    stage._scheduler_thread = SimpleNamespace(is_alive=lambda: True)
+    monkeypatch.setattr(stage_runtime, "_TP_SHUTDOWN_BROADCAST_POLL_S", 0.001)
+    monkeypatch.setattr(stage_runtime, "_TP_SHUTDOWN_BROADCAST_TIMEOUT_S", 0.001)
+
+    async def wait_for_timeout():
+        await stage._wait_for_tp_shutdown_broadcast()
+
+    with caplog.at_level(logging.WARNING, logger=stage_runtime.logger.name):
+        asyncio.run(wait_for_timeout())
+
+    scheduler.stop.assert_called_once_with()
+    assert stage._scheduler_shutdown_enqueued is False
+    assert "Timed out waiting 0.001s for TP shutdown broadcast on stage thinker" in (
+        caplog.text
+    )

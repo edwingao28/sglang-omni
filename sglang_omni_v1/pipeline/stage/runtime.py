@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 GetNextFn = Callable[[str, Any], str | list[str] | None]
 SchedulerControlType = Literal["abort", "shutdown"]
 _TP_SHUTDOWN_BROADCAST_POLL_S = 0.01
+_TP_SHUTDOWN_BROADCAST_TIMEOUT_S = 30.0
 
 
 class Stage:
@@ -670,6 +671,8 @@ class Stage:
         if getattr(scheduler, "tp_rank", 0) != 0:
             return
 
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _TP_SHUTDOWN_BROADCAST_TIMEOUT_S
         while True:
             if getattr(scheduler, "_tp_shutdown_requested", False):
                 return
@@ -681,6 +684,17 @@ class Stage:
                 self._scheduler_thread is None
                 or not self._scheduler_thread.is_alive()
             ):
+                return
+            if loop.time() >= deadline:
+                logger.warning(
+                    "Timed out waiting %.3fs for TP shutdown broadcast on stage %s; "
+                    "falling back to scheduler.stop()",
+                    _TP_SHUTDOWN_BROADCAST_TIMEOUT_S,
+                    self.name,
+                )
+                self._scheduler_shutdown_enqueued = False
+                with suppress(Exception):
+                    scheduler.stop()
                 return
             await asyncio.sleep(_TP_SHUTDOWN_BROADCAST_POLL_S)
 
