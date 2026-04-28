@@ -350,9 +350,17 @@ class OmniScheduler:
             return self._drain_local_inbox()
 
         if self.tp_rank == 0:
-            envelope = self._drain_inbox_to_envelope()
-            envelope = self._sanitize_envelope_for_broadcast(envelope)
-            broadcast_pyobj(envelope, self.tp_rank, self.tp_worker.tp_cpu_group, src=0)
+            local_envelope = self._drain_inbox_to_envelope()
+            broadcast_envelope = self._sanitize_envelope_for_broadcast(
+                local_envelope
+            )
+            broadcast_pyobj(
+                broadcast_envelope,
+                self.tp_rank,
+                self.tp_worker.tp_cpu_group,
+                src=0,
+            )
+            return self._apply_envelope(local_envelope)
         else:
             envelope = broadcast_pyobj(
                 [], self.tp_rank, self.tp_worker.tp_cpu_group, src=0

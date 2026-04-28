@@ -140,6 +140,33 @@ def test_recv_requests_rank0_sanitizes_new_request_before_broadcast(monkeypatch)
     assert sent["data"][0].data == "sanitized:payload-0"
 
 
+def test_recv_requests_rank0_applies_original_payload_after_broadcast(monkeypatch):
+    sched = _make_scheduler(tp_rank=0, tp_size=2)
+    original_payload = SimpleNamespace(request_id="r0")
+    sanitized_payload = SimpleNamespace(request_id="r0", sanitized=True)
+    sched.inbox.put(
+        IncomingMessage(request_id="r0", type="new_request", data=original_payload)
+    )
+
+    sent = {}
+    monkeypatch.setattr(
+        "sglang_omni_v1.scheduling.omni_scheduler.sanitize_request_payload",
+        lambda payload: sanitized_payload,
+    )
+
+    def fake_broadcast(data, *args, **kwargs):
+        sent["data"] = data
+        return data
+
+    monkeypatch.setattr(
+        "sglang_omni_v1.scheduling.omni_scheduler.broadcast_pyobj",
+        fake_broadcast,
+    )
+
+    assert sched.recv_requests() == [original_payload]
+    assert sent["data"][0].data is sanitized_payload
+
+
 def test_recv_requests_rank1_replays_received_envelope(monkeypatch):
     sched = _make_scheduler(tp_rank=1, tp_size=2)
     incoming = [

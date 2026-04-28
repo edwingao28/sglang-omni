@@ -14,7 +14,7 @@ import os
 import queue as _queue_mod
 import threading
 from contextlib import suppress
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from sglang_omni_v1.pipeline import relay_io
 from sglang_omni_v1.pipeline.control_plane import StageControlPlane
@@ -40,6 +40,9 @@ from sglang_omni_v1.scheduling.messages import IncomingMessage
 logger = logging.getLogger(__name__)
 
 GetNextFn = Callable[[str, Any], str | list[str] | None]
+SchedulerControlType = Literal["abort", "shutdown"]
+_TP_SHUTDOWN_BROADCAST_TIMEOUT_S = 1.0
+_TP_SHUTDOWN_BROADCAST_POLL_S = 0.01
 
 
 class Stage:
@@ -167,7 +170,8 @@ class Stage:
 
     async def stop(self) -> None:
         self._running = False
-        self.scheduler.stop()
+        if self.scheduler is not None:
+            self.scheduler.stop()
         self.control_plane.close()
         self.relay.close()
         logger.info("Stage %s stopped", self.name)
@@ -182,6 +186,8 @@ class Stage:
             while self._running:
                 msg = await self.control_plane.recv()
                 if isinstance(msg, ShutdownMessage):
+                    if self._enqueue_scheduler_control("__tp__", "shutdown"):
+                        await self._wait_for_tp_shutdown_broadcast()
                     break
                 await self._handle_message(msg)
         except asyncio.CancelledError:
@@ -621,7 +627,36 @@ class Stage:
         if self._stream_queue is not None:
             self._stream_queue.close(request_id)
         self._pending_stream_data.pop(request_id, None)
-        self.scheduler.abort(request_id)
+        if self._enqueue_scheduler_control(request_id, "abort"):
+            return
+        if self.scheduler is not None:
+            self.scheduler.abort(request_id)
+
+    def _enqueue_scheduler_control(
+        self, request_id: str, msg_type: SchedulerControlType
+    ) -> bool:
+        scheduler = self.scheduler
+        inbox = getattr(scheduler, "inbox", None)
+        if inbox is None:
+            return False
+        inbox.put(IncomingMessage(request_id=request_id, type=msg_type))
+        return True
+
+    async def _wait_for_tp_shutdown_broadcast(self) -> None:
+        scheduler = self.scheduler
+        if scheduler is None:
+            return
+        if getattr(scheduler, "tp_size", 1) <= 1:
+            return
+        if getattr(scheduler, "tp_rank", 0) != 0:
+            return
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _TP_SHUTDOWN_BROADCAST_TIMEOUT_S
+        while loop.time() < deadline:
+            if getattr(scheduler, "_tp_shutdown_requested", False):
+                return
+            await asyncio.sleep(_TP_SHUTDOWN_BROADCAST_POLL_S)
 
     # ------------------------------------------------------------------
     # Profiler (kept from original)
