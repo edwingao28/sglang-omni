@@ -140,6 +140,33 @@ def test_recv_requests_rank0_sanitizes_new_request_before_broadcast(monkeypatch)
     assert sent["data"][0].data == "sanitized:payload-0"
 
 
+def test_recv_requests_rank0_sanitizes_stream_chunk_before_broadcast(monkeypatch):
+    sched = _make_scheduler(tp_rank=0, tp_size=2)
+    sched.inbox.put(
+        IncomingMessage(request_id="r0", type="stream_chunk", data="chunk-0")
+    )
+
+    sent = {}
+    monkeypatch.setattr(
+        "sglang_omni_v1.scheduling.omni_scheduler.sanitize_request_payload",
+        lambda payload: f"sanitized:{payload}",
+    )
+
+    def fake_broadcast(data, *args, **kwargs):
+        sent["data"] = data
+        return data
+
+    monkeypatch.setattr(
+        "sglang_omni_v1.scheduling.omni_scheduler.broadcast_pyobj",
+        fake_broadcast,
+    )
+
+    sched.recv_requests()
+
+    assert sent["data"][0].data == "sanitized:chunk-0"
+    assert sched._pending_stream_chunks["r0"] == ["chunk-0"]
+
+
 def test_recv_requests_rank0_applies_original_payload_after_broadcast(monkeypatch):
     sched = _make_scheduler(tp_rank=0, tp_size=2)
     original_payload = SimpleNamespace(request_id="r0")
@@ -204,6 +231,30 @@ def test_recv_requests_rank1_relocates_new_request_before_replay(monkeypatch):
 
     assert sched.recv_requests() == [payload]
     assert relocated == {"data": payload, "device": "cuda:1"}
+
+
+def test_recv_requests_rank1_relocates_stream_chunk_before_replay(monkeypatch):
+    sched = _make_scheduler(tp_rank=1, tp_size=2)
+    chunk = SimpleNamespace()
+    incoming = [IncomingMessage(request_id="r0", type="stream_chunk", data=chunk)]
+    relocated = {}
+    monkeypatch.setattr(
+        "sglang_omni_v1.scheduling.omni_scheduler.broadcast_pyobj",
+        lambda *args, **kwargs: incoming,
+    )
+
+    def fake_relocate(data, device):
+        relocated["data"] = data
+        relocated["device"] = device
+
+    monkeypatch.setattr(
+        "sglang_omni_v1.scheduling.omni_scheduler.relocate_request_tensors",
+        fake_relocate,
+    )
+
+    assert sched.recv_requests() == []
+    assert relocated == {"data": chunk, "device": "cuda:1"}
+    assert sched._pending_stream_chunks["r0"] == [chunk]
 
 
 def test_apply_envelope_shutdown_sets_flag():

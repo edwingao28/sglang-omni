@@ -41,7 +41,6 @@ logger = logging.getLogger(__name__)
 
 GetNextFn = Callable[[str, Any], str | list[str] | None]
 SchedulerControlType = Literal["abort", "shutdown"]
-_TP_SHUTDOWN_BROADCAST_TIMEOUT_S = 1.0
 _TP_SHUTDOWN_BROADCAST_POLL_S = 0.01
 
 
@@ -122,6 +121,7 @@ class Stage:
         self._scheduler_thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._scheduler_crash_error: BaseException | None = None
+        self._scheduler_shutdown_enqueued = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -171,7 +171,13 @@ class Stage:
     async def stop(self) -> None:
         self._running = False
         if self.scheduler is not None:
-            self.scheduler.stop()
+            shutdown_pending = (
+                self._scheduler_shutdown_enqueued
+                and self._uses_tp_control_envelope()
+                and not getattr(self.scheduler, "_tp_shutdown_requested", False)
+            )
+            if not shutdown_pending:
+                self.scheduler.stop()
         self.control_plane.close()
         self.relay.close()
         logger.info("Stage %s stopped", self.name)
@@ -635,26 +641,46 @@ class Stage:
     def _enqueue_scheduler_control(
         self, request_id: str, msg_type: SchedulerControlType
     ) -> bool:
-        scheduler = self.scheduler
-        inbox = getattr(scheduler, "inbox", None)
-        if inbox is None:
+        if not self._uses_tp_control_envelope():
             return False
-        inbox.put(IncomingMessage(request_id=request_id, type=msg_type))
+        scheduler = self.scheduler
+        scheduler.inbox.put(IncomingMessage(request_id=request_id, type=msg_type))
+        if msg_type == "shutdown":
+            self._scheduler_shutdown_enqueued = True
         return True
+
+    def _uses_tp_control_envelope(self) -> bool:
+        scheduler = self.scheduler
+        if scheduler is None:
+            return False
+        if getattr(scheduler, "inbox", None) is None:
+            return False
+        if getattr(scheduler, "tp_size", 1) <= 1:
+            return False
+        return hasattr(scheduler, "_apply_envelope") or hasattr(
+            scheduler, "_tp_shutdown_requested"
+        )
 
     async def _wait_for_tp_shutdown_broadcast(self) -> None:
         scheduler = self.scheduler
-        if scheduler is None:
+        if not self._uses_tp_control_envelope():
             return
         if getattr(scheduler, "tp_size", 1) <= 1:
             return
         if getattr(scheduler, "tp_rank", 0) != 0:
             return
 
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + _TP_SHUTDOWN_BROADCAST_TIMEOUT_S
-        while loop.time() < deadline:
+        while True:
             if getattr(scheduler, "_tp_shutdown_requested", False):
+                return
+            if self._scheduler_crash_error is not None:
+                return
+            if not self._running:
+                return
+            if (
+                self._scheduler_thread is None
+                or not self._scheduler_thread.is_alive()
+            ):
                 return
             await asyncio.sleep(_TP_SHUTDOWN_BROADCAST_POLL_S)
 

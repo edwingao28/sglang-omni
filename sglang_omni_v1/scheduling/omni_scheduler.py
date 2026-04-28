@@ -637,7 +637,7 @@ class OmniScheduler:
     ) -> list[IncomingMessage]:
         sanitized: list[IncomingMessage] = []
         for msg in envelope:
-            if msg.type == "new_request":
+            if msg.type in ("new_request", "stream_chunk"):
                 sanitized.append(
                     IncomingMessage(
                         request_id=msg.request_id,
@@ -659,7 +659,7 @@ class OmniScheduler:
         self, envelope: list[IncomingMessage]
     ) -> None:
         for msg in envelope:
-            if msg.type == "new_request":
+            if msg.type in ("new_request", "stream_chunk"):
                 relocate_request_tensors(msg.data, self.device)
 
     def _apply_envelope(self, envelope: list[IncomingMessage]) -> list[Any]:
