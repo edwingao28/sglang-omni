@@ -21,8 +21,13 @@ from typing import Any, Callable
 from sglang.srt.environ import envs
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.managers.scheduler import Scheduler as _Upstream
+from sglang.srt.utils import broadcast_pyobj
 
 from sglang_omni_v1.scheduling.messages import IncomingMessage, OutgoingMessage
+from sglang_omni_v1.scheduling.omni_request_relocate import relocate_request_tensors
+from sglang_omni_v1.scheduling.omni_request_serialization import (
+    sanitize_request_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +119,7 @@ class OmniScheduler:
         self.server_args = server_args
         self.model_config = model_config
         self.gpu_id = tp_worker.gpu_id
-        self.tp_rank = 0
+        self.tp_rank = tp_worker.tp_rank
         self.tp_size = server_args.tp_size
         self.pp_rank = 0
         self.pp_size = server_args.pp_size
@@ -280,8 +285,8 @@ class OmniScheduler:
         self.truncation_align_size = None
 
         # Attention parallelism
-        self.attn_tp_rank = 0
-        self.attn_tp_size = 1
+        self.attn_tp_rank = self.tp_rank
+        self.attn_tp_size = self.tp_size
         self.attn_dp_rank = 0
 
         # Misc
@@ -297,6 +302,7 @@ class OmniScheduler:
         self._pending_stream_chunks: dict[str, list[Any]] = {}
         self._pending_stream_done: set[str] = set()
         self._deferred_request_payloads: dict[str, Any] = {}
+        self._tp_shutdown_requested = False
 
     # ------------------------------------------------------------------
     # Composition: delegate missing attributes to the upstream class
@@ -339,25 +345,21 @@ class OmniScheduler:
         return batch
 
     def recv_requests(self):
-        """Drain inbox and return new-request payloads."""
-        new_reqs: list = []
-        while True:
-            try:
-                msg = self.inbox.get_nowait()
-            except _queue_mod.Empty:
-                break
+        """Drain/broadcast incoming envelopes and return new-request payloads."""
+        if self.tp_size == 1:
+            return self._drain_local_inbox()
 
-            if msg.request_id in self._aborted_request_ids:
-                continue
+        if self.tp_rank == 0:
+            envelope = self._drain_inbox_to_envelope()
+            envelope = self._sanitize_envelope_for_broadcast(envelope)
+            broadcast_pyobj(envelope, self.tp_rank, self.tp_worker.tp_cpu_group, src=0)
+        else:
+            envelope = broadcast_pyobj(
+                [], self.tp_rank, self.tp_worker.tp_cpu_group, src=0
+            )
+            self._relocate_envelope_to_local_device(envelope)
 
-            if msg.type == "new_request":
-                new_reqs.append(msg.data)
-            elif msg.type == "stream_chunk":
-                self._on_stream_chunk(msg.request_id, msg.data)
-            elif msg.type == "stream_done":
-                self._on_stream_done(msg.request_id)
-
-        return new_reqs
+        return self._apply_envelope(envelope)
 
     def process_input_requests(self, recv_reqs):
         """Convert incoming payloads to SGLang Reqs and enqueue."""
@@ -443,7 +445,7 @@ class OmniScheduler:
 
             mr_output = self._model_runner.execute(sched_output)
 
-            if self._stream_output_builder is not None:
+            if self.tp_rank == 0 and self._stream_output_builder is not None:
                 for sched_req in sched_output.requests:
                     req_output = mr_output.outputs[sched_req.request_id]
                     stream_msg = self._stream_output_builder(
@@ -473,6 +475,9 @@ class OmniScheduler:
         to the detokenizer via ZMQ.  We capture finished requests here
         and put them in the outbox so Stage can route them downstream.
         """
+        if self.tp_rank != 0:
+            return
+
         for req in reqs:
             if skip_req is not None and req is skip_req:
                 continue
@@ -534,16 +539,7 @@ class OmniScheduler:
         self._running = False
 
     def abort(self, request_id: str) -> None:
-        self._aborted_request_ids.add(request_id)
-        self._pending_stream_chunks.pop(request_id, None)
-        self._pending_stream_done.discard(request_id)
-        self._deferred_request_payloads.pop(request_id, None)
-        self.waiting_queue = [
-            req for req in self.waiting_queue if req.rid != request_id
-        ]
-        _remove_from_batch(self.running_batch, request_id)
-        _remove_from_batch(self.cur_batch, request_id)
-        _remove_from_batch(self.last_batch, request_id)
+        self._apply_abort(request_id)
         self._drain_inbox_for_request(request_id)
 
     # ------------------------------------------------------------------
@@ -614,6 +610,89 @@ class OmniScheduler:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _drain_local_inbox(self) -> list[Any]:
+        """Preserve tp=1 behavior while honoring control messages."""
+        return self._apply_envelope(self._drain_inbox_to_envelope())
+
+    def _drain_inbox_to_envelope(self) -> list[IncomingMessage]:
+        envelope: list[IncomingMessage] = []
+        while True:
+            try:
+                envelope.append(self.inbox.get_nowait())
+            except _queue_mod.Empty:
+                break
+        return envelope
+
+    def _sanitize_envelope_for_broadcast(
+        self, envelope: list[IncomingMessage]
+    ) -> list[IncomingMessage]:
+        sanitized: list[IncomingMessage] = []
+        for msg in envelope:
+            if msg.type == "new_request":
+                sanitized.append(
+                    IncomingMessage(
+                        request_id=msg.request_id,
+                        type=msg.type,
+                        data=sanitize_request_payload(msg.data),
+                    )
+                )
+                continue
+            sanitized.append(
+                IncomingMessage(
+                    request_id=msg.request_id,
+                    type=msg.type,
+                    data=msg.data,
+                )
+            )
+        return sanitized
+
+    def _relocate_envelope_to_local_device(
+        self, envelope: list[IncomingMessage]
+    ) -> None:
+        for msg in envelope:
+            if msg.type == "new_request":
+                relocate_request_tensors(msg.data, self.device)
+
+    def _apply_envelope(self, envelope: list[IncomingMessage]) -> list[Any]:
+        new_reqs: list[tuple[str, Any]] = []
+        for msg in envelope:
+            if msg.type == "shutdown":
+                self._tp_shutdown_requested = True
+                self._running = False
+                continue
+
+            if msg.type == "abort":
+                self._apply_abort(msg.request_id)
+                continue
+
+            if msg.request_id in self._aborted_request_ids:
+                continue
+
+            if msg.type == "new_request":
+                new_reqs.append((msg.request_id, msg.data))
+            elif msg.type == "stream_chunk":
+                self._on_stream_chunk(msg.request_id, msg.data)
+            elif msg.type == "stream_done":
+                self._on_stream_done(msg.request_id)
+
+        return [
+            data
+            for request_id, data in new_reqs
+            if request_id not in self._aborted_request_ids
+        ]
+
+    def _apply_abort(self, request_id: str) -> None:
+        self._aborted_request_ids.add(request_id)
+        self._pending_stream_chunks.pop(request_id, None)
+        self._pending_stream_done.discard(request_id)
+        self._deferred_request_payloads.pop(request_id, None)
+        self.waiting_queue = [
+            req for req in self.waiting_queue if req.rid != request_id
+        ]
+        _remove_from_batch(self.running_batch, request_id)
+        _remove_from_batch(self.cur_batch, request_id)
+        _remove_from_batch(self.last_batch, request_id)
 
     def _drain_inbox_for_request(self, request_id: str) -> None:
         retained: list[IncomingMessage] = []
