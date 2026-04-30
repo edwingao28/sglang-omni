@@ -46,7 +46,7 @@ DATASET_CACHE_ENV = "SGLANG_SEEDTTS_MINI_DIR"
 STARTUP_TIMEOUT = 2400
 WER_TIMEOUT = 600
 THINKER_TP_SIZE = 2
-TALKER_GPU_ID = 2
+TALKER_GPU_ID = 1
 
 # TODO (wenyao): Placeholder P95 — replace with measured values in follow-up
 # reference-run PR. Anchored to RTF≈0.06.
