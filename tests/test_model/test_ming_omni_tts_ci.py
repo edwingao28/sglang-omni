@@ -47,6 +47,8 @@ STARTUP_TIMEOUT = 2400
 WER_TIMEOUT = 600
 THINKER_TP_SIZE = 1
 TALKER_GPU_ID = 1
+THINKER_CPU_OFFLOAD_GB_ENV = "MING_TTS_CPU_OFFLOAD_GB"
+THINKER_MEM_FRACTION_STATIC_ENV = "MING_TTS_MEM_FRACTION_STATIC"
 
 # TODO (wenyao): Placeholder P95 — replace with measured values in follow-up
 # reference-run PR. Anchored to RTF≈0.06.
@@ -215,6 +217,12 @@ def server_process(tmp_path_factory: pytest.TempPathFactory):
         "--model-name",
         "ming-omni",
     ]
+    cpu_offload_gb = os.environ.get(THINKER_CPU_OFFLOAD_GB_ENV)
+    if cpu_offload_gb:
+        cmd.extend(["--cpu-offload-gb", cpu_offload_gb])
+    mem_fraction_static = os.environ.get(THINKER_MEM_FRACTION_STATIC_ENV)
+    if mem_fraction_static:
+        cmd.extend(["--mem-fraction-static", mem_fraction_static])
     proc = start_server_from_cmd(cmd, log_file, port, timeout=STARTUP_TIMEOUT)
     proc.port = port
     yield proc
