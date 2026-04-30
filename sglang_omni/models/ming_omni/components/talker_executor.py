@@ -60,6 +60,8 @@ class MingTalkerExecutor(Executor):
 
     def _load_models(self) -> None:
         """Load talker model and VAE (runs in thread pool)."""
+        self._set_cuda_device()
+
         from transformers import AutoTokenizer
 
         from sglang_omni.models.ming_omni.talker import (
@@ -162,6 +164,11 @@ class MingTalkerExecutor(Executor):
         t0g = time.time()
         self._talker.initial_graph()
         logger.info("[TALKER] CUDA graphs initialized in %.1fs", time.time() - t0g)
+
+    def _set_cuda_device(self) -> None:
+        device = torch.device(self._device)
+        if device.type == "cuda" and device.index is not None:
+            torch.cuda.set_device(device)
 
     async def add_request(self, payload: StagePayload) -> None:
         """Process a TTS request."""
@@ -266,6 +273,7 @@ class MingTalkerExecutor(Executor):
         """
         if self._talker is None:
             raise RuntimeError("Talker model not loaded")
+        self._set_cuda_device()
 
         all_wavs = []
 

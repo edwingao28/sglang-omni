@@ -38,12 +38,36 @@ import asyncio
 import logging
 import multiprocessing as mp
 import os
+from typing import Any
 
 logging.basicConfig(
     level=os.environ.get("LOGLEVEL", "INFO").upper(),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def build_ming_speech_result(request_id: str, result: Any):
+    """Build a client chunk from Ming speech's decode+talker terminal result."""
+    from sglang_omni.client import Client, GenerateChunk, UsageInfo
+
+    if not isinstance(result, dict) or "decode" not in result or "talker" not in result:
+        return Client._default_result_builder(request_id, result)
+
+    chunk = GenerateChunk(request_id=request_id, finish_reason="stop")
+    decode_result = result.get("decode") or {}
+    talker_result = result.get("talker") or {}
+
+    if isinstance(decode_result, dict):
+        text = decode_result.get("text")
+        if isinstance(text, str):
+            chunk.text = text
+        chunk.usage = UsageInfo.from_dict(decode_result.get("usage"))
+
+    if isinstance(talker_result, dict):
+        Client._set_audio_data(chunk, talker_result)
+
+    return chunk
 
 
 def parse_args() -> argparse.Namespace:
@@ -133,12 +157,28 @@ async def main_async(args: argparse.Namespace) -> None:
         config.apply_server_args_overrides(stage_name="thinker", overrides=overrides)
 
     runner = MultiProcessPipelineRunner(config)
+    logger.info(
+        "Ming-Omni speech server config: model_path=%s model_name=%s "
+        "CUDA_VISIBLE_DEVICES=%s gpu_placement=%s tp_size=%s relay_backend=%s "
+        "thinker_overrides=%s terminal_stages=%s",
+        args.model_path,
+        args.model_name,
+        os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>"),
+        gpu_placement,
+        args.tp_size,
+        args.relay_backend,
+        overrides or None,
+        config.terminal_stages,
+    )
     logger.info("Starting Ming-Omni speech pipeline (multiprocess)...")
     await runner.start(timeout=600)
     logger.info("Pipeline ready.")
 
     try:
-        client = Client(runner.coordinator)
+        client = Client(
+            runner.coordinator,
+            result_builder=build_ming_speech_result,
+        )
         app = create_app(client, model_name=args.model_name)
 
         server_config = uvicorn.Config(
