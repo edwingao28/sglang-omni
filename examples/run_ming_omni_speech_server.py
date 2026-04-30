@@ -84,6 +84,12 @@ def parse_args() -> argparse.Namespace:
             "If omitted, SGLang chooses automatically."
         ),
     )
+    parser.add_argument(
+        "--cpu-offload-gb",
+        type=float,
+        default=None,
+        help="Set SGLang cpu_offload_gb for the thinker stage.",
+    )
 
     # Server
     parser.add_argument("--host", type=str, default="0.0.0.0")
@@ -115,17 +121,16 @@ async def main_async(args: argparse.Namespace) -> None:
     if args.tp_size and args.tp_size > 1:
         overrides["tp_size"] = args.tp_size
         overrides["disable_custom_all_reduce"] = True
-    if overrides:
-        config.apply_server_args_overrides(stage_name="thinker", overrides=overrides)
+    if args.cpu_offload_gb is not None:
+        overrides["cpu_offload_gb"] = args.cpu_offload_gb
     if args.mem_fraction_static is not None:
         if not 0.0 < args.mem_fraction_static < 1.0:
             raise ValueError(
                 f"--mem-fraction-static must be > 0 and < 1, got {args.mem_fraction_static}"
             )
-        config.apply_server_args_overrides(
-            stage_name="thinker",
-            overrides={"mem_fraction_static": args.mem_fraction_static},
-        )
+        overrides["mem_fraction_static"] = args.mem_fraction_static
+    if overrides:
+        config.apply_server_args_overrides(stage_name="thinker", overrides=overrides)
 
     runner = MultiProcessPipelineRunner(config)
     logger.info("Starting Ming-Omni speech pipeline (multiprocess)...")
