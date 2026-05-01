@@ -12,6 +12,7 @@ Provides the following endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -275,69 +276,103 @@ async def _chat_stream(
     requested_modalities = req.modalities or ["text"]
     finish_reason: str | None = None
     final_usage: UsageResponse | None = None
+    stream_start_s = time.perf_counter()
+    stage_times_ms: dict[str, float] = {}
 
-    async for chunk in client.completion_stream(
-        gen_req,
-        request_id=request_id,
-        audio_format=audio_format,
-    ):
-        # Capture finish info for the dedicated finish chunk after the loop.
-        if chunk.finish_reason is not None:
-            finish_reason = chunk.finish_reason
-            if chunk.usage is not None:
-                final_usage = UsageResponse(
-                    prompt_tokens=chunk.usage.prompt_tokens or 0,
-                    completion_tokens=chunk.usage.completion_tokens or 0,
-                    total_tokens=chunk.usage.total_tokens or 0,
-                )
-            continue
-
-        delta = ChatCompletionStreamDelta()
-        emit = False
-
-        # Send role on first chunk
-        if not role_sent:
-            delta.role = "assistant"
-            role_sent = True
-            emit = True
-
-        # Text chunk
-        if chunk.modality == "text" and chunk.text and "text" in requested_modalities:
-            delta.content = chunk.text
-            emit = True
-
-        # Audio chunk
-        if (
-            chunk.modality == "audio"
-            and chunk.audio_b64 is not None
-            and "audio" in requested_modalities
+    try:
+        async for chunk in client.completion_stream(
+            gen_req,
+            request_id=request_id,
+            audio_format=audio_format,
         ):
-            delta.audio = ChatCompletionAudio(
-                id=f"audio-{request_id}",
-                data=chunk.audio_b64,
-            )
-            emit = True
+            # Capture finish info for the dedicated finish chunk after the loop.
+            if chunk.finish_reason is not None:
+                finish_reason = chunk.finish_reason
+                if chunk.usage is not None:
+                    final_usage = UsageResponse(
+                        prompt_tokens=chunk.usage.prompt_tokens or 0,
+                        completion_tokens=chunk.usage.completion_tokens or 0,
+                        total_tokens=chunk.usage.total_tokens or 0,
+                    )
+                continue
 
-        if not emit:
-            continue
+            delta = ChatCompletionStreamDelta()
+            emit = False
 
-        stream_resp = ChatCompletionStreamResponse(
-            id=response_id,
-            created=created,
-            model=model,
-            choices=[
-                ChatCompletionStreamChoice(
-                    index=0,
-                    delta=delta,
-                    finish_reason=None,
+            # Send role on first chunk
+            if not role_sent:
+                delta.role = "assistant"
+                role_sent = True
+                emit = True
+
+            # Text chunk
+            if (
+                chunk.modality == "text"
+                and chunk.text
+                and "text" in requested_modalities
+            ):
+                delta.content = chunk.text
+                emit = True
+                stage_times_ms.setdefault(
+                    "thinker_first_text",
+                    (time.perf_counter() - stream_start_s) * 1000.0,
                 )
-            ],
-        )
 
-        data = stream_resp.model_dump(exclude_none=True)
-        for choice in data.get("choices", []):
-            choice.setdefault("finish_reason", None)
-        yield f"data: {json.dumps(data)}\n\n"
+            # Audio chunk
+            if (
+                chunk.modality == "audio"
+                and chunk.audio_b64 is not None
+                and "audio" in requested_modalities
+            ):
+                delta.audio = ChatCompletionAudio(
+                    id=f"audio-{request_id}",
+                    data=chunk.audio_b64,
+                )
+                emit = True
+                first_audio_ms = (time.perf_counter() - stream_start_s) * 1000.0
+                stage_times_ms.setdefault("talker_first_audio", first_audio_ms)
+                segmenter_first_emit_ms = getattr(
+                    chunk, "segmenter_first_emit_ms", None
+                )
+                if segmenter_first_emit_ms is not None:
+                    stage_times_ms.setdefault(
+                        "segmenter_first_emit", float(segmenter_first_emit_ms)
+                    )
+
+            if not emit:
+                continue
+
+            stream_resp = ChatCompletionStreamResponse(
+                id=response_id,
+                created=created,
+                model=model,
+                choices=[
+                    ChatCompletionStreamChoice(
+                        index=0,
+                        delta=delta,
+                        finish_reason=None,
+                    )
+                ],
+            )
+
+            data = stream_resp.model_dump(exclude_none=True)
+            for choice in data.get("choices", []):
+                choice.setdefault("finish_reason", None)
+            stage_name = getattr(chunk, "stage_name", None)
+            sample_rate = getattr(chunk, "sample_rate", None)
+            talker_queue_depth = getattr(chunk, "talker_queue_depth", None)
+            if stage_name is not None:
+                data["stage_name"] = stage_name
+            if sample_rate is not None:
+                data["sample_rate"] = sample_rate
+            if talker_queue_depth is not None:
+                data["talker_queue_depth"] = talker_queue_depth
+            if stage_times_ms:
+                data["stage_times_ms"] = dict(stage_times_ms)
+            yield f"data: {json.dumps(data)}\n\n"
+    except (asyncio.CancelledError, GeneratorExit):
+        await client.abort(request_id)
+        raise
 
     # Finish chunk: empty delta + finish_reason.
     finish_resp = ChatCompletionStreamResponse(

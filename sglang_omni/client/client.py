@@ -9,6 +9,7 @@ from typing import Any, AsyncIterator, Callable
 import numpy as np
 
 from sglang_omni.client.audio import (
+    DEFAULT_SAMPLE_RATE,
     FORMAT_MIME_TYPES,
     audio_to_base64,
     encode_audio,
@@ -28,6 +29,9 @@ from sglang_omni.client.types import (
 )
 from sglang_omni.pipeline.coordinator import Coordinator
 from sglang_omni.proto import OmniRequest, RequestState, StreamMessage
+
+
+_MERGED_AUDIO_RESULT_STAGES = ("code2wav", "talker")
 
 
 class Client:
@@ -86,6 +90,7 @@ class Client:
         """
         text_parts: list[str] = []
         audio_chunks: list[Any] = []
+        sample_rate: int | None = None
         last_chunk: GenerateChunk | None = None
         finish_reason: str | None = None
 
@@ -95,6 +100,8 @@ class Client:
                 text_parts.append(chunk.text)
             if chunk.audio_data is not None:
                 audio_chunks.append(chunk.audio_data)
+            if chunk.sample_rate is not None:
+                sample_rate = chunk.sample_rate
             if chunk.finish_reason is not None:
                 finish_reason = chunk.finish_reason
 
@@ -109,7 +116,11 @@ class Client:
                 combined = audio_chunks[0]
             else:
                 combined = np.concatenate([to_numpy(c) for c in audio_chunks])
-            audio_b64 = audio_to_base64(combined, output_format=audio_format)
+            audio_b64 = audio_to_base64(
+                combined,
+                sample_rate=sample_rate or DEFAULT_SAMPLE_RATE,
+                output_format=audio_format,
+            )
             audio = CompletionAudio(
                 id=f"audio-{request_id}",
                 data=audio_b64,
@@ -143,15 +154,29 @@ class Client:
         async for chunk in self.generate(request, request_id=request_id):
             audio_b64: str | None = None
             if chunk.modality == "audio" and chunk.audio_data is not None:
-                audio_b64 = audio_to_base64(
-                    chunk.audio_data, output_format=audio_format
-                )
+                audio_data = to_numpy(chunk.audio_data)
+                if audio_data.size == 0:
+                    if (
+                        chunk.finish_reason is None
+                        and not chunk.text
+                        and not chunk.token_ids
+                    ):
+                        continue
+                else:
+                    audio_b64 = audio_to_base64(
+                        audio_data,
+                        sample_rate=chunk.sample_rate or DEFAULT_SAMPLE_RATE,
+                        output_format=audio_format,
+                    )
 
             yield CompletionStreamChunk(
                 request_id=request_id,
                 text=chunk.text,
                 modality=chunk.modality,
                 audio_b64=audio_b64,
+                sample_rate=chunk.sample_rate,
+                talker_queue_depth=chunk.talker_queue_depth,
+                segmenter_first_emit_ms=chunk.segmenter_first_emit_ms,
                 finish_reason=chunk.finish_reason,
                 usage=chunk.usage,
                 stage_name=chunk.stage_name,
@@ -244,7 +269,9 @@ class Client:
 
     @staticmethod
     def _set_audio_data(chunk: GenerateChunk, data: dict[str, Any]) -> None:
-        audio_data = data.get("audio_data") or data.get("audio")
+        audio_data = data.get("audio_data")
+        if audio_data is None:
+            audio_data = data.get("audio")
         if audio_data is None and data.get("audio_waveform") is not None:
             raw = data.get("audio_waveform")
             if isinstance(raw, memoryview):
@@ -280,14 +307,23 @@ class Client:
             result.request_id = request_id
             return result
         if isinstance(result, dict):
-            # Multi-terminal merged result: {"decode": {...}, "code2wav": {...}}
-            if "decode" in result and "code2wav" in result:
+            # Multi-terminal merged result, e.g.
+            # {"decode": {...}, "code2wav": {...}} for Qwen or
+            # {"decode": {...}, "talker": {...}} for Ming non-streaming TTS.
+            audio_result = None
+            if "decode" in result:
+                for audio_stage in _MERGED_AUDIO_RESULT_STAGES:
+                    if audio_stage in result:
+                        candidate = result[audio_stage] or {}
+                        if isinstance(candidate, dict):
+                            audio_result = candidate
+                            break
+            if audio_result is not None:
                 decode_result = result["decode"] or {}
-                c2w_result = result["code2wav"] or {}
                 text = decode_result.get("text")
                 if isinstance(text, str):
                     chunk.text = text
-                Client._set_audio_data(chunk, c2w_result)
+                Client._set_audio_data(chunk, audio_result)
                 chunk.usage = UsageInfo.from_dict(decode_result.get("usage"))
                 return chunk
             text = result.get("text")
@@ -380,6 +416,12 @@ class Client:
             modality = data.get("modality")
             if modality is not None:
                 chunk.modality = modality
+            talker_queue_depth = data.get("talker_queue_depth")
+            if isinstance(talker_queue_depth, int):
+                chunk.talker_queue_depth = talker_queue_depth
+            segmenter_first_emit_ms = data.get("segmenter_first_emit_ms")
+            if isinstance(segmenter_first_emit_ms, (int, float)):
+                chunk.segmenter_first_emit_ms = float(segmenter_first_emit_ms)
             Client._set_audio_data(chunk, data)
             return chunk
         if isinstance(data, str):

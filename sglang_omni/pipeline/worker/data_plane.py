@@ -136,6 +136,13 @@ class DataPlaneAdapter:
 
             # Concatenate all tensors
             all_tensors = torch.cat(tensor_buffers)
+            if all_tensors.numel() == 0:
+                # A payload may legitimately contain only empty tensors.
+                # Relays still need a positive-size transfer to complete the
+                # send/receive lifecycle; tensor_info keeps the real sizes.
+                all_tensors = torch.zeros(
+                    1, dtype=torch.uint8, device=transport_device
+                )
         else:
             # Relay still expects a payload to transfer; use a 1-byte placeholder.
             all_tensors = torch.zeros(1, dtype=torch.uint8, device=device)
@@ -183,15 +190,18 @@ class DataPlaneAdapter:
                 offset = info["offset"]
                 size = info["size"]
 
-                # Extract tensor bytes
-                tensor_bytes = recv_tensor[offset : offset + size]
-
                 # Parse dtype
                 dtype = getattr(torch, dtype_str.replace("torch.", ""))
 
-                # Keep a view into the relay receive buffer instead of cloning;
-                # write_payload pads offsets so dtype views are aligned.
-                tensor = tensor_bytes.view(dtype).reshape(shape)
+                if size == 0:
+                    tensor = torch.empty(shape, dtype=dtype, device=device)
+                else:
+                    # Extract tensor bytes
+                    tensor_bytes = recv_tensor[offset : offset + size]
+
+                    # Keep a view into the relay receive buffer instead of cloning;
+                    # write_payload pads offsets so dtype views are aligned.
+                    tensor = tensor_bytes.view(dtype).reshape(shape)
                 tensor_dict[path] = tensor
 
         # Restore tensors into payload
@@ -218,12 +228,28 @@ class DataPlaneAdapter:
         Returns (metadata_dict, relay_operation).
         metadata_dict is sent via control plane; receiver uses it in read_blob.
         """
+        device = self._relay.device if hasattr(self._relay, "device") else "cpu"
+        transport_device = torch.device(device)
         flat = tensor.contiguous().view(torch.uint8).reshape(-1)
-        op = await self._relay.put_async(flat, request_id=key)
+        if flat.device != transport_device:
+            flat = flat.to(device=transport_device)
+
+        is_empty_tensor = flat.numel() == 0
+        relay_tensor = flat
+        if is_empty_tensor:
+            # Shared-memory and RDMA relays need a positive transfer size.
+            # Preserve the original tensor shape/dtype in metadata and send a
+            # one-byte placeholder only to complete the relay lifecycle.
+            relay_tensor = torch.zeros(
+                1, dtype=torch.uint8, device=transport_device
+            )
+
+        op = await self._relay.put_async(relay_tensor, request_id=key)
         metadata = {
             "relay_info": op.metadata,
             "tensor_shape": list(tensor.shape),
             "tensor_dtype": str(tensor.dtype),
+            "empty_tensor": is_empty_tensor,
         }
         return metadata, op
 
@@ -246,6 +272,9 @@ class DataPlaneAdapter:
         await op.wait_for_completion()
 
         dtype = getattr(torch, dtype_str.replace("torch.", ""))
+        if metadata.get("empty_tensor"):
+            return torch.empty(shape, dtype=dtype, device=device)
+
         tensor = recv_buf.view(dtype).reshape(shape)
         return tensor
 
