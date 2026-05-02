@@ -85,6 +85,11 @@ class Worker:
             raise RuntimeError("Worker not bound to a stage")
 
         try:
+            logger.info(
+                "Worker starting executor for stage %s (%s)",
+                self.stage.name,
+                type(self.executor).__name__,
+            )
             await self.executor.start()
             self._running = True
 
@@ -118,6 +123,9 @@ class Worker:
 
         except asyncio.CancelledError:
             logger.info("Worker cancelled for stage %s", self.stage.name)
+        except Exception:
+            logger.exception("Worker failed for stage %s", self.stage.name)
+            raise
         finally:
             self._running = False
             # Stop streaming send loop
@@ -207,6 +215,10 @@ class Worker:
 
             output_payload = await fut
             logger.debug("Worker %s: got result for %s", self.stage.name, request_id)
+
+            if stream_task is not None:
+                await self._finish_stream_task(stream_task)
+                stream_task = None
 
             # Signal stream done to all downstream streaming targets
             for target in self._stream_targets:

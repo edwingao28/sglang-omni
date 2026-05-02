@@ -15,6 +15,8 @@ AGGREGATE_STAGE = "mm_aggregate"
 THINKER_STAGE = "thinker"
 DECODE_STAGE = "decode"
 TALKER_STAGE = "talker"
+SEGMENTER_STAGE = "segmenter"
+TALKER_STREAM_STAGE = "talker_stream"
 
 
 def preprocessing_next(request_id: str, output: Any) -> list[str]:
@@ -56,13 +58,31 @@ def thinker_next_speech(request_id: str, output: Any) -> list[str]:
     return [DECODE_STAGE, TALKER_STAGE]
 
 
+def thinker_next_streaming_speech(request_id: str, output: Any) -> list[str]:
+    """Streaming speech pipeline: thinker decodes text and streams text through the segmenter."""
+    del request_id, output
+    return [DECODE_STAGE, SEGMENTER_STAGE]
+
+
 def decode_next(request_id: str, output: Any) -> None:
     """Decode is terminal."""
     del request_id, output
     return None
 
 
+def segmenter_next(request_id: str, output: Any) -> str:
+    """Segmenter routes to streaming talker."""
+    del request_id, output
+    return TALKER_STREAM_STAGE
+
+
 def talker_next(request_id: str, output: Any) -> None:
     """Talker is terminal."""
+    del request_id, output
+    return None
+
+
+def talker_stream_next(request_id: str, output: Any) -> None:
+    """Streaming talker is terminal."""
     del request_id, output
     return None

@@ -5,19 +5,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from sglang_omni.engines.ar.sglang_backend.server_args_builder import (
-    apply_encoder_mem_reserve,
-    build_sglang_server_args,
-)
 from sglang_omni.engines.omni import create_sglang_ar_engine, create_single_pass_engine
 from sglang_omni.executors import EngineExecutor, PreprocessingExecutor
-from sglang_omni.models.ming_omni.components.audio_encoder import MingAudioEncoder
 from sglang_omni.models.ming_omni.components.common import (
     load_ming_config,
     load_ming_tokenizer,
 )
-from sglang_omni.models.ming_omni.components.preprocessor import MingPreprocessor
-from sglang_omni.models.ming_omni.components.talker_executor import MingTalkerExecutor
+from sglang_omni.models.ming_omni.components.streaming_text import (
+    SegmenterConfig,
+    text_to_uint8_tensor,
+)
 from sglang_omni.models.ming_omni.io import OmniEvent, ThinkerOutput
 from sglang_omni.models.ming_omni.pipeline.engine_io import (
     apply_encoder_result,
@@ -29,6 +26,7 @@ from sglang_omni.models.ming_omni.pipeline.merge import decode_events
 from sglang_omni.models.ming_omni.pipeline.next_stage import (
     AUDIO_STAGE,
     IMAGE_STAGE,
+    SEGMENTER_STAGE,
     THINKER_STAGE,
 )
 from sglang_omni.models.ming_omni.pipeline.state_io import load_state, store_state
@@ -46,6 +44,8 @@ def _event_to_dict(event: OmniEvent) -> dict[str, Any]:
 
 
 def create_preprocessing_executor(model_path: str) -> PreprocessingExecutor:
+    from sglang_omni.models.ming_omni.components.preprocessor import MingPreprocessor
+
     preprocessor = MingPreprocessor(model_path=model_path)
 
     async def _preprocess(payload: StagePayload) -> StagePayload:
@@ -67,6 +67,8 @@ def create_audio_encoder_executor(
     device: str = "cuda",
     dtype: str | None = None,
 ) -> EngineExecutor:
+    from sglang_omni.models.ming_omni.components.audio_encoder import MingAudioEncoder
+
     model = MingAudioEncoder(model_path=model_path, device=device, dtype=dtype)
 
     def _request_builder(payload: StagePayload):
@@ -125,6 +127,8 @@ def create_sglang_thinker_executor(
     model_path: str,
     *,
     gpu_id: int = 0,
+    stream_text_to_segmenter: bool = False,
+    stream_text_target_stage: str = SEGMENTER_STAGE,
 ) -> EngineExecutor:
     """Create a thinker executor backed by SGLang's ModelWorker."""
     tokenizer = load_ming_tokenizer(model_path)
@@ -138,6 +142,7 @@ def create_sglang_thinker_executor(
     )
 
     step_counters: dict[str, int] = {}
+    stream_fn_holder: dict[str, Any] = {"fn": None}
 
     def _request_builder(payload: StagePayload):
         state = load_state(payload)
@@ -191,13 +196,24 @@ def create_sglang_thinker_executor(
             ]
 
         text_to_add = ""
+        side_channel_text = ""
         for event in events:
             if event.modality == "text" and "text" in event.payload:
                 if event.is_final:
-                    text_to_add = event.payload["text"]
+                    final_text = str(event.payload["text"])
+                    emitted_text = str(state.stream_state.get("emitted_text", ""))
+                    if final_text.startswith(emitted_text):
+                        final_delta = final_text[len(emitted_text) :]
+                    else:
+                        final_delta = final_text
+                    text_to_add += final_delta
+                    side_channel_text += final_delta
+                    state.stream_state["emitted_text"] = final_text
                     break
                 else:
-                    text_to_add += event.payload["text"]
+                    delta_text = event.payload["text"]
+                    text_to_add += delta_text
+                    side_channel_text += delta_text
 
         result: dict[str, Any] = {
             "events": [_event_to_dict(event) for event in events],
@@ -207,6 +223,21 @@ def create_sglang_thinker_executor(
         }
         if text_to_add:
             result["text"] = text_to_add
+            stream_fn = stream_fn_holder.get("fn")
+            if stream_text_to_segmenter and callable(stream_fn) and side_channel_text:
+                text_tensor = text_to_uint8_tensor(side_channel_text)
+                stream_fn(
+                    request_id,
+                    text_tensor,
+                    stream_text_target_stage,
+                    metadata={
+                        "token_id": token_id,
+                        "step": step,
+                        "text_len": int(text_tensor.numel()),
+                        "source_stage": THINKER_STAGE,
+                        "target_stage": stream_text_target_stage,
+                    },
+                )
         return result
 
     engine = create_sglang_ar_engine(
@@ -215,12 +246,20 @@ def create_sglang_thinker_executor(
         model_arch_override="BailingMoeV2ForCausalLM",
     )
 
-    return EngineExecutor(
+    executor = EngineExecutor(
         engine=engine,
         request_builder=_request_builder,
         result_builder=_result_builder,
         stream_builder=_stream_builder,
     )
+    original_set_stream_fn = executor.set_stream_fn
+
+    def _set_stream_fn(fn) -> None:
+        stream_fn_holder["fn"] = fn
+        original_set_stream_fn(fn)
+
+    executor.set_stream_fn = _set_stream_fn  # type: ignore[method-assign]
+    return executor
 
 
 _ming_config_registered = False
@@ -301,8 +340,15 @@ def create_sglang_thinker_executor_from_config(
     gpu_id: int = 0,
     thinker_max_seq_len: int = 8192,
     server_args_overrides: dict[str, Any] | None = None,
+    stream_text_to_segmenter: bool = False,
+    stream_text_target_stage: str = SEGMENTER_STAGE,
 ) -> EngineExecutor:
     """Create a SGLang thinker executor from JSON-serializable config args."""
+    from sglang_omni.engines.ar.sglang_backend.server_args_builder import (
+        apply_encoder_mem_reserve,
+        build_sglang_server_args,
+    )
+
     import logging as _log
 
     _log.getLogger(__name__).info(
@@ -356,6 +402,8 @@ def create_sglang_thinker_executor_from_config(
         server_args=server_args,
         model_path=local_path,
         gpu_id=gpu_id,
+        stream_text_to_segmenter=stream_text_to_segmenter,
+        stream_text_target_stage=stream_text_target_stage,
     )
     post_load_avail_mem = avail_gpu_mem(gpu_id)
     post_load_mem = (
@@ -381,6 +429,10 @@ def create_talker_executor(
     The talker is a self-contained MingOmniTalker with its own LLM + CFM + AudioVAE,
     wrapped as an Executor for the pipeline.
     """
+    from sglang_omni.models.ming_omni.components.talker_executor import (
+        MingTalkerExecutor,
+    )
+
     # Resolve HF repo ID to local snapshot path so that
     # Path(model_path) / "talker" yields a real filesystem path.
     local_path = _resolve_local_model_path(model_path)
@@ -390,6 +442,51 @@ def create_talker_executor(
         device=device,
         voice=voice,
     )
+
+
+def create_streaming_segmenter_executor(model_path: str, **kwargs: Any) -> Any:
+    """Create the streaming text segmenter executor."""
+    from sglang_omni.models.ming_omni.components.streaming_segmenter_executor import (
+        MingStreamingSegmenterExecutor,
+    )
+
+    tokenizer = load_ming_tokenizer(model_path)
+
+    def _token_count(text: str) -> int:
+        encode = getattr(tokenizer, "encode", None)
+        if callable(encode):
+            try:
+                return len(encode(text, add_special_tokens=False))
+            except TypeError:
+                return len(encode(text))
+            except Exception:
+                pass
+        return len(text.split()) or len(text)
+
+    config = SegmenterConfig(
+        segment_min_tokens=int(kwargs.pop("segment_min_tokens", 8)),
+        segment_max_tokens=int(kwargs.pop("segment_max_tokens", 40)),
+        first_segment_min_tokens=int(kwargs.pop("first_segment_min_tokens", 4)),
+        first_segment_max_wait_ms=int(kwargs.pop("first_segment_max_wait_ms", 450)),
+    )
+    return MingStreamingSegmenterExecutor(
+        config=config,
+        token_count_fn=_token_count,
+        **kwargs,
+    )
+
+
+def create_talker_stream_executor(
+    model_path: str,
+    *,
+    device: str = "cuda",
+    **kwargs: Any,
+) -> Any:
+    from sglang_omni.models.ming_omni.components.streaming_talker_executor import (
+        MingTalkerStreamExecutor,
+    )
+    local_path = _resolve_local_model_path(model_path)
+    return MingTalkerStreamExecutor(model_path=local_path, device=device, **kwargs)
 
 
 def create_decode_executor(model_path: str) -> PreprocessingExecutor:
