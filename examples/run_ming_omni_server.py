@@ -26,8 +26,15 @@ import logging
 import multiprocessing as mp
 import os
 
-from sglang_omni.models.ming_omni.config import MingOmniPipelineConfig
-from sglang_omni.serve import launch_server
+from sglang_omni.models.ming_omni.config import (
+    MingOmniPipelineConfig,
+    MingOmniSpeechPipelineConfig,
+    MingOmniStreamingSpeechPipelineConfig,
+)
+from sglang_omni.models.ming_omni.pipeline.next_stage import (
+    TALKER_STAGE,
+    TALKER_STREAM_STAGE,
+)
 
 logging.basicConfig(
     level=os.environ.get("LOGLEVEL", "INFO").upper(),
@@ -35,7 +42,34 @@ logging.basicConfig(
 )
 
 
-def parse_args() -> argparse.Namespace:
+def resolve_ming_pipeline_config(
+    *, enable_speech: bool, enable_streaming_tts: bool
+) -> type[
+    MingOmniPipelineConfig
+    | MingOmniSpeechPipelineConfig
+    | MingOmniStreamingSpeechPipelineConfig
+]:
+    if enable_speech and enable_streaming_tts:
+        return MingOmniStreamingSpeechPipelineConfig
+    if enable_speech:
+        return MingOmniSpeechPipelineConfig
+    return MingOmniPipelineConfig
+
+
+def resolve_ming_gpu_placement(
+    *,
+    enable_speech: bool,
+    enable_streaming_tts: bool,
+    gpu_thinker: int,
+    gpu_talker: int,
+) -> dict[str, int] | None:
+    if not enable_speech:
+        return None
+    talker_stage = TALKER_STREAM_STAGE if enable_streaming_tts else TALKER_STAGE
+    return {"thinker": gpu_thinker, talker_stage: gpu_talker}
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -55,6 +89,22 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Tensor parallel size for thinker",
+    )
+    parser.add_argument(
+        "--gpu-thinker",
+        type=int,
+        default=0,
+        help="GPU index for the thinker stage",
+    )
+    parser.add_argument(
+        "--gpu-talker",
+        type=int,
+        default=1,
+        help=(
+            "GPU index for the speech talker stage. "
+            "When using --tp-size 2, set --gpu-talker 2 to avoid "
+            "the thinker TP range."
+        ),
     )
     parser.add_argument(
         "--quantization",
@@ -84,6 +134,16 @@ def parse_args() -> argparse.Namespace:
         choices=["shm", "nixl"],
         help="Relay backend for inter-stage data transfer",
     )
+    parser.add_argument(
+        "--enable-speech",
+        action="store_true",
+        help="Enable non-streaming speech output pipeline",
+    )
+    parser.add_argument(
+        "--enable-streaming-tts",
+        action="store_true",
+        help="Enable streaming TTS speech pipeline; requires --enable-speech",
+    )
 
     # Server
     parser.add_argument("--host", type=str, default="0.0.0.0")
@@ -95,11 +155,15 @@ def parse_args() -> argparse.Namespace:
         help="Model name for /v1/models (default: ming-omni)",
     )
 
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.enable_streaming_tts and not args.enable_speech:
+        parser.error("--enable-streaming-tts requires --enable-speech")
+    return args
 
 
 def main() -> None:
     args = parse_args()
+    from sglang_omni.serve import launch_server
 
     overrides = {}
     if args.tp_size and args.tp_size > 1:
@@ -110,9 +174,24 @@ def main() -> None:
     if args.cpu_offload_gb:
         overrides["cpu_offload_gb"] = args.cpu_offload_gb
 
-    config = MingOmniPipelineConfig(
-        model_path=args.model_path,
-        relay_backend=args.relay_backend,
+    config_cls = resolve_ming_pipeline_config(
+        enable_speech=args.enable_speech,
+        enable_streaming_tts=args.enable_streaming_tts,
+    )
+    config_kwargs = {
+        "model_path": args.model_path,
+        "relay_backend": args.relay_backend,
+    }
+    gpu_placement = resolve_ming_gpu_placement(
+        enable_speech=args.enable_speech,
+        enable_streaming_tts=args.enable_streaming_tts,
+        gpu_thinker=args.gpu_thinker,
+        gpu_talker=args.gpu_talker,
+    )
+    if gpu_placement is not None:
+        config_kwargs["gpu_placement"] = gpu_placement
+    config = config_cls(
+        **config_kwargs,
     )
     if overrides:
         config.apply_server_args_overrides(stage_name="thinker", overrides=overrides)
