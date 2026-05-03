@@ -344,12 +344,12 @@ def create_sglang_thinker_executor_from_config(
     stream_text_target_stage: str = SEGMENTER_STAGE,
 ) -> EngineExecutor:
     """Create a SGLang thinker executor from JSON-serializable config args."""
+    import logging as _log
+
     from sglang_omni.engines.ar.sglang_backend.server_args_builder import (
         apply_encoder_mem_reserve,
         build_sglang_server_args,
     )
-
-    import logging as _log
 
     _log.getLogger(__name__).info(
         f"create_sglang_thinker_executor_from_config: "
@@ -485,6 +485,7 @@ def create_talker_stream_executor(
     from sglang_omni.models.ming_omni.components.streaming_talker_executor import (
         MingTalkerStreamExecutor,
     )
+
     local_path = _resolve_local_model_path(model_path)
     return MingTalkerStreamExecutor(model_path=local_path, device=device, **kwargs)
 

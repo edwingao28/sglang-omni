@@ -32,9 +32,7 @@ def _executor(**config_kwargs):
         segment_min_tokens=config_kwargs.pop("segment_min_tokens", 2),
         segment_max_tokens=config_kwargs.pop("segment_max_tokens", 10),
         first_segment_min_tokens=config_kwargs.pop("first_segment_min_tokens", 4),
-        first_segment_max_wait_ms=config_kwargs.pop(
-            "first_segment_max_wait_ms", 9999
-        ),
+        first_segment_max_wait_ms=config_kwargs.pop("first_segment_max_wait_ms", 9999),
     )
     return MingStreamingSegmenterExecutor(
         config=config,
