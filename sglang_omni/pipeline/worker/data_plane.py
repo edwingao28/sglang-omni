@@ -137,9 +137,7 @@ class DataPlaneAdapter:
             # Concatenate all tensors
             all_tensors = torch.cat(tensor_buffers)
             if all_tensors.numel() == 0:
-                all_tensors = torch.zeros(
-                    1, dtype=torch.uint8, device=transport_device
-                )
+                all_tensors = torch.zeros(1, dtype=torch.uint8, device=transport_device)
         else:
             # Relay still expects a payload to transfer; use a 1-byte placeholder.
             all_tensors = torch.zeros(1, dtype=torch.uint8, device=device)
@@ -231,9 +229,7 @@ class DataPlaneAdapter:
         is_empty_tensor = flat.numel() == 0
         relay_tensor = flat
         if is_empty_tensor:
-            relay_tensor = torch.zeros(
-                1, dtype=torch.uint8, device=transport_device
-            )
+            relay_tensor = torch.zeros(1, dtype=torch.uint8, device=transport_device)
 
         op = await self._relay.put_async(relay_tensor, request_id=key)
         metadata = {

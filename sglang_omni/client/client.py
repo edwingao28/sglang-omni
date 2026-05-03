@@ -30,7 +30,6 @@ from sglang_omni.client.types import (
 from sglang_omni.pipeline.coordinator import Coordinator
 from sglang_omni.proto import OmniRequest, RequestState, StreamMessage
 
-
 _MERGED_AUDIO_RESULT_STAGES = ("code2wav", "talker")
 
 

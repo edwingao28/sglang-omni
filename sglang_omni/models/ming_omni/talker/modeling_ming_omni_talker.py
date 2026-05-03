@@ -200,7 +200,9 @@ class CFMGraphExecutor:
                     self.sde_rnd_placeholder,
                     abort_event=None,
                 )
-                self.inputs_embeds_placeholder = self.aggregator(self.gen_lat_placeholder)
+                self.inputs_embeds_placeholder = self.aggregator(
+                    self.gen_lat_placeholder
+                )
                 self.stop_out_placeholder = self.stop_head(
                     self.last_hidden_state_placeholder[:, -1, :]
                 ).softmax(dim=-1)

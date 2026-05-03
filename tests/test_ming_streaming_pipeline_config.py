@@ -32,7 +32,9 @@ def test_launcher_selects_streaming_speech_config_and_talker_stream_gpu() -> Non
 
 
 def test_streaming_speech_topology_routes_text_segments_to_talker_stream() -> None:
-    from sglang_omni.models.ming_omni.config import MingOmniStreamingSpeechPipelineConfig
+    from sglang_omni.models.ming_omni.config import (
+        MingOmniStreamingSpeechPipelineConfig,
+    )
     from sglang_omni.models.ming_omni.pipeline.next_stage import (
         DECODE_STAGE,
         SEGMENTER_STAGE,
@@ -52,11 +54,18 @@ def test_streaming_speech_topology_routes_text_segments_to_talker_stream() -> No
     assert config.terminal_stages == [DECODE_STAGE, TALKER_STREAM_STAGE]
     assert thinker_next_streaming_speech("req-1", {}) == [DECODE_STAGE, SEGMENTER_STAGE]
     assert segmenter_next("req-1", {}) == TALKER_STREAM_STAGE
-    assert _stage_by_name(config, THINKER_STAGE).stream_to[0].to_stage == SEGMENTER_STAGE
-    assert _stage_by_name(config, SEGMENTER_STAGE).stream_to[0].to_stage == TALKER_STREAM_STAGE
+    assert (
+        _stage_by_name(config, THINKER_STAGE).stream_to[0].to_stage == SEGMENTER_STAGE
+    )
+    assert (
+        _stage_by_name(config, SEGMENTER_STAGE).stream_to[0].to_stage
+        == TALKER_STREAM_STAGE
+    )
 
 
-def test_streaming_speech_config_validates_talker_stream_outside_thinker_tp_range() -> None:
+def test_streaming_speech_config_validates_talker_stream_outside_thinker_tp_range() -> (
+    None
+):
     from sglang_omni.models.ming_omni.config import (
         MingOmniStreamingSpeechPipelineConfig,
     )

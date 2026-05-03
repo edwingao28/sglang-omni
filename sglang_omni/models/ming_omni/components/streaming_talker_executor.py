@@ -21,7 +21,11 @@ from sglang_omni.models.ming_omni.components.streaming_text import (
     uint8_tensor_to_text,
 )
 from sglang_omni.models.ming_omni.pipeline.next_stage import TALKER_STREAM_STAGE
-from sglang_omni.pipeline.stage.stream_queue import StreamItem, StreamQueue, StreamSignal
+from sglang_omni.pipeline.stage.stream_queue import (
+    StreamItem,
+    StreamQueue,
+    StreamSignal,
+)
 from sglang_omni.proto import StagePayload
 
 logger = logging.getLogger(__name__)
@@ -71,9 +75,7 @@ class MingTalkerStreamExecutor(Executor):
         self._results: asyncio.Queue[CompletedResult] = asyncio.Queue()
         self._states: dict[str, _RequestState] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
-        self._output_queues: dict[
-            str, asyncio.Queue[dict[str, Any] | None]
-        ] = {}
+        self._output_queues: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
         self._pre_aborted: collections.OrderedDict[str, None] = (
             collections.OrderedDict()
         )
@@ -281,13 +283,13 @@ class MingTalkerStreamExecutor(Executor):
                     time.perf_counter() - state.request_t_start_s
                 ) * 1000.0
             payload.setdefault("stage_times_ms", {})
-            payload["stage_times_ms"]["talker_first_audio"] = (
-                state.talker_first_audio_ms
-            )
+            payload["stage_times_ms"][
+                "talker_first_audio"
+            ] = state.talker_first_audio_ms
             if state.segmenter_first_emit_ms is not None:
-                payload["stage_times_ms"]["segmenter_first_emit"] = (
-                    state.segmenter_first_emit_ms
-                )
+                payload["stage_times_ms"][
+                    "segmenter_first_emit"
+                ] = state.segmenter_first_emit_ms
                 payload["segmenter_first_emit_ms"] = state.segmenter_first_emit_ms
             loop.call_soon_threadsafe(
                 self._put_output_if_active,
@@ -305,10 +307,10 @@ class MingTalkerStreamExecutor(Executor):
         abort_event: threading.Event,
         state: _RequestState,
     ) -> None:
-        """ (wenyao) Run the sync generator on a daemon thread; await its completion.
-                                                                                                
-        Generator must honor ``abort_event`` within ~50 ms. If it hangs       
-        (CUDA, 3rd-party code that ignores the event), the daemon thread                       
+        """(wenyao) Run the sync generator on a daemon thread; await its completion.
+
+        Generator must honor ``abort_event`` within ~50 ms. If it hangs
+        (CUDA, 3rd-party code that ignores the event), the daemon thread
         leaks until process exit — daemon=True so shutdown isn't blocked.
         """
         future: asyncio.Future[None] = loop.create_future()
@@ -402,14 +404,10 @@ class MingTalkerStreamExecutor(Executor):
         state.result_enqueued = True
         self._results.put_nowait(completed)
 
-    def _put_sentinel(
-        self, queue: asyncio.Queue[dict[str, Any] | None]
-    ) -> None:
+    def _put_sentinel(self, queue: asyncio.Queue[dict[str, Any] | None]) -> None:
         queue.put_nowait(None)
 
-    def _close_output_queue(
-        self, queue: asyncio.Queue[dict[str, Any] | None]
-    ) -> None:
+    def _close_output_queue(self, queue: asyncio.Queue[dict[str, Any] | None]) -> None:
         while True:
             try:
                 queue.get_nowait()
@@ -508,13 +506,14 @@ class MingTalkerStreamExecutor(Executor):
                 "MingTalkerStreamExecutor loader must return a dict with 'talker'"
             )
         self._talker = loaded.get("talker")
-        self._audio_detokenizer = loaded.get(
-            "audio_detokenizer", loaded.get("vae")
-        )
+        self._audio_detokenizer = loaded.get("audio_detokenizer", loaded.get("vae"))
         if loaded.get("sample_rate") is not None:
             self._sample_rate = int(loaded["sample_rate"])
 
     def _load_production_models(self) -> None:
+        import json
+        import os
+
         from transformers import AutoTokenizer
 
         from sglang_omni.models.ming_omni.talker import (
@@ -526,9 +525,6 @@ class MingTalkerStreamExecutor(Executor):
             AudioVAE,
         )
         from sglang_omni.models.weight_loader import load_weights_by_prefix
-
-        import json
-        import os
 
         if self._model_path is None:
             raise RuntimeError("MingTalkerStreamExecutor requires model_path to start")

@@ -8,7 +8,6 @@ import torch
 from sglang_omni.pipeline.stage.stream_queue import StreamSignal
 from sglang_omni.proto import StagePayload
 
-
 TokenCountFn = Callable[[str], int]
 
 
@@ -102,16 +101,12 @@ class SegmenterState:
             self._segment_id == 0
             and self._first_text_ms is not None
             and tokens >= self.config.first_segment_min_tokens
-            and now_ms - self._first_text_ms
-            >= self.config.first_segment_max_wait_ms
+            and now_ms - self._first_text_ms >= self.config.first_segment_max_wait_ms
         )
         should_emit = (
-            (
-                tokens >= self.config.segment_min_tokens
-                and self._has_segment_end_punctuation()
-            )
-            or first_timeout_ready
-        )
+            tokens >= self.config.segment_min_tokens
+            and self._has_segment_end_punctuation()
+        ) or first_timeout_ready
         if not should_emit:
             return []
 

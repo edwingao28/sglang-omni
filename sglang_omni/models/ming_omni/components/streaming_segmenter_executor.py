@@ -21,7 +21,11 @@ from sglang_omni.models.ming_omni.components.streaming_text import (
     uint8_tensor_to_text,
 )
 from sglang_omni.models.ming_omni.pipeline.next_stage import TALKER_STREAM_STAGE
-from sglang_omni.pipeline.stage.stream_queue import StreamItem, StreamQueue, StreamSignal
+from sglang_omni.pipeline.stage.stream_queue import (
+    StreamItem,
+    StreamQueue,
+    StreamSignal,
+)
 from sglang_omni.proto import StagePayload
 
 
