@@ -33,6 +33,7 @@ import asyncio
 import logging
 import multiprocessing as mp
 import os
+from typing import Any
 
 logging.basicConfig(
     level=os.environ.get("LOGLEVEL", "INFO").upper(),
@@ -56,6 +57,15 @@ def parse_args() -> argparse.Namespace:
     # GPU placement
     parser.add_argument("--gpu-thinker", type=int, default=0)
     parser.add_argument("--gpu-talker", type=int, default=1)
+    parser.add_argument(
+        "--tp-size",
+        type=int,
+        default=1,
+        help=(
+            "Tensor parallel size for the thinker stage. "
+            "--gpu-thinker is interpreted as the first visible GPU rank."
+        ),
+    )
 
     # Pipeline
     parser.add_argument(
@@ -73,6 +83,13 @@ def parse_args() -> argparse.Namespace:
             "If omitted, SGLang chooses automatically."
         ),
     )
+    parser.add_argument(
+        "--version",
+        type=str,
+        default=os.environ.get("SGLANG_OMNI_SERVER_VERSION", "legacy"),
+        choices=["legacy", "v1"],
+        help="Select the legacy or v1 Ming-Omni speech launcher implementation.",
+    )
 
     # Server
     parser.add_argument("--host", type=str, default="0.0.0.0")
@@ -80,6 +97,102 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-name", type=str, default="ming-omni")
 
     return parser.parse_args()
+
+
+def _validate_fraction(flag_name: str, value: float | None) -> None:
+    if value is not None and not 0.0 < value < 1.0:
+        raise ValueError(f"{flag_name} must be > 0 and < 1, got {value}")
+
+
+def _apply_stage_factory_updates(
+    config: Any,
+    *,
+    stage_name: str,
+    updates: dict[str, object] | None = None,
+    server_arg_updates: dict[str, object] | None = None,
+) -> None:
+    for stage in config.stages:
+        if stage.name != stage_name:
+            continue
+        factory_args = dict(stage.factory_args or {})
+        if updates:
+            factory_args.update(updates)
+        if server_arg_updates:
+            overrides = dict(factory_args.get("server_args_overrides") or {})
+            overrides.update(server_arg_updates)
+            factory_args["server_args_overrides"] = overrides
+        stage.factory_args = factory_args
+        return
+    raise ValueError(
+        f"Stage {stage_name!r} not found in config {type(config).__name__}"
+    )
+
+
+def _set_stage_gpu(config: Any, stage_name: str, gpu_id: int) -> None:
+    for stage in config.stages:
+        if stage.name == stage_name:
+            stage.gpu = int(gpu_id)
+            return
+    raise ValueError(
+        f"Stage {stage_name!r} not found in config {type(config).__name__}"
+    )
+
+
+def _set_thinker_tp(config: Any, *, start_gpu: int, tp_size: int) -> None:
+    if tp_size < 1:
+        raise ValueError(f"--tp-size must be >= 1, got {tp_size}")
+    for stage in config.stages:
+        if stage.name == "thinker":
+            stage.tp_size = int(tp_size)
+            if tp_size == 1:
+                stage.gpu = int(start_gpu)
+            else:
+                stage.gpu = list(range(int(start_gpu), int(start_gpu) + int(tp_size)))
+            return
+    raise ValueError("Stage 'thinker' not found in config")
+
+
+def _launch_v1_speech_server(args: argparse.Namespace) -> None:
+    from sglang_omni_v1.models.ming_omni.config import MingOmniSpeechPipelineConfig
+    from sglang_omni_v1.serve import launch_server as launch_v1_server
+
+    _validate_fraction("--mem-fraction-static", args.mem_fraction_static)
+
+    config = MingOmniSpeechPipelineConfig(
+        model_path=args.model_path,
+        relay_backend=args.relay_backend,
+    )
+    _set_thinker_tp(
+        config,
+        start_gpu=args.gpu_thinker,
+        tp_size=int(args.tp_size),
+    )
+    _set_stage_gpu(config, "talker", args.gpu_talker)
+    config._validate_talker_gpu_not_in_thinker_tp_range()
+
+    server_arg_updates: dict[str, object] = {}
+    if args.tp_size and args.tp_size > 1:
+        server_arg_updates["disable_custom_all_reduce"] = True
+    if args.mem_fraction_static is not None:
+        server_arg_updates["mem_fraction_static"] = args.mem_fraction_static
+    if server_arg_updates:
+        _apply_stage_factory_updates(
+            config,
+            stage_name="thinker",
+            server_arg_updates=server_arg_updates,
+        )
+    _apply_stage_factory_updates(
+        config,
+        stage_name="talker",
+        updates={"voice": args.voice},
+    )
+
+    launch_v1_server(
+        config,
+        host=args.host,
+        port=args.port,
+        model_name=args.model_name,
+    )
 
 
 async def main_async(args: argparse.Namespace) -> None:
@@ -136,7 +249,22 @@ async def main_async(args: argparse.Namespace) -> None:
 def main() -> None:
     mp.set_start_method("spawn", force=True)
     args = parse_args()
+    _print_version_banner(args.version)
+    if args.version == "v1":
+        _launch_v1_speech_server(args)
+        return
     asyncio.run(main_async(args))
+
+
+def _print_version_banner(version: str) -> None:
+    try:
+        from sglang_omni.utils import print_server_version_banner
+    except Exception:
+        print(f"SGLANG-OMNI SERVER VERSION = {version.upper()}", flush=True)
+        return
+    print_server_version_banner(
+        version, entry="examples/run_ming_omni_speech_server.py"
+    )
 
 
 if __name__ == "__main__":

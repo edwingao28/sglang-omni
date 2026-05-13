@@ -141,6 +141,10 @@ class MingAudioEncoder(nn.Module):
                 audio_embeds: Projected embeddings [B, T', hidden_size]
                 audio_embed_lengths: Output lengths [B, N]
         """
+        audio_feats = audio_feats.to(device=self._device, dtype=self._dtype)
+        if audio_feats_lengths is not None:
+            audio_feats_lengths = audio_feats_lengths.to(device=self._device)
+
         # Whisper encoder expects [B, T, n_mels] and we process segments independently
         # Unwrap segments for per-segment encoding
         if audio_feats_lengths is not None and audio_feats_lengths.dim() == 2:

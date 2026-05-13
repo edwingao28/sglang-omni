@@ -52,3 +52,11 @@ __all__ = [
     "RelayConfig",
     "EndpointsConfig",
 ]
+
+
+def __getattr__(name: str):
+    if name == "compile_pipeline":
+        from sglang_omni_v1.config.compiler import compile_pipeline
+
+        return compile_pipeline
+    raise AttributeError(name)
