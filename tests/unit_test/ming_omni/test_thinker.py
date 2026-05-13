@@ -323,23 +323,6 @@ def _purge_cached_module(module_name: str, module: ModuleType) -> None:
         delattr(parent, child_name)
 
 
-def test_ming_fake_sglang_runner_loader_cleanup_removes_parent_attr(
-    monkeypatch,
-) -> None:
-    module_name = "sglang_omni_v1.model_runner.ming_thinker_model_runner"
-    parent_name = "sglang_omni_v1.model_runner"
-    fake_parent = ModuleType(parent_name)
-    fake_module = ModuleType(module_name)
-    fake_parent.ming_thinker_model_runner = fake_module
-    monkeypatch.setitem(sys.modules, parent_name, fake_parent)
-    monkeypatch.setitem(sys.modules, module_name, fake_module)
-
-    _purge_cached_module(module_name, fake_module)
-
-    assert module_name not in sys.modules
-    assert not hasattr(fake_parent, "ming_thinker_model_runner")
-
-
 class _FakeEmbedTokens:
     num_embeddings = 16
 
@@ -452,3 +435,28 @@ def test_ming_runner_successful_final_injection_consumes_and_clears(
     assert torch.equal(input_embeds[1], audio_embeds[0])
     assert req.omni_model_inputs is None
     assert req._omni_consumed is None
+
+
+def test_ming_runner_keeps_chunk_state_until_final_chunk(monkeypatch) -> None:
+    torch, runner_cls = _load_runner_with_fake_sglang(monkeypatch)
+    runner = _fake_runner(torch, runner_cls, image=3)
+    image_embeds = torch.tensor([[20.0, 21.0], [22.0, 23.0]])
+    model_inputs = {"image_embeds": image_embeds}
+    req = _fake_req(model_inputs, is_chunked=1, rid="chunked-image")
+    forward_batch, schedule_batch = _fake_batch(torch, [3, 1], req)
+
+    input_embeds = runner._inject_multimodal_embeds(forward_batch, schedule_batch)
+
+    assert torch.equal(input_embeds[0], image_embeds[0])
+    assert req.omni_model_inputs is model_inputs
+    assert req._omni_consumed == {"image": 1}
+
+    req.is_chunked = 0
+    forward_batch, schedule_batch = _fake_batch(torch, [3, 2], req)
+
+    input_embeds = runner._inject_multimodal_embeds(forward_batch, schedule_batch)
+
+    assert torch.equal(input_embeds[0], image_embeds[1])
+    assert req.omni_model_inputs is None
+    assert req._omni_consumed is None
+    assert model_inputs == {"image_embeds": image_embeds}

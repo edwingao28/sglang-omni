@@ -23,8 +23,22 @@ def _ming_config_with_thinker_tp2(config_cls):
     return stages
 
 
-def _thinker_specs(config, build_stage_groups):
-    groups = build_stage_groups(config)
+def _build_groups(config, build_stage_groups, prepare_pipeline_runtime):
+    prep = prepare_pipeline_runtime(config)
+    try:
+        return build_stage_groups(
+            config,
+            stages_cfg=prep.stages_cfg,
+            name_map=prep.name_map,
+            endpoints=prep.endpoints,
+        )
+    finally:
+        if prep.runtime_dir is not None:
+            prep.runtime_dir.close()
+
+
+def _thinker_specs(config, build_stage_groups, prepare_pipeline_runtime):
+    groups = _build_groups(config, build_stage_groups, prepare_pipeline_runtime)
     thinker_group = next(group for group in groups if group.stage_name == "thinker")
     return thinker_group.specs
 
@@ -156,6 +170,7 @@ def test_ming_thinker_tp2_builds_rank_specific_stage_specs(monkeypatch) -> None:
             mp.setitem(sys.modules, "transformers.utils", fake_transformers_utils)
             mp.setitem(sys.modules, "transformers.utils.hub", fake_transformers_hub)
 
+            from sglang_omni_v1.config.compiler import prepare_pipeline_runtime
             from sglang_omni_v1.models.ming_omni.config import MingOmniPipelineConfig
             from sglang_omni_v1.pipeline.mp_runner import _build_stage_groups
 
@@ -164,7 +179,9 @@ def test_ming_thinker_tp2_builds_rank_specific_stage_specs(monkeypatch) -> None:
                 stages=_ming_config_with_thinker_tp2(MingOmniPipelineConfig),
             )
 
-            groups = _build_stage_groups(config)
+            groups = _build_groups(
+                config, _build_stage_groups, prepare_pipeline_runtime
+            )
             thinker_group = next(
                 group for group in groups if group.stage_name == "thinker"
             )
@@ -199,7 +216,9 @@ def test_ming_thinker_tp2_builds_rank_specific_stage_specs(monkeypatch) -> None:
                 model_path="dummy",
                 stages=scalar_stages,
             )
-            scalar_specs = _thinker_specs(scalar_config, _build_stage_groups)
+            scalar_specs = _thinker_specs(
+                scalar_config, _build_stage_groups, prepare_pipeline_runtime
+            )
             assert [spec.gpu_id for spec in scalar_specs] == [2, 3]
 
             explicit_stages = _ming_config_with_thinker_tp2(MingOmniPipelineConfig)
@@ -210,7 +229,9 @@ def test_ming_thinker_tp2_builds_rank_specific_stage_specs(monkeypatch) -> None:
                 model_path="dummy",
                 stages=explicit_stages,
             )
-            explicit_specs = _thinker_specs(explicit_config, _build_stage_groups)
+            explicit_specs = _thinker_specs(
+                explicit_config, _build_stage_groups, prepare_pipeline_runtime
+            )
             assert [spec.gpu_id for spec in explicit_specs] == [2, 4]
     finally:
         _purge_project_modules_with_fake_refs(before_import, fake_refs)
@@ -390,35 +411,3 @@ def test_ming_bootstrap_aligns_server_args_tp_size_before_infra(
     assert captured["nccl_port"] == 29500
     assert captured["model_arch_override"] == "BailingMoeV2ForCausalLM"
     assert scheduler.kwargs["server_args"] is server_args
-
-
-def test_ming_runner_keeps_chunk_state_until_final_chunk(monkeypatch) -> None:
-    from tests.test_ming_v1_phase4b import (
-        _fake_batch,
-        _fake_req,
-        _fake_runner,
-        _load_runner_with_fake_sglang,
-    )
-
-    torch, runner_cls = _load_runner_with_fake_sglang(monkeypatch)
-    runner = _fake_runner(torch, runner_cls, image=3)
-    image_embeds = torch.tensor([[20.0, 21.0], [22.0, 23.0]])
-    model_inputs = {"image_embeds": image_embeds}
-    req = _fake_req(model_inputs, is_chunked=1, rid="chunked-image")
-    forward_batch, schedule_batch = _fake_batch(torch, [3, 1], req)
-
-    input_embeds = runner._inject_multimodal_embeds(forward_batch, schedule_batch)
-
-    assert torch.equal(input_embeds[0], image_embeds[0])
-    assert req.omni_model_inputs is model_inputs
-    assert req._omni_consumed == {"image": 1}
-
-    req.is_chunked = 0
-    forward_batch, schedule_batch = _fake_batch(torch, [3, 2], req)
-
-    input_embeds = runner._inject_multimodal_embeds(forward_batch, schedule_batch)
-
-    assert torch.equal(input_embeds[0], image_embeds[1])
-    assert req.omni_model_inputs is None
-    assert req._omni_consumed is None
-    assert model_inputs == {"image_embeds": image_embeds}

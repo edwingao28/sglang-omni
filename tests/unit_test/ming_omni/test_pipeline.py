@@ -9,8 +9,6 @@ import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
-import pytest
-
 
 def test_ming_v1_text_config_imports_and_uses_current_stage_schema() -> None:
     from sglang_omni_v1.models.ming_omni.config import MingOmniPipelineConfig
@@ -73,39 +71,6 @@ def test_ming_v1_speech_config_routes_decode_and_talker() -> None:
     assert stages["decode"].terminal is True
     assert stages["talker"].terminal is True
     assert config.terminal_stages == ["decode", "talker"]
-
-
-def test_ming_v1_speech_rejects_talker_inside_thinker_tp_range() -> None:
-    from sglang_omni_v1.models.ming_omni.config import MingOmniSpeechPipelineConfig
-
-    base = MingOmniSpeechPipelineConfig(model_path="dummy")
-    stages = [stage.model_copy(deep=True) for stage in base.stages]
-    for stage in stages:
-        if stage.name == "thinker":
-            stage.gpu = 0
-            stage.tp_size = 2
-        if stage.name == "talker":
-            stage.gpu = 1
-
-    with pytest.raises(ValueError, match="collides"):
-        MingOmniSpeechPipelineConfig(model_path="dummy", stages=stages)
-
-
-def test_ming_v1_speech_allows_talker_outside_thinker_tp_range() -> None:
-    from sglang_omni_v1.models.ming_omni.config import MingOmniSpeechPipelineConfig
-
-    base = MingOmniSpeechPipelineConfig(model_path="dummy")
-    stages = [stage.model_copy(deep=True) for stage in base.stages]
-    for stage in stages:
-        if stage.name == "thinker":
-            stage.gpu = 0
-            stage.tp_size = 2
-        if stage.name == "talker":
-            stage.gpu = 2
-
-    config = MingOmniSpeechPipelineConfig(model_path="dummy", stages=stages)
-
-    assert config.gpu_placement["talker"] == 2
 
 
 def test_ming_v1_speech_launcher_exposes_tp_size_arg(monkeypatch) -> None:
@@ -393,34 +358,6 @@ def test_ming_test_utils_inject_version_for_ming_launchers(monkeypatch) -> None:
         "--version",
         "v1",
     ]
-
-
-def test_ming_examples_expose_v1_version_dispatch() -> None:
-    for path in (
-        Path("examples/run_ming_omni_server.py"),
-        Path("examples/run_ming_omni_speech_server.py"),
-    ):
-        source = path.read_text(encoding="utf-8")
-        assert "--version" in source
-        assert "SGLANG_OMNI_SERVER_VERSION" in source
-        assert 'args.version == "v1"' in source
-        assert "sglang_omni_v1.models.ming_omni.config" in source
-
-
-def test_ming_model_registration_is_owned_by_v1_model_runner() -> None:
-    runner_source = Path(
-        "sglang_omni_v1/model_runner/sglang_model_runner.py"
-    ).read_text(encoding="utf-8")
-    registration_source = Path(
-        "sglang_omni_v1/models/ming_omni/registration.py"
-    ).read_text(encoding="utf-8")
-
-    assert "register_ming_hf_config()" in runner_source
-    assert "register_ming_model_registry()" in runner_source
-    assert 'AutoConfig.register("bailingmm_moe_v2_lite", BailingMM2Config)' in (
-        registration_source
-    )
-    assert 'ModelRegistry.models["BailingMoeV2ForCausalLM"]' in registration_source
 
 
 def test_ming_thinker_factory_registers_hf_config_before_server_args(

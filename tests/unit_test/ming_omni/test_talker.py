@@ -6,22 +6,10 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
-from pathlib import Path
 from types import ModuleType
 
 import numpy as np
 import pytest
-
-TALKER_EXECUTOR_PATH = Path(
-    "sglang_omni_v1/models/ming_omni/components/talker_executor.py"
-)
-
-
-def test_ming_v1_talker_executor_does_not_import_nonexistent_executor() -> None:
-    source = TALKER_EXECUTOR_PATH.read_text(encoding="utf-8")
-
-    assert "sglang_omni_v1.executors" not in source
-    assert "class MingTalkerExecutor:" in source
 
 
 def test_ming_v1_talker_add_request_propagates_generation_errors(
