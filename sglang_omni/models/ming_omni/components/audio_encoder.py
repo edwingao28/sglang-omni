@@ -86,7 +86,19 @@ class MingAudioEncoder(nn.Module):
 
         # Move to target device/dtype
         self.to(device=self._device, dtype=self._dtype)
+        self._patch_whisper_layernorms()
         self.eval()
+
+    def _patch_whisper_layernorms(self) -> None:
+        # whisper.model.LayerNorm.forward does x.float() which breaks bf16 weights.
+        import types
+
+        def _plain_ln_forward(ln_self: nn.LayerNorm, x: torch.Tensor) -> torch.Tensor:
+            return nn.LayerNorm.forward(ln_self, x)
+
+        for m in self.audio_tower.modules():
+            if isinstance(m, nn.LayerNorm):
+                m.forward = types.MethodType(_plain_ln_forward, m)
 
     def _build_whisper_encoder(self, whisper_cfg: Any) -> nn.Module:
         """Build a WhisperAudioEncoder from config."""

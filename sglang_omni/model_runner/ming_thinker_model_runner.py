@@ -118,10 +118,9 @@ class MingThinkerModelRunner(ModelRunner):
 
                 mask = req_input_ids == match_id
                 if not mask.any():
-                    if is_final_chunk and offset < total_rows:
-                        raise self._missing_placeholder_error(
-                            modality, req_id, remaining=total_rows - offset
-                        )
+                    # Cache hit may have absorbed all placeholder positions for
+                    # this modality; aligning with qwen3 thinker_model_runner
+                    # which silently continues here.
                     continue
 
                 n_tokens = int(mask.sum().item())
@@ -142,7 +141,8 @@ class MingThinkerModelRunner(ModelRunner):
             req._omni_consumed = consumed
 
             if is_final_chunk:
-                self._validate_final_consumption(req, omni_inputs, consumed)
+                # Skip strict consumed==total validation: radix prefix cache may
+                # have absorbed placeholder positions. Mirrors qwen3 path.
                 req.omni_model_inputs = None
                 req._omni_consumed = None
 

@@ -16,8 +16,11 @@ from sglang_omni.models.ming_omni.components.common import (
 )
 from sglang_omni.models.ming_omni.io import PipelineState, PromptInputs
 from sglang_omni.models.ming_omni.pipeline.next_stage import AUDIO_STAGE, IMAGE_STAGE
-from sglang_omni.preprocessing.audio import load_audio_path
-from sglang_omni.preprocessing.image import ensure_image_list_async
+from sglang_omni.preprocessing.audio import compute_audio_cache_key, load_audio_path
+from sglang_omni.preprocessing.image import (
+    compute_image_cache_key,
+    ensure_image_list_async,
+)
 from sglang_omni.proto import StagePayload
 
 logger = logging.getLogger(__name__)
@@ -139,6 +142,34 @@ def _inject_top_level_images(
     return messages
 
 
+def _inject_top_level_audios(
+    messages: list[dict[str, Any]],
+    audios: list[str],
+) -> list[dict[str, Any]]:
+    """Convert top-level ``audios`` into inline content items.
+
+    Symmetric to _inject_top_level_images: when the request uses
+    ``{"audios": ["url"], "messages": [...]}`` instead of inline
+    ``audio_url`` items, prepend the audios to the first user message
+    so _build_prompt emits ``<audioPatch>`` placeholders.
+    """
+    messages = list(messages)
+    for idx, msg in enumerate(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        new_content: list[dict[str, Any]] = [
+            {"type": "audio_url", "audio_url": {"url": url}} for url in audios
+        ]
+        if isinstance(content, str):
+            new_content.append({"type": "text", "text": content})
+        elif isinstance(content, list):
+            new_content.extend(content)
+        messages[idx] = {**msg, "content": new_content}
+        break
+    return messages
+
+
 class MingPreprocessor:
     """Preprocessor for Ming-Omni model.
 
@@ -222,6 +253,8 @@ class MingPreprocessor:
         # placeholder insertion and image extraction use a single code path.
         if top_level_images:
             messages = _inject_top_level_images(messages, top_level_images)
+        if audio_urls:
+            messages = _inject_top_level_audios(messages, audio_urls)
 
         # --- Extract image URLs/data from messages ---
         raw_images: list[Any] = []
@@ -244,6 +277,13 @@ class MingPreprocessor:
                             img = item.get("image", "")
                             if img:
                                 raw_images.append(img)
+
+        # Compute cache keys BEFORE async loading; same content -> same key so
+        # SGLang's radix prefix cache can correctly reuse KVs across requests, and
+        # different content -> different key so it never falsely aliases image
+        # placeholder positions (which share the same generic image_patch_token).
+        image_cache_key = compute_image_cache_key(raw_images) if raw_images else None
+        audio_cache_key = compute_audio_cache_key(audio_urls) if audio_urls else None
 
         # --- Load images and audio concurrently ---
         image_coro = ensure_image_list_async(raw_images) if raw_images else None
@@ -350,12 +390,16 @@ class MingPreprocessor:
                 "audio_feats_lengths": mel_lens,
                 "audio_placeholder_loc_lens": placeholder_locs,
             }
+            if audio_cache_key:
+                encoder_inputs[AUDIO_STAGE]["cache_key"] = audio_cache_key
 
         if pixel_values is not None and image_grid_thw is not None:
             encoder_inputs[IMAGE_STAGE] = {
                 "pixel_values": pixel_values,
                 "image_grid_thw": image_grid_thw,
             }
+            if image_cache_key:
+                encoder_inputs[IMAGE_STAGE]["cache_key"] = image_cache_key
 
         state = PipelineState(
             raw_inputs=raw_inputs,

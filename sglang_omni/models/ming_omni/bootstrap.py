@@ -63,9 +63,20 @@ def create_thinker_scheduler(
     )
     model_runner = MingThinkerModelRunner(model_worker, output_proc)
 
+    image_token_id = getattr(llm_cfg, "image_patch_token", None)
+    video_token_id = getattr(llm_cfg, "video_patch_token", None)
+    _audio_tok = tokenizer.convert_tokens_to_ids("<audioPatch>")
+    _unk = getattr(tokenizer, "unk_token_id", None)
+    audio_token_id = (
+        _audio_tok if isinstance(_audio_tok, int) and _audio_tok != _unk else None
+    )
+
     request_builder, result_adapter = make_thinker_scheduler_adapters(
         tokenizer=tokenizer,
         vocab_size=vocab_size,
+        image_token_id=image_token_id,
+        audio_token_id=audio_token_id,
+        video_token_id=video_token_id,
     )
 
     return OmniScheduler(
@@ -87,6 +98,9 @@ def make_thinker_scheduler_adapters(
     *,
     tokenizer: Any,
     vocab_size: int,
+    image_token_id: int | None = None,
+    audio_token_id: int | None = None,
+    video_token_id: int | None = None,
     stage_name: str = "thinker",
 ):
     """Build StagePayload <-> SGLang request adapters."""
@@ -106,6 +120,36 @@ def make_thinker_scheduler_adapters(
         input_ids = prompt.get("input_ids")
         if not hasattr(input_ids, "to"):
             raise TypeError("prompt.input_ids must be a torch.Tensor")
+
+        # Per-content pad_value substitution to defeat SGLang radix prefix-cache
+        # aliasing across multimodal requests that share the same generic
+        # image/audio/video patch token id.
+        thinker_inputs_early = state.thinker_inputs or {}
+        media_cache_keys = thinker_inputs_early.get("media_cache_keys") or {}
+        pad_values: dict[str, int] = {}
+        if media_cache_keys:
+            import xxhash
+
+            token_id_map: dict[int, int] = {}
+            for _modality, _orig in [
+                ("image", image_token_id),
+                ("audio", audio_token_id),
+                ("video", video_token_id),
+            ]:
+                if _orig is None:
+                    continue
+                _ck = media_cache_keys.get(_modality)
+                if _ck is None:
+                    continue
+                _h = xxhash.xxh3_64(_ck.encode()).intdigest()
+                _pad = vocab_size + _h % (1 << 30)
+                pad_values[_modality] = _pad
+                token_id_map[int(_orig)] = _pad
+            if token_id_map:
+                input_ids = input_ids.clone()
+                for _orig_id, _pad in token_id_map.items():
+                    input_ids[input_ids == _orig_id] = _pad
+
         input_ids_list = input_ids.to(dtype=_torch_long()).flatten().tolist()
 
         params = payload.request.params or {}
@@ -129,15 +173,17 @@ def make_thinker_scheduler_adapters(
         )
         req.tokenizer = tokenizer
 
-        thinker_inputs = state.thinker_inputs or {}
+        thinker_inputs = thinker_inputs_early
         model_inputs = dict(thinker_inputs.get("model_inputs", {}))
         if not model_inputs:
             model_inputs = {
                 key: value
                 for key, value in thinker_inputs.items()
-                if key != "capture_model_output_keys"
+                if key not in ("capture_model_output_keys", "media_cache_keys")
             }
         model_inputs.pop("attention_mask", None)
+        if pad_values:
+            model_inputs["pad_values"] = pad_values
         capture_keys = thinker_inputs.get("capture_model_output_keys", ())
 
         req.omni_model_inputs = model_inputs if model_inputs else None

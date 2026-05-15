@@ -79,6 +79,57 @@ def parse_args() -> argparse.Namespace:
         help="Output directory for MMMU results. Defaults under --output-dir.",
     )
     parser.add_argument(
+        "--run-mmsu",
+        action="store_true",
+        help="Run the MMSU audio-text benchmark after smoke tests.",
+    )
+    parser.add_argument("--mmsu-max-samples", type=int, default=50)
+    parser.add_argument("--mmsu-max-tokens", type=int, default=32)
+    parser.add_argument("--mmsu-temperature", type=float, default=0.0)
+    parser.add_argument("--mmsu-warmup", type=int, default=1)
+    parser.add_argument("--mmsu-max-concurrency", type=int, default=1)
+    parser.add_argument(
+        "--mmsu-modalities",
+        choices=["text", "text+audio"],
+        default="text+audio",
+    )
+    parser.add_argument(
+        "--mmsu-output-dir",
+        default=None,
+        help="Output directory for MMSU results. Defaults under --output-dir.",
+    )
+    parser.add_argument(
+        "--run-tts",
+        action="store_true",
+        help="Run the SeedTTS benchmark after smoke tests.",
+    )
+    parser.add_argument("--tts-max-samples", type=int, default=20)
+    parser.add_argument("--tts-max-new-tokens", type=int, default=256)
+    parser.add_argument("--tts-temperature", type=float, default=0.7)
+    parser.add_argument("--tts-warmup", type=int, default=1)
+    parser.add_argument("--tts-max-concurrency", type=int, default=1)
+    parser.add_argument(
+        "--tts-meta",
+        default="seedtts_testset/en/meta.lst",
+        help="Path to a seed-tts-eval meta.lst file.",
+    )
+    parser.add_argument("--tts-lang", choices=["en", "zh"], default="en")
+    parser.add_argument(
+        "--tts-speaker",
+        default="Ethan",
+        choices=["Ethan", "Chelsie", "Aiden"],
+    )
+    parser.add_argument(
+        "--tts-generate-only",
+        action="store_true",
+        help="Skip WER transcription phase (generate audio + measure speed only).",
+    )
+    parser.add_argument(
+        "--tts-output-dir",
+        default=None,
+        help="Output directory for TTS results. Defaults under --output-dir.",
+    )
+    parser.add_argument(
         "--quiet-server-log",
         action="store_true",
         help="Do not mirror the server log to stdout while tests are running.",
@@ -405,6 +456,90 @@ def _run_mmmu_benchmark(args: argparse.Namespace) -> None:
     subprocess.run(command, cwd=os.getcwd(), env=env, check=True)
 
 
+def _run_mmsu_benchmark(args: argparse.Namespace) -> None:
+    output_dir = (
+        Path(args.mmsu_output_dir)
+        if args.mmsu_output_dir
+        else Path(args.output_dir) / "mmsu_ming"
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    command = [
+        sys.executable,
+        "-m",
+        "benchmarks.eval.benchmark_omni_mmsu",
+        "--model",
+        "ming-omni",
+        "--host",
+        args.host,
+        "--port",
+        str(args.port),
+        "--modalities",
+        args.mmsu_modalities,
+        "--max-samples",
+        str(args.mmsu_max_samples),
+        "--max-concurrency",
+        str(args.mmsu_max_concurrency),
+        "--warmup",
+        str(args.mmsu_warmup),
+        "--max-tokens",
+        str(args.mmsu_max_tokens),
+        "--temperature",
+        str(args.mmsu_temperature),
+        "--output-dir",
+        str(output_dir),
+    ]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{os.getcwd()}:{env.get('PYTHONPATH', '')}"
+    print("\n[test] mmsu", flush=True)
+    print("[mmsu] " + " ".join(command), flush=True)
+    subprocess.run(command, cwd=os.getcwd(), env=env, check=True)
+
+
+def _run_tts_benchmark(args: argparse.Namespace) -> None:
+    output_dir = (
+        Path(args.tts_output_dir)
+        if args.tts_output_dir
+        else Path(args.output_dir) / "tts_ming"
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    command = [
+        sys.executable,
+        "-m",
+        "benchmarks.eval.benchmark_omni_seedtts",
+        "--model",
+        "ming-omni",
+        "--host",
+        args.host,
+        "--port",
+        str(args.port),
+        "--meta",
+        args.tts_meta,
+        "--lang",
+        args.tts_lang,
+        "--speaker",
+        args.tts_speaker,
+        "--max-samples",
+        str(args.tts_max_samples),
+        "--max-new-tokens",
+        str(args.tts_max_new_tokens),
+        "--temperature",
+        str(args.tts_temperature),
+        "--warmup",
+        str(args.tts_warmup),
+        "--max-concurrency",
+        str(args.tts_max_concurrency),
+        "--output-dir",
+        str(output_dir),
+    ]
+    if args.tts_generate_only:
+        command.append("--generate-only")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{os.getcwd()}:{env.get('PYTHONPATH', '')}"
+    print("\n[test] tts", flush=True)
+    print("[tts] " + " ".join(command), flush=True)
+    subprocess.run(command, cwd=os.getcwd(), env=env, check=True)
+
+
 def _stop_server(process: subprocess.Popen | None) -> None:
     if process is None or process.poll() is not None:
         return
@@ -461,6 +596,10 @@ def main() -> None:
         _run_smoke_tests(args)
         if args.run_mmmu:
             _run_mmmu_benchmark(args)
+        if args.run_mmsu:
+            _run_mmsu_benchmark(args)
+        if args.run_tts:
+            _run_tts_benchmark(args)
         if args.keep_server:
             print(f"[server] keeping server alive; log={log_path}", flush=True)
             process = None

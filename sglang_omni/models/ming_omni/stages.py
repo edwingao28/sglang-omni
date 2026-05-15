@@ -132,7 +132,8 @@ def create_audio_encoder_executor(
             skip_result = inputs.get("_result")
             result = skip_result if isinstance(skip_result, dict) else {}
         else:
-            model_inputs = {k: v for k, v in inputs.items() if k != "cache_key"}
+            _meta = {"cache_key", "audio_placeholder_loc_lens"}
+            model_inputs = {k: v for k, v in inputs.items() if k not in _meta}
             result = model(**model_inputs)
         state.encoder_outs[AUDIO_STAGE] = result if isinstance(result, dict) else {}
         state.engine_outputs[AUDIO_STAGE] = state.encoder_outs[AUDIO_STAGE]
