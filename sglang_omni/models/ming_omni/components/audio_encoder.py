@@ -86,19 +86,7 @@ class MingAudioEncoder(nn.Module):
 
         # Move to target device/dtype
         self.to(device=self._device, dtype=self._dtype)
-        self._patch_whisper_layernorms()
         self.eval()
-
-    def _patch_whisper_layernorms(self) -> None:
-        # whisper.model.LayerNorm.forward does x.float() which breaks bf16 weights.
-        import types
-
-        def _plain_ln_forward(ln_self: nn.LayerNorm, x: torch.Tensor) -> torch.Tensor:
-            return nn.LayerNorm.forward(ln_self, x)
-
-        for m in self.audio_tower.modules():
-            if isinstance(m, nn.LayerNorm):
-                m.forward = types.MethodType(_plain_ln_forward, m)
 
     def _build_whisper_encoder(self, whisper_cfg: Any) -> nn.Module:
         """Build a WhisperAudioEncoder from config."""
@@ -153,7 +141,7 @@ class MingAudioEncoder(nn.Module):
                 audio_embeds: Projected embeddings [B, T', hidden_size]
                 audio_embed_lengths: Output lengths [B, N]
         """
-        audio_feats = audio_feats.to(device=self._device, dtype=self._dtype)
+        audio_feats = audio_feats.to(device=self._device)
         if audio_feats_lengths is not None:
             audio_feats_lengths = audio_feats_lengths.to(device=self._device)
 
@@ -168,7 +156,14 @@ class MingAudioEncoder(nn.Module):
                 [audio_feats.shape[1]], device=audio_feats.device, dtype=torch.long
             )
 
-        with torch.no_grad():
+        with (
+            torch.no_grad(),
+            torch.autocast(
+                device_type="cuda", dtype=torch.bfloat16, enabled=segments.is_cuda
+            ),
+        ):
+            # Cast input to float32 for Whisper conv layers, autocast handles the rest
+            segments = segments.float()
             # Whisper encoder forward: [B, T, n_mels] -> [B, T, n_state]
             # The whisper encoder expects [B, T, n_mels], transposes internally
             encoded = self._whisper_forward(segments)

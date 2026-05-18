@@ -148,23 +148,26 @@ def _inject_top_level_audios(
 ) -> list[dict[str, Any]]:
     """Convert top-level ``audios`` into inline content items.
 
-    Symmetric to _inject_top_level_images: when the request uses
-    ``{"audios": ["url"], "messages": [...]}`` instead of inline
-    ``audio_url`` items, prepend the audios to the first user message
-    so _build_prompt emits ``<audioPatch>`` placeholders.
+    Ming-Omni was trained with text BEFORE audio in user turns
+    (see /tmp/Ming-src/test_audio_tasks.py and processing_bailingmm2.py
+    apply_chat_template, which renders content list in order). The
+    instruction must precede the audio so attention can condition the
+    audio interpretation on the task description.
     """
     messages = list(messages)
+    audio_items: list[dict[str, Any]] = [
+        {"type": "audio_url", "audio_url": {"url": url}} for url in audios
+    ]
     for idx, msg in enumerate(messages):
         if msg.get("role") != "user":
             continue
         content = msg.get("content", "")
-        new_content: list[dict[str, Any]] = [
-            {"type": "audio_url", "audio_url": {"url": url}} for url in audios
-        ]
+        new_content: list[dict[str, Any]] = []
         if isinstance(content, str):
             new_content.append({"type": "text", "text": content})
         elif isinstance(content, list):
             new_content.extend(content)
+        new_content.extend(audio_items)
         messages[idx] = {**msg, "content": new_content}
         break
     return messages
