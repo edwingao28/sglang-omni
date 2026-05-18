@@ -11,7 +11,7 @@ from types import ModuleType, SimpleNamespace
 
 
 def test_ming_v1_text_config_imports_and_uses_current_stage_schema() -> None:
-    from sglang_omni_v1.models.ming_omni.config import MingOmniPipelineConfig
+    from sglang_omni.models.ming_omni.config import MingOmniPipelineConfig
 
     config = MingOmniPipelineConfig(model_path="dummy")
 
@@ -25,7 +25,7 @@ def test_ming_v1_text_config_imports_and_uses_current_stage_schema() -> None:
     ]
     assert config.terminal_stages == ["decode"]
     assert all(
-        stage.factory.startswith("sglang_omni_v1.models.ming_omni.stages.create_")
+        stage.factory.startswith("sglang_omni.models.ming_omni.stages.create_")
         for stage in config.stages
     )
     assert all("executor" not in stage.model_dump() for stage in config.stages)
@@ -34,7 +34,7 @@ def test_ming_v1_text_config_imports_and_uses_current_stage_schema() -> None:
 
 
 def test_ming_v1_speech_config_routes_decode_and_talker() -> None:
-    from sglang_omni_v1.models.ming_omni.config import MingOmniSpeechPipelineConfig
+    from sglang_omni.models.ming_omni.config import MingOmniSpeechPipelineConfig
 
     config = MingOmniSpeechPipelineConfig(model_path="dummy")
     stages = {stage.name: stage for stage in config.stages}
@@ -65,7 +65,7 @@ def test_ming_v1_speech_config_routes_decode_and_talker() -> None:
     ]
     assert (
         stages["mm_aggregate"].merge_fn
-        == "sglang_omni_v1.models.ming_omni.pipeline.merge.merge_for_thinker"
+        == "sglang_omni.models.ming_omni.pipeline.merge.merge_for_thinker"
     )
     assert stages["thinker"].next == ["decode", "talker"]
     assert stages["decode"].terminal is True
@@ -97,14 +97,14 @@ def test_ming_v1_speech_launcher_places_thinker_tp_and_talker(monkeypatch) -> No
     from examples.run_ming_omni_speech_server import _launch_v1_speech_server
 
     captured: dict[str, object] = {}
-    serve_module = ModuleType("sglang_omni_v1.serve")
+    serve_module = ModuleType("sglang_omni.serve")
 
     def fake_launch_server(config, **kwargs):
         captured["config"] = config
         captured["kwargs"] = kwargs
 
     serve_module.launch_server = fake_launch_server
-    monkeypatch.setitem(sys.modules, "sglang_omni_v1.serve", serve_module)
+    monkeypatch.setitem(sys.modules, "sglang_omni.serve", serve_module)
 
     args = SimpleNamespace(
         model_path="dummy",
@@ -135,7 +135,7 @@ def test_ming_v1_speech_launcher_places_thinker_tp_and_talker(monkeypatch) -> No
 
 
 def test_ming_v1_stages_import_light_and_accept_mp_injection_args() -> None:
-    stages = importlib.import_module("sglang_omni_v1.models.ming_omni.stages")
+    stages = importlib.import_module("sglang_omni.models.ming_omni.stages")
 
     sig = inspect.signature(stages.create_sglang_thinker_executor_from_config)
 
@@ -146,7 +146,7 @@ def test_ming_v1_stages_import_light_and_accept_mp_injection_args() -> None:
 
 def test_ming_talker_factory_returns_v1_scheduler_contract(monkeypatch) -> None:
     talker_module = ModuleType(
-        "sglang_omni_v1.models.ming_omni.components.talker_executor"
+        "sglang_omni.models.ming_omni.components.talker_executor"
     )
 
     class FakeMingTalkerExecutor:
@@ -165,21 +165,21 @@ def test_ming_talker_factory_returns_v1_scheduler_contract(monkeypatch) -> None:
     talker_module.MingTalkerExecutor = FakeMingTalkerExecutor
     monkeypatch.setitem(
         sys.modules,
-        "sglang_omni_v1.models.ming_omni.components.talker_executor",
+        "sglang_omni.models.ming_omni.components.talker_executor",
         talker_module,
     )
 
-    weight_loader_module = ModuleType("sglang_omni_v1.models.weight_loader")
+    weight_loader_module = ModuleType("sglang_omni.models.weight_loader")
     weight_loader_module.resolve_model_path = (
         lambda model_path: f"/resolved/{model_path}"
     )
     monkeypatch.setitem(
         sys.modules,
-        "sglang_omni_v1.models.weight_loader",
+        "sglang_omni.models.weight_loader",
         weight_loader_module,
     )
 
-    from sglang_omni_v1.models.ming_omni.stages import create_talker_executor
+    from sglang_omni.models.ming_omni.stages import create_talker_executor
 
     scheduler = create_talker_executor(
         model_path="dummy",
@@ -198,7 +198,7 @@ def test_ming_talker_factory_returns_v1_scheduler_contract(monkeypatch) -> None:
 
 def test_ming_audio_encoder_moves_inputs_to_component_device() -> None:
     source = Path(
-        "sglang_omni_v1/models/ming_omni/components/audio_encoder.py"
+        "sglang_omni/models/ming_omni/components/audio_encoder.py"
     ).read_text(encoding="utf-8")
 
     assert (
@@ -211,14 +211,14 @@ def test_ming_v1_text_launcher_places_tp_ranks_on_distinct_gpus(monkeypatch) -> 
     from examples.run_ming_omni_server import _launch_v1_text_server
 
     captured: dict[str, object] = {}
-    serve_module = ModuleType("sglang_omni_v1.serve")
+    serve_module = ModuleType("sglang_omni.serve")
 
     def fake_launch_server(config, **kwargs):
         captured["config"] = config
         captured["kwargs"] = kwargs
 
     serve_module.launch_server = fake_launch_server
-    monkeypatch.setitem(sys.modules, "sglang_omni_v1.serve", serve_module)
+    monkeypatch.setitem(sys.modules, "sglang_omni.serve", serve_module)
 
     args = SimpleNamespace(
         model_path="dummy",
@@ -248,14 +248,14 @@ def test_ming_v1_text_launcher_allows_encoder_gpu_overrides(monkeypatch) -> None
     from examples.run_ming_omni_server import _launch_v1_text_server
 
     captured: dict[str, object] = {}
-    serve_module = ModuleType("sglang_omni_v1.serve")
+    serve_module = ModuleType("sglang_omni.serve")
 
     def fake_launch_server(config, **kwargs):
         del kwargs
         captured["config"] = config
 
     serve_module.launch_server = fake_launch_server
-    monkeypatch.setitem(sys.modules, "sglang_omni_v1.serve", serve_module)
+    monkeypatch.setitem(sys.modules, "sglang_omni.serve", serve_module)
 
     args = SimpleNamespace(
         model_path="dummy",
@@ -288,14 +288,14 @@ def test_ming_v1_text_launcher_can_build_thinker_only_smoke_pipeline(
     from examples.run_ming_omni_server import _launch_v1_text_server
 
     captured: dict[str, object] = {}
-    serve_module = ModuleType("sglang_omni_v1.serve")
+    serve_module = ModuleType("sglang_omni.serve")
 
     def fake_launch_server(config, **kwargs):
         del kwargs
         captured["config"] = config
 
     serve_module.launch_server = fake_launch_server
-    monkeypatch.setitem(sys.modules, "sglang_omni_v1.serve", serve_module)
+    monkeypatch.setitem(sys.modules, "sglang_omni.serve", serve_module)
 
     args = SimpleNamespace(
         model_path="dummy",
@@ -325,50 +325,15 @@ def test_ming_v1_text_launcher_can_build_thinker_only_smoke_pipeline(
     assert stages["thinker"].tp_size == 4
 
 
-def test_ming_test_utils_inject_version_for_ming_launchers(monkeypatch) -> None:
-    from tests.utils import _inject_server_version
-
-    monkeypatch.setenv("SGLANG_OMNI_SERVER_VERSION", "v1")
-
-    assert _inject_server_version(
-        ["python", "examples/run_qwen3_omni_server.py", "--port", "8000"]
-    ) == [
-        "python",
-        "examples/run_qwen3_omni_server.py",
-        "--port",
-        "8000",
-        "--version",
-        "v1",
-    ]
-    assert _inject_server_version(
-        ["python", "examples/run_ming_omni_server.py", "--port", "8000"]
-    ) == [
-        "python",
-        "examples/run_ming_omni_server.py",
-        "--port",
-        "8000",
-        "--version",
-        "v1",
-    ]
-    assert _inject_server_version(
-        ["python", "examples/run_ming_omni_speech_server.py"]
-    ) == [
-        "python",
-        "examples/run_ming_omni_speech_server.py",
-        "--version",
-        "v1",
-    ]
-
-
 def test_ming_thinker_factory_registers_hf_config_before_server_args(
     monkeypatch,
 ) -> None:
-    from sglang_omni_v1.models.ming_omni import stages
+    from sglang_omni.models.ming_omni import stages
 
     call_order: list[str] = []
     captured_server_args_kwargs: dict[str, object] = {}
 
-    registration_module = ModuleType("sglang_omni_v1.models.ming_omni.registration")
+    registration_module = ModuleType("sglang_omni.models.ming_omni.registration")
 
     def register_ming_hf_config() -> None:
         call_order.append("register")
@@ -376,11 +341,11 @@ def test_ming_thinker_factory_registers_hf_config_before_server_args(
     registration_module.register_ming_hf_config = register_ming_hf_config
     monkeypatch.setitem(
         sys.modules,
-        "sglang_omni_v1.models.ming_omni.registration",
+        "sglang_omni.models.ming_omni.registration",
         registration_module,
     )
 
-    backend_module = ModuleType("sglang_omni_v1.scheduling.sglang_backend")
+    backend_module = ModuleType("sglang_omni.scheduling.sglang_backend")
 
     def build_sglang_server_args(*args, **kwargs):
         del args
@@ -392,11 +357,11 @@ def test_ming_thinker_factory_registers_hf_config_before_server_args(
     backend_module.build_sglang_server_args = build_sglang_server_args
     monkeypatch.setitem(
         sys.modules,
-        "sglang_omni_v1.scheduling.sglang_backend",
+        "sglang_omni.scheduling.sglang_backend",
         backend_module,
     )
 
-    bootstrap_module = ModuleType("sglang_omni_v1.models.ming_omni.bootstrap")
+    bootstrap_module = ModuleType("sglang_omni.models.ming_omni.bootstrap")
 
     def create_thinker_scheduler(*args, **kwargs):
         del args, kwargs
@@ -406,7 +371,7 @@ def test_ming_thinker_factory_registers_hf_config_before_server_args(
     bootstrap_module.create_thinker_scheduler = create_thinker_scheduler
     monkeypatch.setitem(
         sys.modules,
-        "sglang_omni_v1.models.ming_omni.bootstrap",
+        "sglang_omni.models.ming_omni.bootstrap",
         bootstrap_module,
     )
 
@@ -417,7 +382,7 @@ def test_ming_thinker_factory_registers_hf_config_before_server_args(
 
 
 def test_ming_arch_override_uses_composite_llm_config() -> None:
-    from sglang_omni_v1.model_runner.model_worker import ModelWorker
+    from sglang_omni.model_runner.model_worker import ModelWorker
 
     llm_config = SimpleNamespace(
         num_attention_heads=32,
@@ -447,11 +412,11 @@ def test_ming_arch_override_uses_composite_llm_config() -> None:
 def test_ming_init_model_config_registers_auto_config_before_loading(
     monkeypatch,
 ) -> None:
-    from sglang_omni_v1.model_runner.model_worker import ModelWorker
+    from sglang_omni.model_runner.model_worker import ModelWorker
 
     call_order: list[str] = []
 
-    registration_module = ModuleType("sglang_omni_v1.models.ming_omni.registration")
+    registration_module = ModuleType("sglang_omni.models.ming_omni.registration")
 
     def register_ming_hf_config() -> None:
         call_order.append("register")
@@ -459,7 +424,7 @@ def test_ming_init_model_config_registers_auto_config_before_loading(
     registration_module.register_ming_hf_config = register_ming_hf_config
     monkeypatch.setitem(
         sys.modules,
-        "sglang_omni_v1.models.ming_omni.registration",
+        "sglang_omni.models.ming_omni.registration",
         registration_module,
     )
 

@@ -36,13 +36,13 @@ def test_load_ming_tokenizer_handles_custom_config_mapping_keyerror(monkeypatch)
     )
     monkeypatch.setitem(sys.modules, "transformers", transformers_module)
 
-    weight_loader_module = ModuleType("sglang_omni_v1.models.weight_loader")
+    weight_loader_module = ModuleType("sglang_omni.models.weight_loader")
     weight_loader_module.resolve_model_path = lambda model_path: model_path
     monkeypatch.setitem(
-        sys.modules, "sglang_omni_v1.models.weight_loader", weight_loader_module
+        sys.modules, "sglang_omni.models.weight_loader", weight_loader_module
     )
 
-    from sglang_omni_v1.models.ming_omni.components import common
+    from sglang_omni.models.ming_omni.components import common
 
     common = importlib.reload(common)
 

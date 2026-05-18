@@ -170,7 +170,7 @@ def _configure_thinker_only_pipeline(config: Any) -> None:
     preprocessing.next = "mm_aggregate"
     preprocessing.project_payload = {
         "mm_aggregate": (
-            "sglang_omni_v1.models.ming_omni.stages."
+            "sglang_omni.models.ming_omni.stages."
             "project_preprocessing_to_mm_aggregate"
         )
     }
@@ -183,8 +183,8 @@ def _configure_thinker_only_pipeline(config: Any) -> None:
 
 
 def _launch_v1_text_server(args: argparse.Namespace) -> None:
-    from sglang_omni_v1.models.ming_omni.config import MingOmniPipelineConfig
-    from sglang_omni_v1.serve import launch_server as launch_v1_server
+    from sglang_omni.models.ming_omni.config import MingOmniPipelineConfig
+    from sglang_omni.serve import launch_server as launch_v1_server
 
     _validate_fraction("--mem-fraction-static", args.mem_fraction_static)
 

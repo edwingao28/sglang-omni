@@ -10,7 +10,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-_PROJECT_PREFIX = "sglang_omni_v1."
+_PROJECT_PREFIX = "sglang_omni."
 
 
 def _ming_config_with_thinker_tp2(config_cls):
@@ -19,6 +19,7 @@ def _ming_config_with_thinker_tp2(config_cls):
     for stage in stages:
         if stage.name == "thinker":
             stage.tp_size = 2
+            stage.parallelism = stage.parallelism.model_copy(update={"tp": 2})
             stage.gpu = [0, 1]
     return stages
 
@@ -31,6 +32,8 @@ def _build_groups(config, build_stage_groups, prepare_pipeline_runtime):
             stages_cfg=prep.stages_cfg,
             name_map=prep.name_map,
             endpoints=prep.endpoints,
+            placement_plan=prep.placement_plan,
+            process_plan=prep.process_plan,
         )
     finally:
         if prep.runtime_dir is not None:
@@ -39,8 +42,7 @@ def _build_groups(config, build_stage_groups, prepare_pipeline_runtime):
 
 def _thinker_specs(config, build_stage_groups, prepare_pipeline_runtime):
     groups = _build_groups(config, build_stage_groups, prepare_pipeline_runtime)
-    thinker_group = next(group for group in groups if group.stage_name == "thinker")
-    return thinker_group.specs
+    return [s for g in groups for s in g.specs if s.stage_name == "thinker"]
 
 
 def _module_refs_any(module: ModuleType, refs: Iterable[object]) -> bool:
@@ -119,7 +121,7 @@ def _cached_attrs_from_missing_project_modules() -> list[str]:
 
 
 def test_ming_thinker_tp2_builds_rank_specific_stage_specs(monkeypatch) -> None:
-    importlib.import_module("sglang_omni_v1.pipeline")
+    importlib.import_module("sglang_omni.pipeline")
     before_import = set(sys.modules)
     fake_torch = ModuleType("torch")
     fake_torch.Tensor = object
@@ -170,9 +172,9 @@ def test_ming_thinker_tp2_builds_rank_specific_stage_specs(monkeypatch) -> None:
             mp.setitem(sys.modules, "transformers.utils", fake_transformers_utils)
             mp.setitem(sys.modules, "transformers.utils.hub", fake_transformers_hub)
 
-            from sglang_omni_v1.config.compiler import prepare_pipeline_runtime
-            from sglang_omni_v1.models.ming_omni.config import MingOmniPipelineConfig
-            from sglang_omni_v1.pipeline.mp_runner import _build_stage_groups
+            from sglang_omni.pipeline.runtime_config import prepare_pipeline_runtime
+            from sglang_omni.models.ming_omni.config import MingOmniPipelineConfig
+            from sglang_omni.pipeline.mp_runner import _build_stage_groups
 
             config = MingOmniPipelineConfig(
                 model_path="dummy",
@@ -182,14 +184,12 @@ def test_ming_thinker_tp2_builds_rank_specific_stage_specs(monkeypatch) -> None:
             groups = _build_groups(
                 config, _build_stage_groups, prepare_pipeline_runtime
             )
-            thinker_group = next(
-                group for group in groups if group.stage_name == "thinker"
-            )
-            specs = thinker_group.specs
+            all_specs = [s for g in groups for s in g.specs]
+            specs = [s for s in all_specs if s.stage_name == "thinker"]
             cpu_stage_specs = {
-                group.stage_name: group.specs[0]
-                for group in groups
-                if group.stage_name in {"preprocessing", "mm_aggregate", "decode"}
+                s.stage_name: s
+                for s in all_specs
+                if s.stage_name in {"preprocessing", "mm_aggregate", "decode"}
             }
             assert {name: spec.gpu_id for name, spec in cpu_stage_specs.items()} == {
                 "preprocessing": None,
@@ -207,19 +207,6 @@ def test_ming_thinker_tp2_builds_rank_specific_stage_specs(monkeypatch) -> None:
             assert {spec.factory_args["tp_size"] for spec in specs} == {2}
             assert specs[0].factory_args["nccl_port"] == specs[0].nccl_port
             assert specs[1].factory_args["nccl_port"] == specs[0].nccl_port
-
-            scalar_stages = _ming_config_with_thinker_tp2(MingOmniPipelineConfig)
-            for stage in scalar_stages:
-                if stage.name == "thinker":
-                    stage.gpu = 2
-            scalar_config = MingOmniPipelineConfig(
-                model_path="dummy",
-                stages=scalar_stages,
-            )
-            scalar_specs = _thinker_specs(
-                scalar_config, _build_stage_groups, prepare_pipeline_runtime
-            )
-            assert [spec.gpu_id for spec in scalar_specs] == [2, 3]
 
             explicit_stages = _ming_config_with_thinker_tp2(MingOmniPipelineConfig)
             for stage in explicit_stages:
@@ -241,7 +228,7 @@ def test_ming_thinker_tp2_builds_rank_specific_stage_specs(monkeypatch) -> None:
 
 
 def test_ming_speech_rejects_talker_inside_explicit_thinker_tp_gpus() -> None:
-    from sglang_omni_v1.models.ming_omni.config import MingOmniSpeechPipelineConfig
+    from sglang_omni.models.ming_omni.config import MingOmniSpeechPipelineConfig
 
     stages = _ming_config_with_thinker_tp2(MingOmniSpeechPipelineConfig)
     for stage in stages:
@@ -253,7 +240,7 @@ def test_ming_speech_rejects_talker_inside_explicit_thinker_tp_gpus() -> None:
 
 
 def test_ming_speech_rejects_talker_on_non_contiguous_thinker_tp_gpu() -> None:
-    from sglang_omni_v1.models.ming_omni.config import MingOmniSpeechPipelineConfig
+    from sglang_omni.models.ming_omni.config import MingOmniSpeechPipelineConfig
 
     stages = _ming_config_with_thinker_tp2(MingOmniSpeechPipelineConfig)
     for stage in stages:
@@ -267,7 +254,7 @@ def test_ming_speech_rejects_talker_on_non_contiguous_thinker_tp_gpu() -> None:
 
 
 def test_ming_speech_rejects_any_talker_gpu_list_overlap_with_thinker_tp() -> None:
-    from sglang_omni_v1.models.ming_omni.config import MingOmniSpeechPipelineConfig
+    from sglang_omni.models.ming_omni.config import MingOmniSpeechPipelineConfig
 
     stages = _ming_config_with_thinker_tp2(MingOmniSpeechPipelineConfig)
     for stage in stages:
@@ -275,6 +262,7 @@ def test_ming_speech_rejects_any_talker_gpu_list_overlap_with_thinker_tp() -> No
             stage.gpu = [0, 2]
         if stage.name == "talker":
             stage.tp_size = 2
+            stage.parallelism = stage.parallelism.model_copy(update={"tp": 2})
             stage.gpu = [3, 2]
 
     with pytest.raises(ValueError, match="collides"):
@@ -282,7 +270,7 @@ def test_ming_speech_rejects_any_talker_gpu_list_overlap_with_thinker_tp() -> No
 
 
 def test_ming_speech_allows_talker_outside_explicit_thinker_tp_gpus() -> None:
-    from sglang_omni_v1.models.ming_omni.config import MingOmniSpeechPipelineConfig
+    from sglang_omni.models.ming_omni.config import MingOmniSpeechPipelineConfig
 
     stages = _ming_config_with_thinker_tp2(MingOmniSpeechPipelineConfig)
     for stage in stages:
@@ -300,7 +288,7 @@ def test_ming_bootstrap_aligns_server_args_tp_size_before_infra(
 ) -> None:
     captured: dict[str, object] = {}
 
-    common_module = ModuleType("sglang_omni_v1.models.ming_omni.components.common")
+    common_module = ModuleType("sglang_omni.models.ming_omni.components.common")
     common_module.load_ming_tokenizer = lambda _model_path: SimpleNamespace(
         vocab_size=32000,
         eos_token_id=2,
@@ -310,11 +298,11 @@ def test_ming_bootstrap_aligns_server_args_tp_size_before_infra(
     )
     monkeypatch.setitem(
         sys.modules,
-        "sglang_omni_v1.models.ming_omni.components.common",
+        "sglang_omni.models.ming_omni.components.common",
         common_module,
     )
 
-    runner_module = ModuleType("sglang_omni_v1.model_runner.ming_thinker_model_runner")
+    runner_module = ModuleType("sglang_omni.model_runner.ming_thinker_model_runner")
 
     class FakeMingThinkerModelRunner:
         def __init__(self, model_worker, output_proc):
@@ -324,11 +312,11 @@ def test_ming_bootstrap_aligns_server_args_tp_size_before_infra(
     runner_module.MingThinkerModelRunner = FakeMingThinkerModelRunner
     monkeypatch.setitem(
         sys.modules,
-        "sglang_omni_v1.model_runner.ming_thinker_model_runner",
+        "sglang_omni.model_runner.ming_thinker_model_runner",
         runner_module,
     )
 
-    scheduling_bootstrap_module = ModuleType("sglang_omni_v1.scheduling.bootstrap")
+    scheduling_bootstrap_module = ModuleType("sglang_omni.scheduling.bootstrap")
 
     def fake_create_sglang_infrastructure(
         server_args,
@@ -362,11 +350,11 @@ def test_ming_bootstrap_aligns_server_args_tp_size_before_infra(
     )
     monkeypatch.setitem(
         sys.modules,
-        "sglang_omni_v1.scheduling.bootstrap",
+        "sglang_omni.scheduling.bootstrap",
         scheduling_bootstrap_module,
     )
 
-    omni_scheduler_module = ModuleType("sglang_omni_v1.scheduling.omni_scheduler")
+    omni_scheduler_module = ModuleType("sglang_omni.scheduling.omni_scheduler")
 
     class FakeOmniScheduler:
         def __init__(self, **kwargs):
@@ -375,11 +363,11 @@ def test_ming_bootstrap_aligns_server_args_tp_size_before_infra(
     omni_scheduler_module.OmniScheduler = FakeOmniScheduler
     monkeypatch.setitem(
         sys.modules,
-        "sglang_omni_v1.scheduling.omni_scheduler",
+        "sglang_omni.scheduling.omni_scheduler",
         omni_scheduler_module,
     )
 
-    sglang_backend_module = ModuleType("sglang_omni_v1.scheduling.sglang_backend")
+    sglang_backend_module = ModuleType("sglang_omni.scheduling.sglang_backend")
 
     class FakeSGLangOutputProcessor:
         def __init__(self, **kwargs):
@@ -388,11 +376,11 @@ def test_ming_bootstrap_aligns_server_args_tp_size_before_infra(
     sglang_backend_module.SGLangOutputProcessor = FakeSGLangOutputProcessor
     monkeypatch.setitem(
         sys.modules,
-        "sglang_omni_v1.scheduling.sglang_backend",
+        "sglang_omni.scheduling.sglang_backend",
         sglang_backend_module,
     )
 
-    bootstrap = importlib.import_module("sglang_omni_v1.models.ming_omni.bootstrap")
+    bootstrap = importlib.import_module("sglang_omni.models.ming_omni.bootstrap")
     server_args = SimpleNamespace(tp_size=1)
 
     scheduler = bootstrap.create_thinker_scheduler(

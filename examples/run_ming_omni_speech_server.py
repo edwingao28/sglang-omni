@@ -153,8 +153,8 @@ def _set_thinker_tp(config: Any, *, start_gpu: int, tp_size: int) -> None:
 
 
 def _launch_v1_speech_server(args: argparse.Namespace) -> None:
-    from sglang_omni_v1.models.ming_omni.config import MingOmniSpeechPipelineConfig
-    from sglang_omni_v1.serve import launch_server as launch_v1_server
+    from sglang_omni.models.ming_omni.config import MingOmniSpeechPipelineConfig
+    from sglang_omni.serve import launch_server as launch_v1_server
 
     _validate_fraction("--mem-fraction-static", args.mem_fraction_static)
 

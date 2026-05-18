@@ -22,16 +22,16 @@ def create_thinker_scheduler(
     if getattr(server_args, "tp_size", None) != tp_size:
         server_args.tp_size = tp_size
 
-    from sglang_omni_v1.model_runner.ming_thinker_model_runner import (
+    from sglang_omni.model_runner.ming_thinker_model_runner import (
         MingThinkerModelRunner,
     )
-    from sglang_omni_v1.models.ming_omni.components.common import (
+    from sglang_omni.models.ming_omni.components.common import (
         load_ming_config,
         load_ming_tokenizer,
     )
-    from sglang_omni_v1.scheduling.bootstrap import create_sglang_infrastructure
-    from sglang_omni_v1.scheduling.omni_scheduler import OmniScheduler
-    from sglang_omni_v1.scheduling.sglang_backend import SGLangOutputProcessor
+    from sglang_omni.scheduling.bootstrap import create_sglang_infrastructure
+    from sglang_omni.scheduling.omni_scheduler import OmniScheduler
+    from sglang_omni.scheduling.sglang_backend import SGLangOutputProcessor
 
     tokenizer = load_ming_tokenizer(model_path)
     config = load_ming_config(model_path)
@@ -109,8 +109,8 @@ def make_thinker_scheduler_adapters(
         from sglang.srt.managers.schedule_batch import Req
         from sglang.srt.sampling.sampling_params import SamplingParams
 
-        from sglang_omni_v1.models.ming_omni.io import PipelineState
-        from sglang_omni_v1.scheduling.sglang_backend import SGLangARRequestData
+        from sglang_omni.models.ming_omni.io import PipelineState
+        from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
 
         state = PipelineState.from_dict(payload.data)
         prompt = state.prompt
@@ -205,8 +205,8 @@ def make_thinker_scheduler_adapters(
         return req_data
 
     def result_adapter(data):
-        from sglang_omni_v1.models.ming_omni.io import PipelineState
-        from sglang_omni_v1.proto import StagePayload
+        from sglang_omni.models.ming_omni.io import PipelineState
+        from sglang_omni.proto import StagePayload
 
         payload = data.stage_payload
         state = PipelineState.from_dict(payload.data)

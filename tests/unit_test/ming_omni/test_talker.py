@@ -15,8 +15,8 @@ import pytest
 def test_ming_v1_talker_add_request_propagates_generation_errors(
     monkeypatch,
 ) -> None:
-    module_name = "sglang_omni_v1.models.ming_omni.components.talker_executor"
-    parent_name = "sglang_omni_v1.models.ming_omni.components"
+    module_name = "sglang_omni.models.ming_omni.components.talker_executor"
+    parent_name = "sglang_omni.models.ming_omni.components"
     sys.modules.pop(module_name, None)
 
     fake_torch = ModuleType("torch")
@@ -34,7 +34,7 @@ def test_ming_v1_talker_add_request_propagates_generation_errors(
 
     try:
         module = importlib.import_module(module_name)
-        from sglang_omni_v1.proto import OmniRequest, StagePayload
+        from sglang_omni.proto import OmniRequest, StagePayload
 
         executor = module.MingTalkerExecutor(model_path="/fake/model/path")
         payload = StagePayload(
@@ -61,8 +61,8 @@ def test_ming_v1_talker_add_request_propagates_generation_errors(
 
 
 def test_ming_v1_talker_skips_text_only_requests(monkeypatch) -> None:
-    module_name = "sglang_omni_v1.models.ming_omni.components.talker_executor"
-    parent_name = "sglang_omni_v1.models.ming_omni.components"
+    module_name = "sglang_omni.models.ming_omni.components.talker_executor"
+    parent_name = "sglang_omni.models.ming_omni.components"
     sys.modules.pop(module_name, None)
 
     fake_torch = ModuleType("torch")
@@ -80,7 +80,7 @@ def test_ming_v1_talker_skips_text_only_requests(monkeypatch) -> None:
 
     try:
         module = importlib.import_module(module_name)
-        from sglang_omni_v1.proto import OmniRequest, StagePayload
+        from sglang_omni.proto import OmniRequest, StagePayload
 
         executor = module.MingTalkerExecutor(model_path="/fake/model/path")
         payload = StagePayload(
@@ -128,7 +128,7 @@ def _waveform_payload(values: np.ndarray) -> dict:
 
 
 def test_default_result_builder_merges_decode_and_talker_audio() -> None:
-    from sglang_omni_v1.client.client import Client
+    from sglang_omni.client.client import Client
 
     waveform = np.array([0.1, -0.2, 0.3], dtype=np.float32)
 
@@ -154,7 +154,7 @@ def test_default_result_builder_merges_decode_and_talker_audio() -> None:
 
 
 def test_default_result_builder_keeps_text_modality_for_skipped_talker() -> None:
-    from sglang_omni_v1.client.client import Client
+    from sglang_omni.client.client import Client
 
     chunk = Client._default_result_builder(
         "req-text",
@@ -175,7 +175,7 @@ def test_default_result_builder_keeps_text_modality_for_skipped_talker() -> None
 
 
 def test_default_result_builder_still_merges_decode_and_code2wav_audio() -> None:
-    from sglang_omni_v1.client.client import Client
+    from sglang_omni.client.client import Client
 
     waveform = np.array([1.0, 0.5], dtype=np.float32)
 

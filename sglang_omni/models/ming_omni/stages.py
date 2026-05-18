@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from sglang_omni_v1.models.ming_omni.io import PipelineState
-from sglang_omni_v1.models.ming_omni.pipeline.next_stage import AUDIO_STAGE, IMAGE_STAGE
-from sglang_omni_v1.proto import StagePayload
+from sglang_omni.models.ming_omni.io import PipelineState
+from sglang_omni.models.ming_omni.pipeline.next_stage import AUDIO_STAGE, IMAGE_STAGE
+from sglang_omni.proto import StagePayload
 
 
 def project_preprocessing_to_audio_encoder(payload: StagePayload) -> StagePayload:
@@ -90,8 +90,8 @@ def _single_encoder_stage_name(state: PipelineState) -> str:
 
 
 def create_preprocessing_executor(model_path: str):
-    from sglang_omni_v1.models.ming_omni.components.preprocessor import MingPreprocessor
-    from sglang_omni_v1.scheduling.simple_scheduler import SimpleScheduler
+    from sglang_omni.models.ming_omni.components.preprocessor import MingPreprocessor
+    from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
     preprocessor = MingPreprocessor(model_path=model_path)
 
@@ -102,7 +102,7 @@ def create_preprocessing_executor(model_path: str):
 
 
 def create_aggregate_executor():
-    from sglang_omni_v1.scheduling.simple_scheduler import SimpleScheduler
+    from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
     def _identity(payload: StagePayload) -> StagePayload:
         return payload
@@ -116,10 +116,10 @@ def create_audio_encoder_executor(
     device: str = "cuda",
     dtype: str | None = None,
 ):
-    from sglang_omni_v1.models.ming_omni.components.audio_encoder import (
+    from sglang_omni.models.ming_omni.components.audio_encoder import (
         MingAudioEncoder,
     )
-    from sglang_omni_v1.scheduling.simple_scheduler import SimpleScheduler
+    from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
     model = MingAudioEncoder(model_path=model_path, device=device, dtype=dtype)
 
@@ -149,10 +149,10 @@ def create_image_encoder_executor(
     device: str = "cuda",
     dtype: str | None = None,
 ):
-    from sglang_omni_v1.models.ming_omni.components.image_encoder import (
+    from sglang_omni.models.ming_omni.components.image_encoder import (
         MingImageEncoder,
     )
-    from sglang_omni_v1.scheduling.simple_scheduler import SimpleScheduler
+    from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
     model = MingImageEncoder(model_path=model_path, device=device, dtype=dtype)
 
@@ -185,9 +185,9 @@ def create_sglang_thinker_executor_from_config(
     thinker_max_seq_len: int = 8192,
     server_args_overrides: dict[str, Any] | None = None,
 ):
-    from sglang_omni_v1.models.ming_omni.bootstrap import create_thinker_scheduler
-    from sglang_omni_v1.models.ming_omni.registration import register_ming_hf_config
-    from sglang_omni_v1.scheduling.sglang_backend import build_sglang_server_args
+    from sglang_omni.models.ming_omni.bootstrap import create_thinker_scheduler
+    from sglang_omni.models.ming_omni.registration import register_ming_hf_config
+    from sglang_omni.scheduling.sglang_backend import build_sglang_server_args
 
     register_ming_hf_config()
 
@@ -216,11 +216,11 @@ def create_talker_executor(
     device: str = "cuda",
     voice: str = "DB30",
 ):
-    from sglang_omni_v1.models.ming_omni.components.talker_executor import (
+    from sglang_omni.models.ming_omni.components.talker_executor import (
         MingTalkerExecutor,
     )
-    from sglang_omni_v1.models.weight_loader import resolve_model_path
-    from sglang_omni_v1.scheduling.simple_scheduler import SimpleScheduler
+    from sglang_omni.models.weight_loader import resolve_model_path
+    from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
     local_path = resolve_model_path(model_path)
     executor = MingTalkerExecutor(
@@ -245,12 +245,12 @@ def create_talker_executor(
 
 
 def create_decode_executor(model_path: str):
-    from sglang_omni_v1.models.ming_omni.components.common import load_ming_tokenizer
-    from sglang_omni_v1.models.ming_omni.io import OmniEvent
-    from sglang_omni_v1.models.ming_omni.pipeline.merge import decode_events
-    from sglang_omni_v1.models.ming_omni.pipeline.next_stage import THINKER_STAGE
-    from sglang_omni_v1.models.ming_omni.pipeline.state_io import load_state
-    from sglang_omni_v1.scheduling.simple_scheduler import SimpleScheduler
+    from sglang_omni.models.ming_omni.components.common import load_ming_tokenizer
+    from sglang_omni.models.ming_omni.io import OmniEvent
+    from sglang_omni.models.ming_omni.pipeline.merge import decode_events
+    from sglang_omni.models.ming_omni.pipeline.next_stage import THINKER_STAGE
+    from sglang_omni.models.ming_omni.pipeline.state_io import load_state
+    from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
     tokenizer = load_ming_tokenizer(model_path)
     eos_token_id = getattr(tokenizer, "eos_token_id", None)

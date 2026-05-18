@@ -8,7 +8,7 @@ from typing import Any
 import torch
 from sglang.srt.managers.scheduler import GenerationBatchResult
 
-from sglang_omni_v1.model_runner.base import ModelRunner
+from sglang_omni.model_runner.base import ModelRunner
 
 
 class MingThinkerModelRunner(ModelRunner):

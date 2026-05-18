@@ -56,7 +56,7 @@ class ModelWorker:
 
     def _init_model_config(self):
         if self.model_arch_override == "BailingMoeV2ForCausalLM":
-            from sglang_omni_v1.models.ming_omni.registration import (
+            from sglang_omni.models.ming_omni.registration import (
                 register_ming_hf_config,
             )
 

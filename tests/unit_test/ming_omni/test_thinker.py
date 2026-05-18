@@ -11,16 +11,16 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-BOOTSTRAP_PATH = Path("sglang_omni_v1/models/ming_omni/bootstrap.py")
-RUNNER_PATH = Path("sglang_omni_v1/model_runner/ming_thinker_model_runner.py")
-MING_THINKER_PATH = Path("sglang_omni_v1/models/ming_omni/thinker.py")
+BOOTSTRAP_PATH = Path("sglang_omni/models/ming_omni/bootstrap.py")
+RUNNER_PATH = Path("sglang_omni/model_runner/ming_thinker_model_runner.py")
+MING_THINKER_PATH = Path("sglang_omni/models/ming_omni/thinker.py")
 MING_IMAGE_ENCODER_PATH = Path(
-    "sglang_omni_v1/models/ming_omni/components/image_encoder.py"
+    "sglang_omni/models/ming_omni/components/image_encoder.py"
 )
 MING_PREPROCESSOR_PATH = Path(
-    "sglang_omni_v1/models/ming_omni/components/preprocessor.py"
+    "sglang_omni/models/ming_omni/components/preprocessor.py"
 )
-VENDOR_SGLANG_LAYERS_PATH = Path("sglang_omni_v1/vendor/sglang/layers.py")
+VENDOR_SGLANG_LAYERS_PATH = Path("sglang_omni/vendor/sglang/layers.py")
 
 
 def _read(path: Path) -> str:
@@ -75,8 +75,8 @@ def test_ming_thinker_runner_uses_ming_token_id_contract() -> None:
 def test_ming_thinker_weight_loader_uses_v1_qwen3_helper_path() -> None:
     source = _read(MING_THINKER_PATH)
 
-    assert "sglang_omni_v1.models.qwen3_omni.thinker" not in source
-    assert "sglang_omni_v1.models.qwen3_omni.components.thinker_model" in source
+    assert "sglang_omni.models.qwen3_omni.thinker" not in source
+    assert "sglang_omni.models.qwen3_omni.components.thinker_model" in source
     assert "extract_fused_experts" in source
 
 
@@ -107,15 +107,15 @@ def test_vendored_sglang_layers_do_not_import_removed_sampling_symbol() -> None:
 def test_ming_vision_block_kwargs_pass_head_size_only_when_supported(
     monkeypatch,
 ) -> None:
-    weight_loader_module = ModuleType("sglang_omni_v1.models.weight_loader")
+    weight_loader_module = ModuleType("sglang_omni.models.weight_loader")
     weight_loader_module.default_weight_loader = lambda *args, **kwargs: None
     monkeypatch.setitem(
         sys.modules,
-        "sglang_omni_v1.models.weight_loader",
+        "sglang_omni.models.weight_loader",
         weight_loader_module,
     )
 
-    from sglang_omni_v1.models.ming_omni.components.vision_encoder import (
+    from sglang_omni.models.ming_omni.components.vision_encoder import (
         _build_qwen3_vision_block_kwargs,
     )
 
@@ -149,42 +149,42 @@ def test_ming_vision_block_kwargs_pass_head_size_only_when_supported(
 
 
 def _load_preprocessor_with_fake_deps(monkeypatch, *, config=None, tokenizer=None):
-    common_module = ModuleType("sglang_omni_v1.models.ming_omni.components.common")
+    common_module = ModuleType("sglang_omni.models.ming_omni.components.common")
     common_module.load_ming_config = lambda model_path: config
     common_module.load_ming_tokenizer = lambda model_path: tokenizer
     monkeypatch.setitem(
         sys.modules,
-        "sglang_omni_v1.models.ming_omni.components.common",
+        "sglang_omni.models.ming_omni.components.common",
         common_module,
     )
 
-    io_module = ModuleType("sglang_omni_v1.models.ming_omni.io")
+    io_module = ModuleType("sglang_omni.models.ming_omni.io")
     io_module.PipelineState = object
     io_module.PromptInputs = dict
-    monkeypatch.setitem(sys.modules, "sglang_omni_v1.models.ming_omni.io", io_module)
+    monkeypatch.setitem(sys.modules, "sglang_omni.models.ming_omni.io", io_module)
 
     next_stage_module = ModuleType(
-        "sglang_omni_v1.models.ming_omni.pipeline.next_stage"
+        "sglang_omni.models.ming_omni.pipeline.next_stage"
     )
     next_stage_module.AUDIO_STAGE = "audio_encoder"
     next_stage_module.IMAGE_STAGE = "image_encoder"
     monkeypatch.setitem(
         sys.modules,
-        "sglang_omni_v1.models.ming_omni.pipeline.next_stage",
+        "sglang_omni.models.ming_omni.pipeline.next_stage",
         next_stage_module,
     )
 
-    audio_module = ModuleType("sglang_omni_v1.preprocessing.audio")
+    audio_module = ModuleType("sglang_omni.preprocessing.audio")
     audio_module.load_audio_path = lambda *args, **kwargs: None
-    monkeypatch.setitem(sys.modules, "sglang_omni_v1.preprocessing.audio", audio_module)
+    monkeypatch.setitem(sys.modules, "sglang_omni.preprocessing.audio", audio_module)
 
-    image_module = ModuleType("sglang_omni_v1.preprocessing.image")
+    image_module = ModuleType("sglang_omni.preprocessing.image")
     image_module.ensure_image_list_async = lambda images: images
-    monkeypatch.setitem(sys.modules, "sglang_omni_v1.preprocessing.image", image_module)
+    monkeypatch.setitem(sys.modules, "sglang_omni.preprocessing.image", image_module)
 
-    proto_module = ModuleType("sglang_omni_v1.proto")
+    proto_module = ModuleType("sglang_omni.proto")
     proto_module.StagePayload = object
-    monkeypatch.setitem(sys.modules, "sglang_omni_v1.proto", proto_module)
+    monkeypatch.setitem(sys.modules, "sglang_omni.proto", proto_module)
 
     module_name = "_ming_preprocessor_under_test"
     spec = importlib.util.spec_from_file_location(module_name, MING_PREPROCESSOR_PATH)
@@ -276,11 +276,11 @@ def test_ming_preprocessor_uses_config_image_patch_token_id(monkeypatch) -> None
 
 
 def test_ming_config_and_stages_do_not_import_ming_runner() -> None:
-    runner_module = "sglang_omni_v1.model_runner.ming_thinker_model_runner"
+    runner_module = "sglang_omni.model_runner.ming_thinker_model_runner"
     sys.modules.pop(runner_module, None)
 
-    importlib.import_module("sglang_omni_v1.models.ming_omni.config")
-    importlib.import_module("sglang_omni_v1.models.ming_omni.stages")
+    importlib.import_module("sglang_omni.models.ming_omni.config")
+    importlib.import_module("sglang_omni.models.ming_omni.stages")
 
     assert runner_module not in sys.modules
 
@@ -306,7 +306,7 @@ def _load_runner_with_fake_sglang(monkeypatch):
         scheduler_module,
     )
 
-    module_name = "sglang_omni_v1.model_runner.ming_thinker_model_runner"
+    module_name = "sglang_omni.model_runner.ming_thinker_model_runner"
     sys.modules.pop(module_name, None)
     module = importlib.import_module(module_name)
     runner_cls = module.MingThinkerModelRunner
