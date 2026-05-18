@@ -58,19 +58,19 @@ def parse_args() -> argparse.Namespace:
         "--gpu-audio-encoder",
         type=int,
         default=None,
-        help="GPU id for the V1 audio encoder stage.",
+        help="GPU id for the audio encoder stage.",
     )
     parser.add_argument(
         "--gpu-image-encoder",
         type=int,
         default=None,
-        help="GPU id for the V1 image encoder stage.",
+        help="GPU id for the image encoder stage.",
     )
     parser.add_argument(
         "--thinker-only",
         action="store_true",
         help=(
-            "Launch a V1 pure-text smoke pipeline without audio/image encoders. "
+            "Launch a pure-text smoke pipeline without audio/image encoders. "
             "Default keeps the full v0-parity multimodal pipeline."
         ),
     )
@@ -102,14 +102,6 @@ def parse_args() -> argparse.Namespace:
         choices=["shm", "nccl", "nixl"],
         help="Relay backend for inter-stage data transfer",
     )
-    parser.add_argument(
-        "--version",
-        type=str,
-        default=os.environ.get("SGLANG_OMNI_SERVER_VERSION", "legacy"),
-        choices=["legacy", "v1"],
-        help="Select the legacy or v1 Ming-Omni launcher implementation.",
-    )
-
     # Server
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
@@ -182,9 +174,9 @@ def _configure_thinker_only_pipeline(config: Any) -> None:
     ]
 
 
-def _launch_v1_text_server(args: argparse.Namespace) -> None:
+def _launch_text_server(args: argparse.Namespace) -> None:
     from sglang_omni.models.ming_omni.config import MingOmniPipelineConfig
-    from sglang_omni.serve import launch_server as launch_v1_server
+    from sglang_omni.serve import launch_server
 
     _validate_fraction("--mem-fraction-static", args.mem_fraction_static)
 
@@ -206,6 +198,7 @@ def _launch_v1_text_server(args: argparse.Namespace) -> None:
         thinker = next(stage for stage in config.stages if stage.name == "thinker")
         tp_size = int(args.tp_size)
         thinker.tp_size = tp_size
+        thinker.parallelism = thinker.parallelism.model_copy(update={"tp": tp_size})
         thinker.gpu = list(range(tp_size))
         server_arg_updates["disable_custom_all_reduce"] = True
     if args.gpu_audio_encoder is not None:
@@ -226,43 +219,6 @@ def _launch_v1_text_server(args: argparse.Namespace) -> None:
         server_arg_updates=server_arg_updates or None,
     )
 
-    launch_v1_server(
-        config,
-        host=args.host,
-        port=args.port,
-        model_name=args.model_name,
-    )
-
-
-def _launch_legacy_text_server(args: argparse.Namespace) -> None:
-    from sglang_omni.models.ming_omni.config import MingOmniPipelineConfig
-    from sglang_omni.serve import launch_server
-
-    overrides = {}
-    if args.tp_size and args.tp_size > 1:
-        overrides["tp_size"] = args.tp_size
-        overrides["disable_custom_all_reduce"] = True
-    if args.quantization:
-        overrides["quantization"] = args.quantization
-    if args.cpu_offload_gb:
-        overrides["cpu_offload_gb"] = args.cpu_offload_gb
-
-    config = MingOmniPipelineConfig(
-        model_path=args.model_path,
-        relay_backend=args.relay_backend,
-    )
-    if overrides:
-        config.apply_server_args_overrides(stage_name="thinker", overrides=overrides)
-    if args.mem_fraction_static is not None:
-        if not 0.0 < args.mem_fraction_static < 1.0:
-            raise ValueError(
-                f"--mem-fraction-static must be > 0 and < 1, got {args.mem_fraction_static}"
-            )
-        config.apply_server_args_overrides(
-            stage_name="thinker",
-            overrides={"mem_fraction_static": args.mem_fraction_static},
-        )
-
     launch_server(
         config,
         host=args.host,
@@ -271,22 +227,9 @@ def _launch_legacy_text_server(args: argparse.Namespace) -> None:
     )
 
 
-def _print_version_banner(version: str) -> None:
-    try:
-        from sglang_omni.utils import print_server_version_banner
-    except Exception:
-        print(f"SGLANG-OMNI SERVER VERSION = {version.upper()}", flush=True)
-        return
-    print_server_version_banner(version, entry="examples/run_ming_omni_server.py")
-
-
 def main() -> None:
     args = parse_args()
-    _print_version_banner(args.version)
-    if args.version == "v1":
-        _launch_v1_text_server(args)
-        return
-    _launch_legacy_text_server(args)
+    _launch_text_server(args)
 
 
 if __name__ == "__main__":

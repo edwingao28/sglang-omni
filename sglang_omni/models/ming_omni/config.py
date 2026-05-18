@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Pipeline configuration for Ming-Omni V1."""
+"""Pipeline configuration for Ming-Omni."""
 
 from __future__ import annotations
 

@@ -72,7 +72,7 @@ def test_ming_thinker_runner_uses_ming_token_id_contract() -> None:
     assert "thinker_config" not in source
 
 
-def test_ming_thinker_weight_loader_uses_v1_qwen3_helper_path() -> None:
+def test_ming_thinker_weight_loader_uses_qwen3_helper_path() -> None:
     source = _read(MING_THINKER_PATH)
 
     assert "sglang_omni.models.qwen3_omni.thinker" not in source
@@ -80,7 +80,7 @@ def test_ming_thinker_weight_loader_uses_v1_qwen3_helper_path() -> None:
     assert "extract_fused_experts" in source
 
 
-def test_ming_v1_image_encoder_keeps_its_tp_context_for_runtime_forward() -> None:
+def test_ming_image_encoder_keeps_its_tp_context_for_runtime_forward() -> None:
     source = _read(MING_IMAGE_ENCODER_PATH)
     init_body = source.split("    @staticmethod", 1)[0]
 
@@ -88,7 +88,7 @@ def test_ming_v1_image_encoder_keeps_its_tp_context_for_runtime_forward() -> Non
     assert "self._cleanup_sglang_tp()" not in init_body
 
 
-def test_ming_v1_image_encoder_tp_init_requires_parallel_state() -> None:
+def test_ming_image_encoder_tp_init_requires_parallel_state() -> None:
     source = _read(MING_IMAGE_ENCODER_PATH)
     init_fn = source.split("def _init_sglang_tp", 1)[1].split(
         "    @classmethod\n    def _cleanup_sglang_tp", 1
