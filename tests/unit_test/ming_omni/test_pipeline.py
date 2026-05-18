@@ -10,7 +10,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 
-def test_ming_v1_text_config_imports_and_uses_current_stage_schema() -> None:
+def test_ming_text_config_imports_and_uses_current_stage_schema() -> None:
     from sglang_omni.models.ming_omni.config import MingOmniPipelineConfig
 
     config = MingOmniPipelineConfig(model_path="dummy")
@@ -33,7 +33,7 @@ def test_ming_v1_text_config_imports_and_uses_current_stage_schema() -> None:
     assert all("get_next" not in stage.model_dump() for stage in config.stages)
 
 
-def test_ming_v1_speech_config_routes_decode_and_talker() -> None:
+def test_ming_speech_config_routes_decode_and_talker() -> None:
     from sglang_omni.models.ming_omni.config import MingOmniSpeechPipelineConfig
 
     config = MingOmniSpeechPipelineConfig(model_path="dummy")
@@ -73,7 +73,7 @@ def test_ming_v1_speech_config_routes_decode_and_talker() -> None:
     assert config.terminal_stages == ["decode", "talker"]
 
 
-def test_ming_v1_speech_launcher_exposes_tp_size_arg(monkeypatch) -> None:
+def test_ming_speech_launcher_exposes_tp_size_arg(monkeypatch) -> None:
     from examples.run_ming_omni_speech_server import parse_args
 
     monkeypatch.setattr(
@@ -81,8 +81,6 @@ def test_ming_v1_speech_launcher_exposes_tp_size_arg(monkeypatch) -> None:
         "argv",
         [
             "run_ming_omni_speech_server.py",
-            "--version",
-            "v1",
             "--tp-size",
             "4",
         ],
@@ -93,8 +91,8 @@ def test_ming_v1_speech_launcher_exposes_tp_size_arg(monkeypatch) -> None:
     assert args.tp_size == 4
 
 
-def test_ming_v1_speech_launcher_places_thinker_tp_and_talker(monkeypatch) -> None:
-    from examples.run_ming_omni_speech_server import _launch_v1_speech_server
+def test_ming_speech_launcher_places_thinker_tp_and_talker(monkeypatch) -> None:
+    from examples.run_ming_omni_speech_server import _launch_speech_server
 
     captured: dict[str, object] = {}
     serve_module = ModuleType("sglang_omni.serve")
@@ -119,7 +117,7 @@ def test_ming_v1_speech_launcher_places_thinker_tp_and_talker(monkeypatch) -> No
         model_name="ming-omni",
     )
 
-    _launch_v1_speech_server(args)
+    _launch_speech_server(args)
 
     config = captured["config"]
     stages = {stage.name: stage for stage in config.stages}
@@ -134,7 +132,7 @@ def test_ming_v1_speech_launcher_places_thinker_tp_and_talker(monkeypatch) -> No
     assert overrides["mem_fraction_static"] == 0.8
 
 
-def test_ming_v1_stages_import_light_and_accept_mp_injection_args() -> None:
+def test_ming_stages_import_light_and_accept_mp_injection_args() -> None:
     stages = importlib.import_module("sglang_omni.models.ming_omni.stages")
 
     sig = inspect.signature(stages.create_sglang_thinker_executor_from_config)
@@ -144,7 +142,7 @@ def test_ming_v1_stages_import_light_and_accept_mp_injection_args() -> None:
     assert "nccl_port" in sig.parameters
 
 
-def test_ming_talker_factory_returns_v1_scheduler_contract(monkeypatch) -> None:
+def test_ming_talker_factory_returns_scheduler_contract(monkeypatch) -> None:
     talker_module = ModuleType(
         "sglang_omni.models.ming_omni.components.talker_executor"
     )
@@ -207,8 +205,8 @@ def test_ming_audio_encoder_moves_inputs_to_component_device() -> None:
     assert "audio_feats_lengths = audio_feats_lengths.to(device=self._device)" in source
 
 
-def test_ming_v1_text_launcher_places_tp_ranks_on_distinct_gpus(monkeypatch) -> None:
-    from examples.run_ming_omni_server import _launch_v1_text_server
+def test_ming_text_launcher_places_tp_ranks_on_distinct_gpus(monkeypatch) -> None:
+    from examples.run_ming_omni_server import _launch_text_server
 
     captured: dict[str, object] = {}
     serve_module = ModuleType("sglang_omni.serve")
@@ -236,7 +234,7 @@ def test_ming_v1_text_launcher_places_tp_ranks_on_distinct_gpus(monkeypatch) -> 
         model_name="ming-omni",
     )
 
-    _launch_v1_text_server(args)
+    _launch_text_server(args)
 
     config = captured["config"]
     thinker = next(stage for stage in config.stages if stage.name == "thinker")
@@ -244,8 +242,8 @@ def test_ming_v1_text_launcher_places_tp_ranks_on_distinct_gpus(monkeypatch) -> 
     assert thinker.gpu == [0, 1, 2]
 
 
-def test_ming_v1_text_launcher_allows_encoder_gpu_overrides(monkeypatch) -> None:
-    from examples.run_ming_omni_server import _launch_v1_text_server
+def test_ming_text_launcher_allows_encoder_gpu_overrides(monkeypatch) -> None:
+    from examples.run_ming_omni_server import _launch_text_server
 
     captured: dict[str, object] = {}
     serve_module = ModuleType("sglang_omni.serve")
@@ -273,7 +271,7 @@ def test_ming_v1_text_launcher_allows_encoder_gpu_overrides(monkeypatch) -> None
         model_name="ming-omni",
     )
 
-    _launch_v1_text_server(args)
+    _launch_text_server(args)
 
     config = captured["config"]
     stages = {stage.name: stage for stage in config.stages}
@@ -282,10 +280,10 @@ def test_ming_v1_text_launcher_allows_encoder_gpu_overrides(monkeypatch) -> None
     assert stages["image_encoder"].gpu == 4
 
 
-def test_ming_v1_text_launcher_can_build_thinker_only_smoke_pipeline(
+def test_ming_text_launcher_can_build_thinker_only_smoke_pipeline(
     monkeypatch,
 ) -> None:
-    from examples.run_ming_omni_server import _launch_v1_text_server
+    from examples.run_ming_omni_server import _launch_text_server
 
     captured: dict[str, object] = {}
     serve_module = ModuleType("sglang_omni.serve")
@@ -313,7 +311,7 @@ def test_ming_v1_text_launcher_can_build_thinker_only_smoke_pipeline(
         model_name="ming-omni",
     )
 
-    _launch_v1_text_server(args)
+    _launch_text_server(args)
 
     config = captured["config"]
     stages = {stage.name: stage for stage in config.stages}

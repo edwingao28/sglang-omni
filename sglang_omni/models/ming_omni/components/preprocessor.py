@@ -482,7 +482,7 @@ class MingPreprocessor:
             )
             return patch_start
 
-        # Keep the Ming V1 prompt text aligned with the known-good Ming V0 path.
+        # Keep the Ming prompt text aligned with the known-good Ming reference path.
         role_end = ROLE_END
 
         # Match Ming V0's system template.

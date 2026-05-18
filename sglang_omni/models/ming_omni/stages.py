@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""（wenyao）V1-facing stage factories for Ming-Omni.
+"""（wenyao）Stage factories for Ming-Omni.
 
 Heavy runtime imports are intentionally local to factory calls so importing
-Ming's V1 config remains usable in lightweight environments.
+Ming's config remains usable in lightweight environments.
 """
 
 from __future__ import annotations

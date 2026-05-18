@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 
-def test_ming_v1_talker_add_request_propagates_generation_errors(
+def test_ming_talker_add_request_propagates_generation_errors(
     monkeypatch,
 ) -> None:
     module_name = "sglang_omni.models.ming_omni.components.talker_executor"
@@ -60,7 +60,7 @@ def test_ming_v1_talker_add_request_propagates_generation_errors(
             delattr(parent, "talker_executor")
 
 
-def test_ming_v1_talker_skips_text_only_requests(monkeypatch) -> None:
+def test_ming_talker_skips_text_only_requests(monkeypatch) -> None:
     module_name = "sglang_omni.models.ming_omni.components.talker_executor"
     parent_name = "sglang_omni.models.ming_omni.components"
     sys.modules.pop(module_name, None)

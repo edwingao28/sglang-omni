@@ -105,7 +105,7 @@ class MingImageEncoder(nn.Module):
         self.to(device=device, dtype=torch_dtype)
         self.eval()
 
-        # Keep this stage's TP=1 context alive. In V1 multiprocess mode the
+        # Keep this stage's TP=1 context alive. In multiprocess mode the
         # image encoder and thinker run in separate processes, so the image
         # encoder cannot rely on the thinker's tensor-parallel state at
         # request time.

@@ -29,7 +29,6 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import asyncio
 import logging
 import multiprocessing as mp
 import os
@@ -83,14 +82,6 @@ def parse_args() -> argparse.Namespace:
             "If omitted, SGLang chooses automatically."
         ),
     )
-    parser.add_argument(
-        "--version",
-        type=str,
-        default=os.environ.get("SGLANG_OMNI_SERVER_VERSION", "legacy"),
-        choices=["legacy", "v1"],
-        help="Select the legacy or v1 Ming-Omni speech launcher implementation.",
-    )
-
     # Server
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
@@ -144,6 +135,9 @@ def _set_thinker_tp(config: Any, *, start_gpu: int, tp_size: int) -> None:
     for stage in config.stages:
         if stage.name == "thinker":
             stage.tp_size = int(tp_size)
+            stage.parallelism = stage.parallelism.model_copy(
+                update={"tp": int(tp_size)}
+            )
             if tp_size == 1:
                 stage.gpu = int(start_gpu)
             else:
@@ -152,9 +146,9 @@ def _set_thinker_tp(config: Any, *, start_gpu: int, tp_size: int) -> None:
     raise ValueError("Stage 'thinker' not found in config")
 
 
-def _launch_v1_speech_server(args: argparse.Namespace) -> None:
+def _launch_speech_server(args: argparse.Namespace) -> None:
     from sglang_omni.models.ming_omni.config import MingOmniSpeechPipelineConfig
-    from sglang_omni.serve import launch_server as launch_v1_server
+    from sglang_omni.serve import launch_server
 
     _validate_fraction("--mem-fraction-static", args.mem_fraction_static)
 
@@ -187,7 +181,7 @@ def _launch_v1_speech_server(args: argparse.Namespace) -> None:
         updates={"voice": args.voice},
     )
 
-    launch_v1_server(
+    launch_server(
         config,
         host=args.host,
         port=args.port,
@@ -195,76 +189,10 @@ def _launch_v1_speech_server(args: argparse.Namespace) -> None:
     )
 
 
-async def main_async(args: argparse.Namespace) -> None:
-    import uvicorn
-
-    from sglang_omni.client import Client
-    from sglang_omni.models.ming_omni.config import MingOmniSpeechPipelineConfig
-    from sglang_omni.pipeline.mp_runner import MultiProcessPipelineRunner
-    from sglang_omni.serve.openai_api import create_app
-
-    gpu_placement = {
-        "thinker": args.gpu_thinker,
-        "talker": args.gpu_talker,
-    }
-
-    config = MingOmniSpeechPipelineConfig(
-        model_path=args.model_path,
-        relay_backend=args.relay_backend,
-        gpu_placement=gpu_placement,
-    )
-    if args.mem_fraction_static is not None:
-        if not 0.0 < args.mem_fraction_static < 1.0:
-            raise ValueError(
-                f"--mem-fraction-static must be > 0 and < 1, got {args.mem_fraction_static}"
-            )
-        config.apply_server_args_overrides(
-            stage_name="thinker",
-            overrides={"mem_fraction_static": args.mem_fraction_static},
-        )
-
-    runner = MultiProcessPipelineRunner(config)
-    logger.info("Starting Ming-Omni speech pipeline (multiprocess)...")
-    await runner.start(timeout=600)
-    logger.info("Pipeline ready.")
-
-    try:
-        client = Client(runner.coordinator)
-        app = create_app(client, model_name=args.model_name)
-
-        server_config = uvicorn.Config(
-            app,
-            host=args.host,
-            port=args.port,
-            log_level="info",
-        )
-        server = uvicorn.Server(server_config)
-        await server.serve()
-    finally:
-        logger.info("Shutting down pipeline...")
-        await runner.stop()
-        logger.info("Pipeline stopped.")
-
-
 def main() -> None:
     mp.set_start_method("spawn", force=True)
     args = parse_args()
-    _print_version_banner(args.version)
-    if args.version == "v1":
-        _launch_v1_speech_server(args)
-        return
-    asyncio.run(main_async(args))
-
-
-def _print_version_banner(version: str) -> None:
-    try:
-        from sglang_omni.utils import print_server_version_banner
-    except Exception:
-        print(f"SGLANG-OMNI SERVER VERSION = {version.upper()}", flush=True)
-        return
-    print_server_version_banner(
-        version, entry="examples/run_ming_omni_speech_server.py"
-    )
+    _launch_speech_server(args)
 
 
 if __name__ == "__main__":
