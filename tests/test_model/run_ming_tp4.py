@@ -495,6 +495,21 @@ def _run_mmsu_benchmark(args: argparse.Namespace) -> None:
     subprocess.run(command, cwd=os.getcwd(), env=env, check=True)
 
 
+_MING_TTS_SYSTEM_PROMPT_EN = (
+    "You are a text-to-speech engine. Read aloud only the exact text the user "
+    "asks you to speak. Do not add greetings, preambles, suffixes, "
+    "explanations, apologies, or refusals. Do not say phrases like \"Sure\", "
+    "\"Here is\", \"In English\", or \"I am an AI\". Output the spoken text "
+    "verbatim and nothing else."
+)
+_MING_TTS_SYSTEM_PROMPT_ZH = (
+    "你是一个文本转语音引擎。只朗读用户给出的原文，逐字朗读。"
+    "不要添加任何开场白、前缀、后缀、解释、道歉或拒绝。"
+    "不要说\"好的\"、\"以下是\"、\"用中文\"或\"我是 AI\"之类的话。"
+    "只输出原文对应的语音，不要任何额外内容。"
+)
+
+
 def _run_tts_benchmark(args: argparse.Namespace) -> None:
     output_dir = (
         Path(args.tts_output_dir)
@@ -502,6 +517,11 @@ def _run_tts_benchmark(args: argparse.Namespace) -> None:
         else Path(args.output_dir) / "tts_ming"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
+    system_prompt = (
+        _MING_TTS_SYSTEM_PROMPT_ZH
+        if args.tts_lang == "zh"
+        else _MING_TTS_SYSTEM_PROMPT_EN
+    )
     command = [
         sys.executable,
         "-m",
@@ -530,6 +550,8 @@ def _run_tts_benchmark(args: argparse.Namespace) -> None:
         str(args.tts_max_concurrency),
         "--output-dir",
         str(output_dir),
+        "--system-prompt",
+        system_prompt,
     ]
     if args.tts_generate_only:
         command.append("--generate-only")
