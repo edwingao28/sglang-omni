@@ -57,9 +57,14 @@ for _module_name, _module in {
     _install_missing_module_stub(_module_name, _module)
 
 from benchmarks.benchmarker.data import RequestResult
+from benchmarks.benchmarker.utils import get_wav_duration
 from benchmarks.dataset.seedtts import SampleInput
 from benchmarks.eval import benchmark_omni_seedtts
-from benchmarks.eval.benchmark_omni_seedtts import make_send_fn
+from benchmarks.eval.benchmark_omni_seedtts import (
+    OmniSeedttsBenchmarkConfig,
+    _build_results_config,
+    make_send_fn,
+)
 from benchmarks.metrics.performance import compute_speed_metrics
 from benchmarks.tasks import tts as tts_tasks
 from benchmarks.tasks.tts import (
@@ -155,6 +160,7 @@ def test_omni_send_fn_records_non_stream_ttfa(monkeypatch, tmp_path) -> None:
         voice_clone=False,
         stream=False,
         system_prompt=None,
+        on_first_audio=None,
     ):
         forwarded_args["stream"] = stream
         forwarded_args["system_prompt"] = system_prompt
@@ -200,6 +206,126 @@ def test_omni_send_fn_records_non_stream_ttfa(monkeypatch, tmp_path) -> None:
     }
     assert result.ttfa_s == pytest.approx(0.42)
     assert result.latency_s == pytest.approx(0.44)
+
+
+def test_seedtts_results_config_preserves_stream_flag() -> None:
+    config = OmniSeedttsBenchmarkConfig(
+        model="ming-omni",
+        meta="/tmp/meta.lst",
+        stream=True,
+    )
+
+    results_config = _build_results_config(config, base_url="http://localhost:8000")
+
+    assert results_config["stream"] is True
+
+
+def test_omni_send_fn_records_streaming_ttfa_from_first_audio_callback(
+    monkeypatch, tmp_path
+) -> None:
+    wav_bytes = _wav_bytes()
+    callback = None
+
+    async def fake_generate_speech(
+        self,
+        session,
+        api_url,
+        model_name,
+        sample,
+        lang,
+        speaker="Ethan",
+        max_tokens=None,
+        temperature=0.7,
+        voice_clone=False,
+        stream=False,
+        system_prompt=None,
+        on_first_audio=None,
+    ):
+        nonlocal callback
+        callback = on_first_audio
+        assert stream is True
+        assert callback is not None
+        callback()
+        return wav_bytes, 0.0, {"prompt_tokens": 3, "completion_tokens": 4}
+
+    ticks = iter([20.0, 20.12, 20.50, 20.51])
+    monkeypatch.setattr(
+        benchmark_omni_seedtts.VoiceCloneOmni,
+        "generate_speech",
+        fake_generate_speech,
+    )
+    monkeypatch.setattr(
+        benchmark_omni_seedtts.time,
+        "perf_counter",
+        lambda: next(ticks),
+    )
+
+    send_fn = make_send_fn(
+        "ming-omni",
+        "http://localhost:8000/v1/chat/completions",
+        lang="en",
+        voice_clone=False,
+        speaker="Ethan",
+        max_tokens=256,
+        temperature=0.7,
+        stream=True,
+        save_audio_dir=str(tmp_path),
+    )
+    sample = SampleInput(
+        sample_id="sample-stream",
+        ref_text="reference",
+        ref_audio="/tmp/ref.wav",
+        target_text="hello world",
+    )
+
+    result = asyncio.run(send_fn(object(), sample))
+
+    assert callback is not None
+    assert result.is_success
+    assert result.ttfa_s == pytest.approx(0.12)
+    assert result.latency_s == pytest.approx(0.51)
+
+
+def test_omni_stream_reader_invokes_first_audio_callback_once() -> None:
+    wav_bytes = _wav_bytes()
+    event = {
+        "choices": [
+            {
+                "delta": {
+                    "audio": {"data": base64.b64encode(wav_bytes).decode("ascii")}
+                }
+            }
+        ]
+    }
+    lines = [
+        f"data: {json.dumps(event)}\n".encode(),
+        f"data: {json.dumps(event)}\n".encode(),
+        b"data: [DONE]\n",
+    ]
+
+    class FakeContent:
+        async def iter_any(self):
+            for line in lines:
+                yield line
+
+    class FakeResponse:
+        content = FakeContent()
+
+    callback_count = 0
+
+    def mark_first_audio() -> None:
+        nonlocal callback_count
+        callback_count += 1
+
+    wav_out, usage = asyncio.run(
+        tts_tasks.VoiceCloneOmni()._read_streaming_chat_audio(
+            FakeResponse(), on_first_audio=mark_first_audio
+        )
+    )
+
+    assert get_wav_duration(wav_out) == pytest.approx(0.2)
+    assert usage == {}
+    assert callback_count == 1
 
 
 def test_streaming_response_records_ttfa(monkeypatch, tmp_path) -> None:

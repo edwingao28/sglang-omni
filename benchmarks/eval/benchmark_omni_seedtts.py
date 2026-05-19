@@ -210,7 +210,7 @@ def _build_results_config(
         "base_url": base_url,
         "meta": config.meta,
         "voice_clone": config.voice_clone,
-        "stream": False,
+        "stream": config.stream,
         "lang": config.lang,
         "speaker": config.speaker,
         "max_samples": config.max_samples,
@@ -246,6 +246,13 @@ def make_send_fn(
         )
         try:
             start_time = time.perf_counter()
+            ttfa_s: float | None = None
+
+            def mark_first_audio() -> None:
+                nonlocal ttfa_s
+                if ttfa_s is None:
+                    ttfa_s = time.perf_counter() - start_time
+
             wav_bytes, _, usage = await task.generate_speech(
                 session,
                 api_url,
@@ -258,8 +265,10 @@ def make_send_fn(
                 voice_clone=voice_clone,
                 stream=stream,
                 system_prompt=system_prompt,
+                on_first_audio=mark_first_audio if stream else None,
             )
-            ttfa_s = time.perf_counter() - start_time
+            if ttfa_s is None:
+                ttfa_s = time.perf_counter() - start_time
             result.audio_duration_s = get_wav_duration(wav_bytes)
             elapsed = time.perf_counter() - start_time
             if result.audio_duration_s > 0:

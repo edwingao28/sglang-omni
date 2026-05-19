@@ -51,6 +51,8 @@ def test_ci_workflow_job_layout():
     import yaml
 
     wf = yaml.safe_load(_read(".github/workflows/test-ming-omni-ci.yaml"))
+    pr_trigger = wf[True]["pull_request"]
+    assert pr_trigger["branches"] == ["main", "feat/ming-v1-migration"]
     jobs = wf["jobs"]
     expected = {
         "docs": (
