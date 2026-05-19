@@ -47,7 +47,12 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Pipeline options
-    parser.add_argument("--thinker-max-seq-len", type=int, default=8192)
+    parser.add_argument(
+        "--thinker-max-seq-len",
+        type=int,
+        default=None,
+        help="If set, override thinker stage max_seq_len; otherwise inherit pipeline default.",
+    )
     parser.add_argument(
         "--tp-size",
         type=int,
@@ -212,12 +217,19 @@ def _launch_text_server(args: argparse.Namespace) -> None:
     if args.mem_fraction_static is not None:
         server_arg_updates["mem_fraction_static"] = args.mem_fraction_static
 
-    _apply_stage_factory_updates(
-        config,
-        stage_name="thinker",
-        updates={"thinker_max_seq_len": int(args.thinker_max_seq_len)},
-        server_arg_updates=server_arg_updates or None,
-    )
+    if args.thinker_max_seq_len is not None:
+        _apply_stage_factory_updates(
+            config,
+            stage_name="thinker",
+            updates={"thinker_max_seq_len": int(args.thinker_max_seq_len)},
+            server_arg_updates=server_arg_updates or None,
+        )
+    elif server_arg_updates:
+        _apply_stage_factory_updates(
+            config,
+            stage_name="thinker",
+            server_arg_updates=server_arg_updates,
+        )
 
     launch_server(
         config,
