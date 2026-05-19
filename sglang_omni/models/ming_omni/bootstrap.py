@@ -16,6 +16,7 @@ def create_thinker_scheduler(
     tp_rank: int = 0,
     tp_size: int = 1,
     nccl_port: int | None = None,
+    thinker_max_seq_len: int | None = None,
 ):
     if tp_size < 1:
         raise ValueError(f"tp_size must be >= 1, got {tp_size}")
@@ -77,6 +78,7 @@ def create_thinker_scheduler(
         image_token_id=image_token_id,
         audio_token_id=audio_token_id,
         video_token_id=video_token_id,
+        max_seq_len=thinker_max_seq_len,
     )
 
     return OmniScheduler(
@@ -101,6 +103,7 @@ def make_thinker_scheduler_adapters(
     image_token_id: int | None = None,
     audio_token_id: int | None = None,
     video_token_id: int | None = None,
+    max_seq_len: int | None = None,
     stage_name: str = "thinker",
 ):
     """Build StagePayload <-> SGLang request adapters."""
@@ -149,23 +152,26 @@ def make_thinker_scheduler_adapters(
         input_ids_list = input_ids.to(dtype=_torch_long()).flatten().tolist()
 
         params = payload.request.params or {}
-        max_new_tokens = params.get("max_new_tokens", 2048)
-        max_seq_len = params.get("max_seq_len")
         if max_seq_len is not None:
+            params = dict(params)
+            params.setdefault("max_seq_len", max_seq_len)
+        max_new_tokens = params.get("max_new_tokens", 2048)
+        request_max_seq_len = params.get("max_seq_len")
+        if request_max_seq_len is not None:
             prompt_len = len(input_ids_list)
-            if prompt_len >= max_seq_len:
+            if prompt_len >= request_max_seq_len:
                 raise ValueError(
                     f"The input ({prompt_len} tokens) is longer than the model's "
-                    f"context length ({max_seq_len} tokens)."
+                    f"context length ({request_max_seq_len} tokens)."
                 )
             max_new_tokens_check = int(max_new_tokens)
             total_tokens = prompt_len + max_new_tokens_check
-            if total_tokens >= max_seq_len:
+            if total_tokens >= request_max_seq_len:
                 raise ValueError(
                     "Requested token count exceeds the model's maximum context "
                     f"length: prompt={prompt_len}, "
                     f"max_new_tokens={max_new_tokens_check}, "
-                    f"max_seq_len={max_seq_len}."
+                    f"max_seq_len={request_max_seq_len}."
                 )
         from sglang.srt.managers.schedule_batch import Req
         from sglang.srt.sampling.sampling_params import SamplingParams

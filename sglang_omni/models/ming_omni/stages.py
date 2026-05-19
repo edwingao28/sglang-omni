@@ -202,6 +202,7 @@ def create_sglang_thinker_executor_from_config(
         tp_rank=tp_rank,
         tp_size=tp_size,
         nccl_port=nccl_port,
+        thinker_max_seq_len=thinker_max_seq_len,
     )
 
 

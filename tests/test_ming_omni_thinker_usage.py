@@ -88,3 +88,95 @@ def test_request_builder_rejects_prompt_plus_max_new_tokens_at_context_limit():
     )
     with pytest.raises(ValueError, match="Requested token count exceeds"):
         request_builder(payload)
+
+
+def test_request_builder_uses_configured_max_seq_len_when_request_omits_it():
+    import torch
+
+    class _Tok:
+        eos_token_id = 0
+
+        def __call__(self, *a, **kw):
+            return None
+
+    request_builder, _ = make_thinker_scheduler_adapters(
+        tokenizer=_Tok(), vocab_size=10, max_seq_len=4, stage_name="thinker"
+    )
+    payload = SimpleNamespace(
+        request_id="r4",
+        request=SimpleNamespace(params={"max_new_tokens": 1}),
+        data={
+            "prompt": {
+                "input_ids": torch.tensor([1, 2, 3, 4]),
+                "attention_mask": None,
+                "prompt_text": "",
+            },
+            "thinker_inputs": {},
+        },
+    )
+    with pytest.raises(ValueError, match="longer than the model's context length"):
+        request_builder(payload)
+
+
+def test_request_builder_prefers_explicit_request_max_seq_len():
+    import torch
+
+    class _Tok:
+        eos_token_id = 0
+
+        def __call__(self, *a, **kw):
+            return None
+
+    request_builder, _ = make_thinker_scheduler_adapters(
+        tokenizer=_Tok(), vocab_size=10, max_seq_len=4, stage_name="thinker"
+    )
+    payload = SimpleNamespace(
+        request_id="r5",
+        request=SimpleNamespace(params={"max_new_tokens": 1, "max_seq_len": 8}),
+        data={
+            "prompt": {
+                "input_ids": torch.tensor([1, 2, 3, 4]),
+                "attention_mask": None,
+                "prompt_text": "",
+            },
+            "thinker_inputs": {},
+        },
+    )
+
+    try:
+        request_builder(payload)
+    except ValueError as exc:
+        pytest.fail(f"request max_seq_len should override configured limit: {exc}")
+    except ImportError:
+        pass
+
+
+def test_request_builder_does_not_mutate_params_when_injecting_configured_max_seq_len():
+    import torch
+
+    class _Tok:
+        eos_token_id = 0
+
+        def __call__(self, *a, **kw):
+            return None
+
+    request_builder, _ = make_thinker_scheduler_adapters(
+        tokenizer=_Tok(), vocab_size=10, max_seq_len=4, stage_name="thinker"
+    )
+    params = {"max_new_tokens": 1}
+    payload = SimpleNamespace(
+        request_id="r6",
+        request=SimpleNamespace(params=params),
+        data={
+            "prompt": {
+                "input_ids": torch.tensor([1, 2, 3, 4]),
+                "attention_mask": None,
+                "prompt_text": "",
+            },
+            "thinker_inputs": {},
+        },
+    )
+
+    with pytest.raises(ValueError, match="longer than the model's context length"):
+        request_builder(payload)
+    assert params == {"max_new_tokens": 1}
