@@ -12,6 +12,7 @@ class RequestResult:
     text: str = ""
     is_success: bool = False
     latency_s: float = 0.0
+    ttfa_s: float = 0.0
     audio_duration_s: float = 0.0
     rtf: float = 0.0
     prompt_tokens: int = 0
