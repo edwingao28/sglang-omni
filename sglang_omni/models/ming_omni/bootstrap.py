@@ -229,6 +229,13 @@ def make_thinker_scheduler_adapters(
         }
         if data.finish_reason is not None:
             thinker_out["finish_reason"] = data.finish_reason
+        input_ids_attr = getattr(data, "input_ids", None)
+        if input_ids_attr is not None:
+            try:
+                thinker_out["prompt_tokens"] = int(len(input_ids_attr))
+            except TypeError:
+                pass
+        thinker_out["completion_tokens"] = len(output_ids)
         state.thinker_out = thinker_out
         state.engine_outputs[stage_name] = thinker_out
         return StagePayload(
