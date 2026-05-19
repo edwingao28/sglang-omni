@@ -117,6 +117,9 @@ def print_speed_summary(
     print(f"  {'Latency median (s):':<{lw}} {metrics.get('latency_median_s', 'N/A')}")
     print(f"  {'Latency p95 (s):':<{lw}} {metrics.get('latency_p95_s', 'N/A')}")
     print(f"  {'Latency p99 (s):':<{lw}} {metrics.get('latency_p99_s', 'N/A')}")
+    if "ttfa_mean_s" in metrics:
+        print(f"  {'TTFA mean (s):':<{lw}} {metrics['ttfa_mean_s']}")
+        print(f"  {'TTFA p95 (s):':<{lw}} {metrics.get('ttfa_p95_s', 'N/A')}")
     if metrics.get("rtf_mean") is not None:
         print(f"  {'RTF mean:':<{lw}} {metrics['rtf_mean']}")
         print(f"  {'RTF median:':<{lw}} {metrics['rtf_median']}")
@@ -157,6 +160,7 @@ def _request_result_to_dict(output: RequestResult) -> dict:
         "text": output.text,
         "is_success": output.is_success,
         "latency_s": round(output.latency_s, 4),
+        "ttfa_s": round(output.ttfa_s, 4) if output.ttfa_s > 0 else None,
         "audio_duration_s": round(output.audio_duration_s, 4),
         "rtf": round(output.rtf, 4) if output.rtf < float("inf") else None,
         "prompt_tokens": output.prompt_tokens or None,

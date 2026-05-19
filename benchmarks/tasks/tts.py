@@ -872,13 +872,19 @@ async def _handle_streaming_response(
             total_audio_duration, usage_data = process_sse_line(
                 line, total_audio_duration, usage_data
             )
+            chunk_count_before = len(pcm_chunks)
             stream_format = _collect_streaming_audio(line, pcm_chunks, stream_format)
+            if chunk_count_before == 0 and len(pcm_chunks) > chunk_count_before:
+                result.ttfa_s = time.perf_counter() - start_time
     if buffer.strip():
         line = bytes(buffer).decode("utf-8", errors="replace").strip()
         total_audio_duration, usage_data = process_sse_line(
             line, total_audio_duration, usage_data
         )
+        chunk_count_before = len(pcm_chunks)
         stream_format = _collect_streaming_audio(line, pcm_chunks, stream_format)
+        if chunk_count_before == 0 and len(pcm_chunks) > chunk_count_before:
+            result.ttfa_s = time.perf_counter() - start_time
     result.audio_duration_s = total_audio_duration
     if total_audio_duration > 0:
         elapsed = time.perf_counter() - start_time
@@ -914,6 +920,7 @@ async def _handle_non_streaming_response(
     elapsed = time.perf_counter() - start_time
     if result.audio_duration_s > 0:
         result.is_success = True
+        result.ttfa_s = elapsed
         result.rtf = elapsed / result.audio_duration_s
     else:
         result.error = f"Empty or invalid audio response ({len(audio_bytes)} bytes)"
@@ -1109,6 +1116,7 @@ def save_speed_results(
                 "id",
                 "text",
                 "latency_s",
+                "ttfa_s",
                 "audio_duration_s",
                 "rtf",
                 "prompt_tokens",
@@ -1124,6 +1132,7 @@ def save_speed_results(
                     o.request_id,
                     o.text,
                     f"{o.latency_s:.4f}",
+                    f"{o.ttfa_s:.4f}" if o.ttfa_s > 0 else "",
                     f"{o.audio_duration_s:.4f}",
                     f"{o.rtf:.4f}" if o.rtf < float("inf") else "",
                     o.prompt_tokens or "",
