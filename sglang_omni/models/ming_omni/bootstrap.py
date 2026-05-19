@@ -106,11 +106,7 @@ def make_thinker_scheduler_adapters(
     """Build StagePayload <-> SGLang request adapters."""
 
     def request_builder(payload):
-        from sglang.srt.managers.schedule_batch import Req
-        from sglang.srt.sampling.sampling_params import SamplingParams
-
         from sglang_omni.models.ming_omni.io import PipelineState
-        from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
 
         state = PipelineState.from_dict(payload.data)
         prompt = state.prompt
@@ -154,6 +150,28 @@ def make_thinker_scheduler_adapters(
 
         params = payload.request.params or {}
         max_new_tokens = params.get("max_new_tokens", 2048)
+        max_seq_len = params.get("max_seq_len")
+        if max_seq_len is not None:
+            prompt_len = len(input_ids_list)
+            if prompt_len >= max_seq_len:
+                raise ValueError(
+                    f"The input ({prompt_len} tokens) is longer than the model's "
+                    f"context length ({max_seq_len} tokens)."
+                )
+            max_new_tokens_check = int(max_new_tokens)
+            total_tokens = prompt_len + max_new_tokens_check
+            if total_tokens >= max_seq_len:
+                raise ValueError(
+                    "Requested token count exceeds the model's maximum context "
+                    f"length: prompt={prompt_len}, "
+                    f"max_new_tokens={max_new_tokens_check}, "
+                    f"max_seq_len={max_seq_len}."
+                )
+        from sglang.srt.managers.schedule_batch import Req
+        from sglang.srt.sampling.sampling_params import SamplingParams
+
+        from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
+
         temperature = params.get("temperature", 0.0)
         sampling_params = SamplingParams(
             max_new_tokens=max_new_tokens,
