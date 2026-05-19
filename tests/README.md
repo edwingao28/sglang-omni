@@ -6,18 +6,28 @@ tests/
 ├── utils.py
 ├── data/
 ├── docs/
+│   ├── ming_omni/
 │   ├── qwen3_omni/
 │   └── s2pro/
 ├── test_model/
 │   ├── conftest.py
+│   ├── test_ming_omni_*_ci.py
 │   ├── test_omni_router_ci.py
 │   ├── test_qwen3_omni_*_ci.py
 │   └── test_s2pro_tts_ci.py
 └── unit_test/
+    ├── benchmarks/
+    │   └── test_benchmark_ttfa.py
     ├── fixtures/
     │   ├── fish_fakes.py
     │   ├── pipeline_fakes.py
     │   └── qwen_fakes.py
+    ├── ming_omni/
+    │   ├── test_config.py
+    │   ├── test_launch_defaults.py
+    │   ├── test_pipeline.py
+    │   ├── test_thinker.py
+    │   └── test_thinker_usage.py
     ├── pipeline/
     │   ├── helpers.py
     │   ├── test_compile.py
@@ -139,6 +149,10 @@ Relevant model CI ownership:
   with `--enable-realtime` and drives `/v1/realtime` through a real WebSocket
   client to cover text responses, server VAD transcription, and disconnect
   teardown.
+- `test_ming_omni_*_ci.py`: Ming-Omni GPU CI stages covering docs smoke,
+  thinker length validation, SeedTTS TTS/WER, MMMU, and MMSU. These tests share
+  the same launcher helpers as other model CI lanes and may need longer startup
+  timeouts for large checkpoints.
 - CLI flags `--s2pro-stage {nonstream,stream,consistency,all}` and
   `--concurrency {1,2,4,8,16,all}`: scope an S2-Pro CI sweep without editing
   source.
@@ -173,6 +187,13 @@ that happened to contain an older version of the test.
   - scheduler concurrency
   - scheduler callable contracts, including sync wrappers and callable objects
     that return awaitables.
+- `unit_test/benchmarks/`: Benchmark plumbing unit tests that do not require
+  model startup, dataset downloads, or GPU resources.
+- `unit_test/ming_omni/`: Ming-Omni unit tests:
+  - public launcher/config behavior
+  - V1 stage factory routing contracts
+  - thinker request/result adapter behavior
+  - static CI workflow and stage-invariant guards.
 - `unit_test/qwen3_omni/` Qwen3-Omni unit tests:
 
   - public CLI/config behavior
