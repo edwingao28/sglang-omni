@@ -303,6 +303,19 @@ def create_decode_executor(model_path: str):
                 result["text"] = tokenizer.decode(output_ids, skip_special_tokens=True)
                 result.setdefault("modality", "text")
 
+        finish_reason = thinker_out.get("finish_reason")
+        if finish_reason is not None:
+            result["finish_reason"] = finish_reason
+
+        prompt_tokens = thinker_out.get("prompt_tokens")
+        completion_tokens = thinker_out.get("completion_tokens")
+        if prompt_tokens is not None and completion_tokens is not None:
+            result["usage"] = {
+                "prompt_tokens": int(prompt_tokens),
+                "completion_tokens": int(completion_tokens),
+                "total_tokens": int(prompt_tokens) + int(completion_tokens),
+            }
+
         payload.data = result
         return payload
 
