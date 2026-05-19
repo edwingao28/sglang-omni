@@ -32,6 +32,9 @@ class ThinkerOutput(TypedDict, total=False):
     step: int
     is_final: bool
     extra_model_outputs: dict[str, Any]
+    finish_reason: str
+    prompt_tokens: int
+    completion_tokens: int
 
 
 @dataclass
