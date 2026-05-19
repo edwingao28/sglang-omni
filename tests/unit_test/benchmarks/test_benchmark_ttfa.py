@@ -290,11 +290,7 @@ def test_omni_stream_reader_invokes_first_audio_callback_once() -> None:
     wav_bytes = _wav_bytes()
     event = {
         "choices": [
-            {
-                "delta": {
-                    "audio": {"data": base64.b64encode(wav_bytes).decode("ascii")}
-                }
-            }
+            {"delta": {"audio": {"data": base64.b64encode(wav_bytes).decode("ascii")}}}
         ]
     }
     lines = [

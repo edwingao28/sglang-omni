@@ -121,6 +121,7 @@ def start_server_from_cmd(
     process_env = os.environ.copy()
     if env is not None:
         process_env.update(env)
+    process_env.setdefault("SGLANG_OMNI_STARTUP_TIMEOUT", str(timeout))
     if log_file is None:
         proc = subprocess.Popen(
             cmd,

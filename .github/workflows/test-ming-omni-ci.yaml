@@ -2,7 +2,7 @@ name: Ming-Omni CI
 
 on:
   pull_request:
-    branches: [main, feat/ming-v1-migration]
+    branches: [main]
   workflow_dispatch:
 
 concurrency:

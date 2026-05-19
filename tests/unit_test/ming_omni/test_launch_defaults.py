@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _read(rel: str) -> str:
@@ -52,7 +52,7 @@ def test_ci_workflow_job_layout():
 
     wf = yaml.safe_load(_read(".github/workflows/test-ming-omni-ci.yaml"))
     pr_trigger = wf[True]["pull_request"]
-    assert pr_trigger["branches"] == ["main", "feat/ming-v1-migration"]
+    assert pr_trigger["branches"] == ["main"]
     jobs = wf["jobs"]
     expected = {
         "docs": (
@@ -113,6 +113,11 @@ def test_stage_files_share_tp_and_startup_constants(path: str):
     assert "THINKER_TP_SIZE = 2" in src
     assert "str(THINKER_TP_SIZE)" in src
     assert "STARTUP_TIMEOUT = 2400" in src
+
+
+def test_server_helper_forwards_startup_timeout_to_launcher_env():
+    src = _read("tests/utils.py")
+    assert 'process_env.setdefault("SGLANG_OMNI_STARTUP_TIMEOUT", str(timeout))' in src
 
 
 def test_docs_smoke_test_pins_tp_size_in_command():
