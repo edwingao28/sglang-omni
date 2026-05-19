@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import statistics
+
 import numpy as np
 
 from benchmarks.benchmarker.data import RequestResult
@@ -42,9 +44,17 @@ def compute_speed_metrics(
     """Compute system performance summary from a list of request results."""
     successes = [o for o in outputs if o.is_success]
     if not successes:
-        return {"completed_requests": 0, "failed_requests": len(outputs)}
+        return {
+            "completed_requests": 0,
+            "failed_requests": len(outputs),
+            "ttfa_mean_s": 0.0,
+            "ttfa_median_s": 0.0,
+            "ttfa_p95_s": 0.0,
+            "ttfa_p99_s": 0.0,
+        }
 
     latencies = [o.latency_s for o in successes]
+    ttfa_values: list[float] = [r.ttfa_s for r in successes if r.ttfa_s > 0]
     rtfs = [o.rtf for o in successes if 0 < o.rtf < float("inf")]
     audio_durations = [o.audio_duration_s for o in successes if o.audio_duration_s > 0]
 
@@ -63,6 +73,18 @@ def compute_speed_metrics(
         "latency_median_s": round(float(np.median(latencies)), 3),
         "latency_p95_s": round(float(np.percentile(latencies, 95)), 3),
         "latency_p99_s": round(float(np.percentile(latencies, 99)), 3),
+        "ttfa_mean_s": (
+            round(float(statistics.mean(ttfa_values)), 3) if ttfa_values else 0.0
+        ),
+        "ttfa_median_s": (
+            round(float(statistics.median(ttfa_values)), 3) if ttfa_values else 0.0
+        ),
+        "ttfa_p95_s": (
+            round(float(np.percentile(ttfa_values, 95)), 3) if ttfa_values else 0.0
+        ),
+        "ttfa_p99_s": (
+            round(float(np.percentile(ttfa_values, 99)), 3) if ttfa_values else 0.0
+        ),
         "audio_duration_mean_s": (
             round(float(np.mean(audio_durations)), 3) if audio_durations else 0
         ),
