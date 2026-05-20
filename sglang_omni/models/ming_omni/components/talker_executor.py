@@ -23,11 +23,17 @@ from pathlib import Path
 
 import torch
 
+from sglang_omni.models.ming_omni.pipeline.usage import build_text_usage
 from sglang_omni.proto import StagePayload
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_VOICE = "DB30"
+
+
+def _build_talker_usage(payload: StagePayload) -> dict[str, int]:
+    data = payload.data if isinstance(payload.data, dict) else {}
+    return build_text_usage(data)
 
 
 class MingTalkerExecutor:
@@ -186,7 +192,13 @@ class MingTalkerExecutor:
             result = StagePayload(
                 request_id=request_id,
                 request=payload.request,
-                data={"audio_waveform": None, "sample_rate": 44100, "duration": 0.0},
+                data={
+                    "audio_waveform": None,
+                    "sample_rate": 44100,
+                    "duration": 0.0,
+                    "modality": "audio",
+                    "usage": _build_talker_usage(payload),
+                },
             )
             await self._results.put(result)
             return
@@ -220,6 +232,8 @@ class MingTalkerExecutor:
                 "audio_waveform_shape": waveform_shape,
                 "sample_rate": sample_rate,
                 "duration": duration,
+                "modality": "audio",
+                "usage": _build_talker_usage(payload),
             },
         )
         await self._results.put(result)
@@ -262,6 +276,7 @@ class MingTalkerExecutor:
                 "sample_rate": 44100,
                 "duration": 0.0,
                 "skipped": True,
+                "usage": _build_talker_usage(payload),
             },
         )
 
