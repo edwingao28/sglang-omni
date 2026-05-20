@@ -85,7 +85,8 @@ class ConfigManager:
         import importlib
 
         hf_config = AutoConfig.from_pretrained(model_path)
-        config_cls = PIPELINE_CONFIG_REGISTRY.get_config(hf_config.architectures[0])
+        architecture = _resolve_hf_architecture(hf_config)
+        config_cls = PIPELINE_CONFIG_REGISTRY.get_config(architecture)
 
         if variant:
             module = importlib.import_module(config_cls.__module__)
@@ -221,3 +222,17 @@ def _convert_scalar(value: Any) -> Any:
         return float(value)
     except ValueError:
         return value
+
+
+def _resolve_hf_architecture(hf_config: Any) -> str:
+    architectures = getattr(hf_config, "architectures", None)
+    if isinstance(architectures, (list, tuple)) and architectures:
+        architecture = architectures[0]
+        if isinstance(architecture, str) and architecture:
+            return architecture
+
+    architecture = getattr(hf_config, "architecture", None)
+    if isinstance(architecture, str) and architecture:
+        return architecture
+
+    raise ValueError("HF config does not define architectures or architecture")
