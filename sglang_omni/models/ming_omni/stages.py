@@ -326,3 +326,40 @@ def create_streaming_decode_scheduler(
         eos_token_id,
         stage_name=stage_name,
     )
+
+
+def create_streaming_segmenter_scheduler(
+    model_path: str | None = None,
+    *,
+    stage_name: str = "segmenter",
+):
+    del model_path
+
+    from sglang_omni.models.ming_omni.components.streaming_segmenter_scheduler import (
+        MingStreamingSegmenterScheduler,
+    )
+    from sglang_omni.models.ming_omni.pipeline.next_stage import TALKER_STREAM_STAGE
+
+    return MingStreamingSegmenterScheduler(
+        target_stage=TALKER_STREAM_STAGE,
+        stage_name=stage_name,
+    )
+
+
+def create_streaming_talker_scheduler(
+    model_path: str,
+    *,
+    device: str = "cuda",
+    voice: str = "DB30",
+):
+    from sglang_omni.models.ming_omni.components.streaming_talker_scheduler import (
+        MingTalkerStreamScheduler,
+    )
+    from sglang_omni.models.weight_loader import resolve_model_path
+
+    local_path = resolve_model_path(model_path)
+    return MingTalkerStreamScheduler(
+        model_path=local_path,
+        device=device,
+        voice=voice,
+    )

@@ -91,6 +91,23 @@ def test_ming_speech_launcher_exposes_tp_size_arg(monkeypatch) -> None:
     assert args.tp_size == 4
 
 
+def test_ming_speech_launcher_exposes_streaming_tts_arg(monkeypatch) -> None:
+    from examples.run_ming_omni_speech_server import parse_args
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_ming_omni_speech_server.py",
+            "--enable-streaming-tts",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.enable_streaming_tts is True
+
+
 def test_ming_speech_launcher_places_thinker_tp_and_talker(monkeypatch) -> None:
     from examples.run_ming_omni_speech_server import _launch_speech_server
 
@@ -130,6 +147,45 @@ def test_ming_speech_launcher_places_thinker_tp_and_talker(monkeypatch) -> None:
     assert talker.gpu == 4
     assert overrides["disable_custom_all_reduce"] is True
     assert overrides["mem_fraction_static"] == 0.8
+
+
+def test_ming_speech_launcher_places_streaming_talker_stage(monkeypatch) -> None:
+    from examples.run_ming_omni_speech_server import _launch_speech_server
+
+    captured: dict[str, object] = {}
+    serve_module = ModuleType("sglang_omni.serve")
+
+    def fake_launch_server(config, **kwargs):
+        captured["config"] = config
+        captured["kwargs"] = kwargs
+
+    serve_module.launch_server = fake_launch_server
+    monkeypatch.setitem(sys.modules, "sglang_omni.serve", serve_module)
+
+    args = SimpleNamespace(
+        model_path="dummy",
+        relay_backend="shm",
+        tp_size=2,
+        gpu_thinker=0,
+        gpu_talker=2,
+        voice="DB30",
+        mem_fraction_static=None,
+        host="127.0.0.1",
+        port=8000,
+        model_name="ming-omni",
+        enable_streaming_tts=True,
+    )
+
+    _launch_speech_server(args)
+
+    config = captured["config"]
+    stages = {stage.name: stage for stage in config.stages}
+
+    assert type(config).__name__ == "MingOmniStreamingSpeechPipelineConfig"
+    assert "talker" not in stages
+    assert stages["thinker"].gpu == [0, 1]
+    assert stages["talker_stream"].gpu == 2
+    assert stages["talker_stream"].factory_args["voice"] == "DB30"
 
 
 def test_ming_stages_import_light_and_accept_mp_injection_args() -> None:
@@ -192,6 +248,87 @@ def test_ming_talker_factory_returns_scheduler_contract(monkeypatch) -> None:
     assert callable(scheduler.stop)
     assert callable(scheduler.abort)
     assert not isinstance(scheduler, FakeMingTalkerExecutor)
+
+
+def test_ming_streaming_stage_factories_return_scheduler_contract(monkeypatch) -> None:
+    segmenter_module = ModuleType(
+        "sglang_omni.models.ming_omni.components.streaming_segmenter_scheduler"
+    )
+
+    class FakeSegmenterScheduler:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.inbox = object()
+            self.outbox = object()
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def abort(self, request_id):
+            del request_id
+
+    segmenter_module.MingStreamingSegmenterScheduler = FakeSegmenterScheduler
+    monkeypatch.setitem(
+        sys.modules,
+        "sglang_omni.models.ming_omni.components.streaming_segmenter_scheduler",
+        segmenter_module,
+    )
+
+    talker_module = ModuleType(
+        "sglang_omni.models.ming_omni.components.streaming_talker_scheduler"
+    )
+
+    class FakeTalkerStreamScheduler:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.inbox = object()
+            self.outbox = object()
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def abort(self, request_id):
+            del request_id
+
+    talker_module.MingTalkerStreamScheduler = FakeTalkerStreamScheduler
+    monkeypatch.setitem(
+        sys.modules,
+        "sglang_omni.models.ming_omni.components.streaming_talker_scheduler",
+        talker_module,
+    )
+
+    weight_loader_module = ModuleType("sglang_omni.models.weight_loader")
+    weight_loader_module.resolve_model_path = (
+        lambda model_path: f"/resolved/{model_path}"
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "sglang_omni.models.weight_loader",
+        weight_loader_module,
+    )
+
+    from sglang_omni.models.ming_omni.stages import (
+        create_streaming_segmenter_scheduler,
+        create_streaming_talker_scheduler,
+    )
+
+    segmenter = create_streaming_segmenter_scheduler()
+    talker = create_streaming_talker_scheduler(
+        model_path="dummy",
+        device="cuda:2",
+        voice="DB30",
+    )
+
+    assert segmenter.kwargs["target_stage"] == "talker_stream"
+    assert talker.kwargs["model_path"] == "/resolved/dummy"
+    assert talker.kwargs["device"] == "cuda:2"
+    assert talker.kwargs["voice"] == "DB30"
 
 
 def test_ming_audio_encoder_moves_inputs_to_component_device() -> None:

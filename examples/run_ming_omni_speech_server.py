@@ -82,6 +82,11 @@ def parse_args() -> argparse.Namespace:
             "If omitted, SGLang chooses automatically."
         ),
     )
+    parser.add_argument(
+        "--enable-streaming-tts",
+        action="store_true",
+        help="Use the opt-in V1 streaming TTS topology",
+    )
     # Server
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
@@ -147,12 +152,31 @@ def _set_thinker_tp(config: Any, *, start_gpu: int, tp_size: int) -> None:
 
 
 def _launch_speech_server(args: argparse.Namespace) -> None:
-    from sglang_omni.models.ming_omni.config import MingOmniSpeechPipelineConfig
+    from sglang_omni.models.ming_omni.config import (
+        MingOmniSpeechPipelineConfig,
+        MingOmniStreamingSpeechPipelineConfig,
+    )
+    from sglang_omni.models.ming_omni.pipeline.next_stage import (
+        TALKER_STAGE,
+        TALKER_STREAM_STAGE,
+        THINKER_STAGE,
+    )
     from sglang_omni.serve import launch_server
 
     _validate_fraction("--mem-fraction-static", args.mem_fraction_static)
 
-    config = MingOmniSpeechPipelineConfig(
+    config_cls = (
+        MingOmniStreamingSpeechPipelineConfig
+        if getattr(args, "enable_streaming_tts", False)
+        else MingOmniSpeechPipelineConfig
+    )
+    talker_stage = (
+        TALKER_STREAM_STAGE
+        if getattr(args, "enable_streaming_tts", False)
+        else TALKER_STAGE
+    )
+
+    config = config_cls(
         model_path=args.model_path,
         relay_backend=args.relay_backend,
     )
@@ -161,7 +185,7 @@ def _launch_speech_server(args: argparse.Namespace) -> None:
         start_gpu=args.gpu_thinker,
         tp_size=int(args.tp_size),
     )
-    _set_stage_gpu(config, "talker", args.gpu_talker)
+    _set_stage_gpu(config, talker_stage, args.gpu_talker)
     config._validate_talker_gpu_not_in_thinker_tp_range()
 
     server_arg_updates: dict[str, object] = {}
@@ -172,12 +196,12 @@ def _launch_speech_server(args: argparse.Namespace) -> None:
     if server_arg_updates:
         _apply_stage_factory_updates(
             config,
-            stage_name="thinker",
+            stage_name=THINKER_STAGE,
             server_arg_updates=server_arg_updates,
         )
     _apply_stage_factory_updates(
         config,
-        stage_name="talker",
+        stage_name=talker_stage,
         updates={"voice": args.voice},
     )
 

@@ -45,9 +45,6 @@ def test_default_speech_pipeline_stays_non_streaming() -> None:
     assert talker.factory == "sglang_omni.models.ming_omni.stages.create_talker_executor"
 
 
-@pytest.mark.xfail(
-    strict=True, reason="streaming speech topology is implemented in Task 4"
-)
 def test_streaming_speech_pipeline_is_opt_in_and_v1_native() -> None:
     from sglang_omni.models.ming_omni.config import (
         MingOmniSpeechPipelineConfig,
@@ -105,9 +102,6 @@ def test_streaming_speech_pipeline_is_opt_in_and_v1_native() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True, reason="streaming speech topology is implemented in Task 4"
-)
 def test_streaming_talker_gpu_must_not_overlap_thinker_tp() -> None:
     from sglang_omni.models.ming_omni.config import (
         MingOmniStreamingSpeechPipelineConfig,
