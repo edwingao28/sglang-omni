@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -31,7 +33,7 @@ class CFM(nn.Module):
         self.sway_sampling_coef = sway_sampling_coef
 
     @torch.no_grad()
-    def sample(self, llm_cond, lat_cond, y0, t, sde_args, sde_rnd):
+    def sample(self, llm_cond, lat_cond, y0, t, sde_args, sde_rnd, abort_event=None):
         # cfg_strength=2, sigma=0, temperature=0
         def fn(fn_t, x):
             pred_cfg = self.model.forward_with_cfg(x, fn_t, llm_cond, lat_cond, None)
@@ -43,6 +45,8 @@ class CFM(nn.Module):
 
         trajectory = [y0]
         for step in range(self.steps):
+            if abort_event is not None and abort_event.is_set():
+                raise asyncio.CancelledError()
             dt = t[step + 1] - t[step]
             y0 = y0 + fn(t[step], y0) * dt
             y0 = (
