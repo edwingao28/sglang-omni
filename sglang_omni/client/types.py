@@ -137,6 +137,9 @@ class GenerateChunk:
     modality: str = "text"
     audio_data: Any = None
     sample_rate: int | None = None
+    talker_queue_depth: int | None = None
+    segmenter_first_emit_ms: float | None = None
+    stage_times_ms: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -152,6 +155,9 @@ class GenerateChunk:
             "modality": self.modality,
             "audio_data": self.audio_data,
             "sample_rate": self.sample_rate,
+            "talker_queue_depth": self.talker_queue_depth,
+            "segmenter_first_emit_ms": self.segmenter_first_emit_ms,
+            "stage_times_ms": self.stage_times_ms,
         }
 
 
@@ -207,6 +213,10 @@ class CompletionStreamChunk:
     finish_reason: str | None = None
     usage: UsageInfo | None = None
     stage_name: str | None = None
+    sample_rate: int | None = None
+    talker_queue_depth: int | None = None
+    segmenter_first_emit_ms: float | None = None
+    stage_times_ms: dict[str, Any] | None = None
 
 
 @dataclass

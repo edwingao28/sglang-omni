@@ -13,6 +13,7 @@ Provides the following endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -273,81 +274,84 @@ async def _chat_stream(
     requested_modalities = req.modalities or ["text"]
     finish_reason: str | None = None
     final_usage: UsageResponse | None = None
+    started_at = time.monotonic()
+    observed_stage_times_ms: dict[str, Any] = {}
 
-    async for chunk in client.completion_stream(
-        gen_req,
-        request_id=request_id,
-        audio_format=audio_format,
-    ):
-        # Capture finish info for the dedicated finish chunk after the loop.
-        # Some pipelines only emit a final aggregate chunk; do not drop its
-        # text/audio just because it already carries a finish reason.
-        if chunk.finish_reason is not None:
-            finish_reason = chunk.finish_reason
-            if chunk.usage is not None:
-                final_usage = UsageResponse(
-                    prompt_tokens=chunk.usage.prompt_tokens or 0,
-                    completion_tokens=chunk.usage.completion_tokens or 0,
-                    total_tokens=chunk.usage.total_tokens or 0,
+    try:
+        async for chunk in client.completion_stream(
+            gen_req,
+            request_id=request_id,
+            audio_format=audio_format,
+        ):
+            # Capture finish info for the dedicated finish chunk after the loop.
+            # Some pipelines only emit a final aggregate chunk; do not drop its
+            # text/audio just because it already carries a finish reason.
+            if chunk.finish_reason is not None:
+                finish_reason = chunk.finish_reason
+                if chunk.usage is not None:
+                    final_usage = UsageResponse(
+                        prompt_tokens=chunk.usage.prompt_tokens or 0,
+                        completion_tokens=chunk.usage.completion_tokens or 0,
+                        total_tokens=chunk.usage.total_tokens or 0,
+                    )
+                has_payload = (
+                    bool(chunk.text) and "text" in requested_modalities
+                ) or (chunk.audio_b64 is not None and "audio" in requested_modalities)
+                if not has_payload:
+                    continue
+
+            delta = ChatCompletionStreamDelta()
+            emit = False
+
+            # Send role on first chunk
+            if not role_sent:
+                delta.role = "assistant"
+                role_sent = True
+                emit = True
+
+            # Text chunk
+            if chunk.text and "text" in requested_modalities:
+                delta.content = chunk.text
+                observed_stage_times_ms.setdefault(
+                    "thinker_first_text", (time.monotonic() - started_at) * 1000.0
                 )
-            has_payload = (
-                chunk.modality == "text"
-                and bool(chunk.text)
-                and "text" in requested_modalities
-            ) or (
-                chunk.modality == "audio"
-                and chunk.audio_b64 is not None
-                and "audio" in requested_modalities
-            )
-            if not has_payload:
+                emit = True
+
+            # Audio chunk
+            if chunk.audio_b64 is not None and "audio" in requested_modalities:
+                delta.audio = ChatCompletionAudio(
+                    id=f"audio-{request_id}",
+                    data=chunk.audio_b64,
+                )
+                observed_stage_times_ms.setdefault(
+                    "talker_first_audio", (time.monotonic() - started_at) * 1000.0
+                )
+                emit = True
+
+            if not emit:
                 continue
 
-        delta = ChatCompletionStreamDelta()
-        emit = False
-
-        # Send role on first chunk
-        if not role_sent:
-            delta.role = "assistant"
-            role_sent = True
-            emit = True
-
-        # Text chunk
-        if chunk.modality == "text" and chunk.text and "text" in requested_modalities:
-            delta.content = chunk.text
-            emit = True
-
-        # Audio chunk
-        if (
-            chunk.modality == "audio"
-            and chunk.audio_b64 is not None
-            and "audio" in requested_modalities
-        ):
-            delta.audio = ChatCompletionAudio(
-                id=f"audio-{request_id}",
-                data=chunk.audio_b64,
+            stream_resp = ChatCompletionStreamResponse(
+                id=response_id,
+                created=created,
+                model=model,
+                choices=[
+                    ChatCompletionStreamChoice(
+                        index=0,
+                        delta=delta,
+                        finish_reason=None,
+                    )
+                ],
             )
-            emit = True
 
-        if not emit:
-            continue
-
-        stream_resp = ChatCompletionStreamResponse(
-            id=response_id,
-            created=created,
-            model=model,
-            choices=[
-                ChatCompletionStreamChoice(
-                    index=0,
-                    delta=delta,
-                    finish_reason=None,
-                )
-            ],
-        )
-
-        data = stream_resp.model_dump(exclude_none=True)
-        for choice in data.get("choices", []):
-            choice.setdefault("finish_reason", None)
-        yield f"data: {json.dumps(data)}\n\n"
+            data = stream_resp.model_dump(exclude_none=True)
+            for choice in data.get("choices", []):
+                choice.setdefault("finish_reason", None)
+            _add_streaming_diagnostics(data, chunk, observed_stage_times_ms)
+            yield f"data: {json.dumps(data)}\n\n"
+    except (asyncio.CancelledError, GeneratorExit):
+        await client.abort(request_id)
+        raise
 
     # Finish chunk: empty delta + finish_reason.
     finish_resp = ChatCompletionStreamResponse(
@@ -369,6 +373,54 @@ async def _chat_stream(
     yield f"data: {json.dumps(data)}\n\n"
 
     yield "data: [DONE]\n\n"
+
+
+def _add_streaming_diagnostics(
+    data: dict[str, Any],
+    chunk: Any,
+    observed_stage_times_ms: dict[str, Any],
+) -> None:
+    diagnostics: dict[str, Any] = {}
+    if getattr(chunk, "stage_name", None) is not None:
+        diagnostics["stage_name"] = chunk.stage_name
+    if getattr(chunk, "sample_rate", None) is not None:
+        diagnostics["sample_rate"] = chunk.sample_rate
+    if getattr(chunk, "talker_queue_depth", None) is not None:
+        diagnostics["talker_queue_depth"] = chunk.talker_queue_depth
+
+    stage_times_ms: dict[str, Any] = {}
+    chunk_stage_times = getattr(chunk, "stage_times_ms", None)
+    if chunk_stage_times:
+        stage_times_ms.update(_canonical_stage_times(chunk_stage_times))
+    if getattr(chunk, "segmenter_first_emit_ms", None) is not None:
+        stage_times_ms.setdefault(
+            "segmenter_first_emit", chunk.segmenter_first_emit_ms
+        )
+    for key, value in observed_stage_times_ms.items():
+        stage_times_ms.setdefault(key, value)
+    if stage_times_ms:
+        diagnostics["stage_times_ms"] = stage_times_ms
+    if not diagnostics:
+        return
+
+    choices = data.get("choices") or []
+    if not choices:
+        return
+    delta = choices[0].setdefault("delta", {})
+    delta["sglang_omni"] = diagnostics
+
+
+def _canonical_stage_times(stage_times_ms: dict[str, Any]) -> dict[str, Any]:
+    canonical = dict(stage_times_ms)
+    legacy_keys = {
+        "first_text_ms": "thinker_first_text",
+        "segmenter_first_emit_ms": "segmenter_first_emit",
+        "talker_first_audio_ms": "talker_first_audio",
+    }
+    for old_key, new_key in legacy_keys.items():
+        if old_key in canonical:
+            canonical.setdefault(new_key, canonical.pop(old_key))
+    return canonical
 
 
 def _build_chat_generate_request(req: ChatCompletionRequest) -> GenerateRequest:
@@ -590,6 +642,9 @@ async def _speech_stream(
             }
             yield f"data: {json.dumps(payload)}\n\n"
             chunk_index += 1
+    except (asyncio.CancelledError, GeneratorExit):
+        await client.abort(request_id)
+        raise
     except ClientError as exc:
         payload = _speech_stream_error_payload(request_id, chunk_index, exc)
         yield f"data: {json.dumps(payload)}\n\n"
@@ -648,6 +703,8 @@ def _select_speech_audio_delta(
             audio = audio[:, 0]
 
     total_samples = int(audio.shape[-1]) if audio.ndim else 0
+    if total_samples == 0:
+        return None, emitted_samples
     if not is_terminal:
         return audio, emitted_samples + total_samples
     if total_samples <= emitted_samples:

@@ -30,6 +30,8 @@ from sglang_omni.client.types import (
 from sglang_omni.pipeline.coordinator import Coordinator
 from sglang_omni.proto import OmniRequest, RequestState, StreamMessage
 
+MING_STREAMING_AUDIO_FALLBACK_SAMPLE_RATE = 44100
+
 
 class Client:
     """Internal client used by API adapters."""
@@ -89,6 +91,7 @@ class Client:
         audio_chunks: list[Any] = []
         last_chunk: GenerateChunk | None = None
         finish_reason: str | None = None
+        sample_rate: int | None = None
 
         async for chunk in self.generate(request, request_id=request_id):
             last_chunk = chunk
@@ -96,6 +99,8 @@ class Client:
                 text_parts.append(chunk.text)
             if chunk.audio_data is not None:
                 audio_chunks.append(chunk.audio_data)
+            if chunk.sample_rate is not None:
+                sample_rate = chunk.sample_rate
             if chunk.finish_reason is not None:
                 finish_reason = chunk.finish_reason
 
@@ -110,7 +115,11 @@ class Client:
                 combined = audio_chunks[0]
             else:
                 combined = np.concatenate([to_numpy(c) for c in audio_chunks])
-            audio_b64 = audio_to_base64(combined, output_format=audio_format)
+            audio_b64 = audio_to_base64(
+                combined,
+                sample_rate=sample_rate or MING_STREAMING_AUDIO_FALLBACK_SAMPLE_RATE,
+                output_format=audio_format,
+            )
             audio = CompletionAudio(
                 id=f"audio-{request_id}",
                 data=audio_b64,
@@ -144,8 +153,22 @@ class Client:
         async for chunk in self.generate(request, request_id=request_id):
             audio_b64: str | None = None
             if chunk.modality == "audio" and chunk.audio_data is not None:
+                audio_arr = to_numpy(chunk.audio_data)
+                if audio_arr.size == 0 and not chunk.text and chunk.finish_reason is None:
+                    continue
+                if audio_arr.size == 0:
+                    audio_data = None
+                else:
+                    audio_data = audio_arr
+            else:
+                audio_data = None
+            if audio_data is not None:
                 audio_b64 = audio_to_base64(
-                    chunk.audio_data, output_format=audio_format
+                    audio_data,
+                    sample_rate=(
+                        chunk.sample_rate or MING_STREAMING_AUDIO_FALLBACK_SAMPLE_RATE
+                    ),
+                    output_format=audio_format,
                 )
 
             yield CompletionStreamChunk(
@@ -156,6 +179,10 @@ class Client:
                 finish_reason=chunk.finish_reason,
                 usage=chunk.usage,
                 stage_name=chunk.stage_name,
+                sample_rate=chunk.sample_rate,
+                talker_queue_depth=chunk.talker_queue_depth,
+                segmenter_first_emit_ms=chunk.segmenter_first_emit_ms,
+                stage_times_ms=chunk.stage_times_ms,
             )
 
     # ------------------------------------------------------------------
@@ -248,7 +275,9 @@ class Client:
 
     @staticmethod
     def _set_audio_data(chunk: GenerateChunk, data: dict[str, Any]) -> None:
-        audio_data = data.get("audio_data") or data.get("audio")
+        audio_data = data.get("audio_data")
+        if audio_data is None:
+            audio_data = data.get("audio")
         if audio_data is None and data.get("audio_waveform") is not None:
             raw = data.get("audio_waveform")
             if isinstance(raw, memoryview):
@@ -265,6 +294,18 @@ class Client:
         sample_rate = data.get("sample_rate")
         if sample_rate is not None:
             chunk.sample_rate = sample_rate
+
+    @staticmethod
+    def _set_streaming_telemetry(chunk: GenerateChunk, data: dict[str, Any]) -> None:
+        talker_queue_depth = data.get("talker_queue_depth")
+        if talker_queue_depth is not None:
+            chunk.talker_queue_depth = talker_queue_depth
+        segmenter_first_emit_ms = data.get("segmenter_first_emit_ms")
+        if segmenter_first_emit_ms is not None:
+            chunk.segmenter_first_emit_ms = segmenter_first_emit_ms
+        stage_times_ms = data.get("stage_times_ms")
+        if stage_times_ms is not None:
+            chunk.stage_times_ms = dict(stage_times_ms)
 
     @staticmethod
     def _build_usage_info(data: dict[str, Any]) -> UsageInfo | None:
@@ -306,7 +347,7 @@ class Client:
             # Multi-terminal merged result, e.g. decode + code2wav/talker.
             audio_result = None
             if "decode" in result:
-                for audio_stage in ("code2wav", "talker"):
+                for audio_stage in ("code2wav", "talker", "talker_stream"):
                     if audio_stage in result:
                         audio_result = result[audio_stage] or {}
                         break
@@ -316,6 +357,7 @@ class Client:
                 if isinstance(text, str):
                     chunk.text = text
                 Client._set_audio_data(chunk, audio_result)
+                Client._set_streaming_telemetry(chunk, audio_result)
                 chunk.usage = Client._build_usage_info(
                     decode_result
                 ) or Client._build_usage_info(audio_result)
@@ -340,6 +382,7 @@ class Client:
             if modality is not None:
                 chunk.modality = modality
             Client._set_audio_data(chunk, result)
+            Client._set_streaming_telemetry(chunk, result)
             chunk.usage = Client._build_usage_info(result)
             return chunk
         if isinstance(result, str):
@@ -392,6 +435,7 @@ class Client:
             if modality is not None:
                 chunk.modality = modality
             Client._set_audio_data(chunk, data)
+            Client._set_streaming_telemetry(chunk, data)
             return chunk
         if isinstance(data, str):
             chunk.text = data
