@@ -307,3 +307,22 @@ def create_decode_executor(model_path: str):
         return payload
 
     return SimpleScheduler(_decode)
+
+
+def create_streaming_decode_scheduler(
+    model_path: str,
+    *,
+    stage_name: str = "decode",
+):
+    from sglang_omni.models.ming_omni.components.common import load_ming_tokenizer
+    from sglang_omni.models.ming_omni.components.streaming_decode_scheduler import (
+        MingStreamingDecodeScheduler,
+    )
+
+    tokenizer = load_ming_tokenizer(model_path)
+    eos_token_id = getattr(tokenizer, "eos_token_id", None)
+    return MingStreamingDecodeScheduler(
+        tokenizer,
+        eos_token_id,
+        stage_name=stage_name,
+    )
