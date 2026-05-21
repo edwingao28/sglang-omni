@@ -75,8 +75,7 @@ class SpkembExtractor:
             self.campplus_session.run(
                 None,
                 {
-                    self.campplus_session.get_inputs()[0]
-                    .name: feat.unsqueeze(dim=0)
+                    self.campplus_session.get_inputs()[0].name: feat.unsqueeze(dim=0)
                     .cpu()
                     .numpy()
                 },
@@ -323,9 +322,9 @@ class MingOmniTalker(nn.Module):
             if param.numel() == 1 and loaded_weight.numel() == 1:
                 param.data.fill_(loaded_weight.item())
             else:
-                assert (
-                    param.size() == loaded_weight.size()
-                ), f"Shape mismatch for {name}: param={param.size()}, weight={loaded_weight.size()}"
+                assert param.size() == loaded_weight.size(), (
+                    f"Shape mismatch for {name}: param={param.size()}, weight={loaded_weight.size()}"
+                )
                 param.data.copy_(loaded_weight)
             loaded.add(name)
 
@@ -575,16 +574,16 @@ class MingOmniTalker(nn.Module):
         sigma=0.25,
         temperature=0,
     ):
-        assert (
-            self.tokenizer is not None
-        ), "Tokenizer not set. Call set_tokenizer() first."
+        assert self.tokenizer is not None, (
+            "Tokenizer not set. Call set_tokenizer() first."
+        )
         tokenizer = self.tokenizer
 
         spk_emb_prompt: list = []
         if spk_emb is not None:
             for i, se in enumerate(spk_emb):
                 spk_emb_prompt.extend(
-                    tokenizer.encode(f"  speaker_{i+1}:")
+                    tokenizer.encode(f"  speaker_{i + 1}:")
                     + tokenizer.encode("<|vision_start|>")
                     + tokenizer.encode("<|vision_pad|>")
                     + tokenizer.encode("<|vision_end|>\n")
@@ -1165,9 +1164,12 @@ class MingOmniTalker(nn.Module):
                         else text_ori[this_start_idx : this_end_idx + 1]
                     )
                     all_wavs.append(tts_speech)
-                    yield tts_speech, this_text_ori, cache_position[
-                        f"{count}_{idx}"
-                    ], this_dura * 1000
+                    yield (
+                        tts_speech,
+                        this_text_ori,
+                        cache_position[f"{count}_{idx}"],
+                        this_dura * 1000,
+                    )
                 else:
                     all_wavs.append(tts_speech)
                     yield tts_speech, text_ori, cache_position[count], this_dura * 1000

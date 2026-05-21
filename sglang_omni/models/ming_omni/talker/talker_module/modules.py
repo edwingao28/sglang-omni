@@ -106,9 +106,9 @@ class Attention(nn.Module):
         self.to_out.append(nn.Dropout(dropout))
 
         if attn_backend == "flash_attn":
-            assert is_package_available(
-                "flash_attn"
-            ), "Please install flash-attn first."
+            assert is_package_available("flash_attn"), (
+                "Please install flash-attn first."
+            )
 
         self.pe_attn_head = pe_attn_head
         self.attn_backend = attn_backend
