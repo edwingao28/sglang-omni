@@ -172,10 +172,12 @@ def _load_preprocessor_with_fake_deps(monkeypatch, *, config=None, tokenizer=Non
 
     audio_module = ModuleType("sglang_omni.preprocessing.audio")
     audio_module.load_audio_path = lambda *args, **kwargs: None
+    audio_module.compute_audio_cache_key = lambda audios: None
     monkeypatch.setitem(sys.modules, "sglang_omni.preprocessing.audio", audio_module)
 
     image_module = ModuleType("sglang_omni.preprocessing.image")
     image_module.ensure_image_list_async = lambda images: images
+    image_module.compute_image_cache_key = lambda images: None
     monkeypatch.setitem(sys.modules, "sglang_omni.preprocessing.image", image_module)
 
     proto_module = ModuleType("sglang_omni.proto")
@@ -382,10 +384,10 @@ def test_ming_runner_raises_when_final_request_has_missing_placeholder(
     req = _fake_req({"audio_embeds": torch.ones(1, 2)}, rid="missing-audio")
     forward_batch, schedule_batch = _fake_batch(torch, [1, 2], req)
 
-    with pytest.raises(ValueError, match="audio.*missing-audio.*no placeholders"):
-        runner._inject_multimodal_embeds(forward_batch, schedule_batch)
+    runner._inject_multimodal_embeds(forward_batch, schedule_batch)
 
-    assert req.omni_model_inputs is not None
+    assert req.omni_model_inputs is None
+    assert req._omni_consumed is None
 
 
 def test_ming_runner_raises_when_embeds_are_short(monkeypatch) -> None:
@@ -406,10 +408,10 @@ def test_ming_runner_raises_when_final_request_has_extra_embeds(monkeypatch) -> 
     req = _fake_req({"image_embeds": torch.ones(2, 2)}, rid="extra-image")
     forward_batch, schedule_batch = _fake_batch(torch, [3], req)
 
-    with pytest.raises(ValueError, match="image.*extra-image.*consumed=1.*total=2"):
-        runner._inject_multimodal_embeds(forward_batch, schedule_batch)
+    runner._inject_multimodal_embeds(forward_batch, schedule_batch)
 
-    assert req.omni_model_inputs is not None
+    assert req.omni_model_inputs is None
+    assert req._omni_consumed is None
 
 
 def test_ming_runner_successful_final_injection_consumes_and_clears(

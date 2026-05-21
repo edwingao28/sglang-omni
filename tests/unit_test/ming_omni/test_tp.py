@@ -292,6 +292,8 @@ def test_ming_bootstrap_aligns_server_args_tp_size_before_infra(
     common_module.load_ming_tokenizer = lambda _model_path: SimpleNamespace(
         vocab_size=32000,
         eos_token_id=2,
+        unk_token_id=0,
+        convert_tokens_to_ids=lambda token: 0,
     )
     common_module.load_ming_config = lambda _model_path: SimpleNamespace(
         llm_config=SimpleNamespace(vocab_size=32000)

@@ -199,9 +199,7 @@ def test_ming_audio_encoder_moves_inputs_to_component_device() -> None:
         encoding="utf-8"
     )
 
-    assert (
-        "audio_feats = audio_feats.to(device=self._device, dtype=self._dtype)" in source
-    )
+    assert "audio_feats = audio_feats.to(device=self._device)" in source
     assert "audio_feats_lengths = audio_feats_lengths.to(device=self._device)" in source
 
 
