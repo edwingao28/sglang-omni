@@ -109,7 +109,10 @@ def _streaming_thinker_stage(*, gpu: int, process: str) -> StageConfig:
         name=THINKER_STAGE,
         process=process,
         factory=f"{_PKG}.stages.create_sglang_thinker_executor_from_config",
-        factory_args={"thinker_max_seq_len": 8192},
+        factory_args={
+            "thinker_max_seq_len": 8192,
+            "enable_streaming_outputs": True,
+        },
         gpu=gpu,
         next=[DECODE_STAGE, SEGMENTER_STAGE],
         stream_to=[DECODE_STAGE, SEGMENTER_STAGE],

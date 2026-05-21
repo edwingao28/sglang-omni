@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import logging
+from collections import OrderedDict
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+_STREAM_STATE_MAX_REQUESTS = 4096
+_STREAM_STATE_EVICT_TO = 3072
 
 
 def create_thinker_scheduler(
@@ -16,6 +20,7 @@ def create_thinker_scheduler(
     tp_rank: int = 0,
     tp_size: int = 1,
     nccl_port: int | None = None,
+    enable_streaming_outputs: bool = False,
 ):
     if tp_size < 1:
         raise ValueError(f"tp_size must be >= 1, got {tp_size}")
@@ -78,6 +83,12 @@ def create_thinker_scheduler(
         audio_token_id=audio_token_id,
         video_token_id=video_token_id,
     )
+    stream_output_builder = None
+    if enable_streaming_outputs:
+        stream_output_builder = make_ming_thinker_stream_output_builder(
+            tokenizer=tokenizer,
+            eos_token_id=getattr(tokenizer, "eos_token_id", None),
+        )
 
     return OmniScheduler(
         tp_worker=model_worker,
@@ -91,7 +102,160 @@ def create_thinker_scheduler(
         model_runner=model_runner,
         request_builder=request_builder,
         result_adapter=result_adapter,
+        stream_output_builder=stream_output_builder,
     )
+
+
+def make_ming_thinker_stream_output_builder(
+    *,
+    tokenizer: Any,
+    eos_token_id: int | None = None,
+):
+    """Build targeted stream chunks from Ming thinker per-token outputs."""
+    from sglang_omni.models.ming_omni.components.streaming_text import (
+        text_to_uint8_tensor,
+    )
+    from sglang_omni.models.ming_omni.io import PipelineState
+    from sglang_omni.models.ming_omni.pipeline.merge import decode_events
+    from sglang_omni.models.ming_omni.pipeline.next_stage import (
+        DECODE_STAGE,
+        SEGMENTER_STAGE,
+    )
+    from sglang_omni.scheduling.messages import OutgoingMessage
+
+    import torch
+
+    states: OrderedDict[str, PipelineState] = OrderedDict()
+
+    def _state_for(request_id: str) -> PipelineState:
+        state = states.get(request_id)
+        if state is None:
+            state = PipelineState()
+            states[request_id] = state
+            if len(states) > _STREAM_STATE_MAX_REQUESTS:
+                for _ in range(len(states) - _STREAM_STATE_EVICT_TO):
+                    states.popitem(last=False)
+        else:
+            states.move_to_end(request_id)
+        return state
+
+    def _build_stream_output(
+        request_id: str, req_data: Any, req_output: Any
+    ) -> list[OutgoingMessage]:
+        req = getattr(req_data, "req", None)
+        if req is not None and int(getattr(req, "is_chunked", 0) or 0) > 0:
+            return []
+        if req_output.data is None:
+            return []
+
+        token_id = int(req_output.data)
+        stage_payload = getattr(req_data, "stage_payload", None)
+        request = getattr(stage_payload, "request", None)
+        params = getattr(request, "params", None)
+        is_streaming = bool(isinstance(params, dict) and params.get("stream") is True)
+        text_requested = _is_output_modality_requested(request, "text")
+        audio_requested = _is_output_modality_requested(request, "audio")
+
+        state = _state_for(request_id)
+        step = len(state.stream_state.get("token_ids", [])) + 1
+        events = list(
+            decode_events(
+                thinker_out={
+                    "output_ids": [token_id],
+                    "step": step,
+                    "is_final": False,
+                    "extra_model_outputs": {},
+                },
+                state=state,
+                tokenizer=tokenizer,
+                eos_token_id=eos_token_id,
+                step=step,
+            )
+        )
+
+        messages: list[OutgoingMessage] = []
+        metadata = {
+            "modality": "text",
+            "stage_name": "thinker",
+            "token_id": token_id,
+            "step": step,
+        }
+        if is_streaming and text_requested:
+            messages.append(
+                OutgoingMessage(
+                    request_id=request_id,
+                    type="stream",
+                    target=DECODE_STAGE,
+                    data=torch.tensor([token_id], dtype=torch.long),
+                    metadata=dict(metadata),
+                )
+            )
+
+        if audio_requested:
+            delta = "".join(
+                str(event.payload.get("text") or "")
+                for event in events
+                if event.type == "text_delta"
+            )
+            if delta:
+                text_tensor = text_to_uint8_tensor(delta)
+                messages.append(
+                    OutgoingMessage(
+                        request_id=request_id,
+                        type="stream",
+                        target=SEGMENTER_STAGE,
+                        data=text_tensor,
+                        metadata={
+                            **metadata,
+                            "text_len": int(text_tensor.numel()),
+                        },
+                    )
+                )
+
+        if (
+            (eos_token_id is not None and token_id == int(eos_token_id))
+            or getattr(req_output, "finished", False)
+            or _has_reached_max_new_tokens(req_data)
+        ):
+            states.pop(request_id, None)
+
+        return messages
+
+    return _build_stream_output
+
+
+def _output_modalities(request: Any) -> set[str] | None:
+    metadata = getattr(request, "metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    modalities = metadata.get("output_modalities")
+    if modalities is None:
+        return None
+    if isinstance(modalities, str):
+        values = (modalities,)
+    elif isinstance(modalities, (list, tuple, set)):
+        values = modalities
+    else:
+        return None
+    normalized = {str(modality).lower() for modality in values}
+    if not normalized.intersection({"text", "audio"}):
+        return None
+    return normalized
+
+
+def _is_output_modality_requested(request: Any, modality: str) -> bool:
+    modalities = _output_modalities(request)
+    return modalities is None or modality.lower() in modalities
+
+
+def _has_reached_max_new_tokens(req_data: Any) -> bool:
+    max_new_tokens = getattr(req_data, "max_new_tokens", None)
+    if max_new_tokens is None:
+        return False
+    try:
+        return int(getattr(req_data, "generation_steps", 0)) >= int(max_new_tokens)
+    except (TypeError, ValueError):
+        return False
 
 
 def make_thinker_scheduler_adapters(

@@ -41,6 +41,7 @@ def test_default_speech_pipeline_stays_non_streaming() -> None:
 
     assert thinker.next == [DECODE_STAGE, TALKER_STAGE]
     assert thinker.stream_to == []
+    assert thinker.factory_args == {"thinker_max_seq_len": 8192}
     assert talker.terminal is True
     assert talker.factory == "sglang_omni.models.ming_omni.stages.create_talker_executor"
 
@@ -81,6 +82,10 @@ def test_streaming_speech_pipeline_is_opt_in_and_v1_native() -> None:
 
     assert thinker.next == [DECODE_STAGE, SEGMENTER_STAGE]
     assert thinker.stream_to == [DECODE_STAGE, SEGMENTER_STAGE]
+    assert thinker.factory_args == {
+        "thinker_max_seq_len": 8192,
+        "enable_streaming_outputs": True,
+    }
     assert decode.factory == (
         "sglang_omni.models.ming_omni.stages."
         "create_streaming_decode_scheduler"
