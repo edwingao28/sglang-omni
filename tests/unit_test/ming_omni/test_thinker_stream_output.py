@@ -7,9 +7,7 @@ from types import SimpleNamespace
 
 import torch
 
-from sglang_omni.models.ming_omni.components.streaming_text import (
-    uint8_tensor_to_text,
-)
+from sglang_omni.models.ming_omni.components.streaming_text import uint8_tensor_to_text
 from sglang_omni.models.ming_omni.pipeline.next_stage import (
     DECODE_STAGE,
     SEGMENTER_STAGE,

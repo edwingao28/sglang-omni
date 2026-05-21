@@ -14,7 +14,8 @@ import queue
 import re
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from queue import Queue
 from threading import Lock
 from typing import Any, Iterable, Optional, Tuple
@@ -76,6 +77,7 @@ def _future_result_with_abort(future, abort_event: Any | None):
 def _last_integer_cache_end(cache_position: dict) -> int:
     ends = [span[1] for key, span in cache_position.items() if isinstance(key, int)]
     return max(ends) if ends else -1
+
 
 # ---------- Optional: onnxruntime for speaker embedding ----------
 try:

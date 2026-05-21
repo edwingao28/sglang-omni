@@ -12,12 +12,10 @@ import numpy as np
 import pytest
 import torch
 
-from sglang_omni.models.ming_omni.components.streaming_text import (
-    text_to_uint8_tensor,
-)
 from sglang_omni.models.ming_omni.components import (
     streaming_talker_scheduler as talker_scheduler,
 )
+from sglang_omni.models.ming_omni.components.streaming_text import text_to_uint8_tensor
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.proto import OmniRequest, StagePayload
 from sglang_omni.scheduling.messages import IncomingMessage, OutgoingMessage
@@ -251,13 +249,9 @@ def test_concurrent_request_workers_serialize_shared_talker_generation() -> None
     thread = _start_scheduler(scheduler)
     try:
         scheduler.inbox.put(IncomingMessage("req1", "new_request", _payload("req1")))
-        scheduler.inbox.put(
-            IncomingMessage("req1", "stream_chunk", _chunk("one", 1))
-        )
+        scheduler.inbox.put(IncomingMessage("req1", "stream_chunk", _chunk("one", 1)))
         scheduler.inbox.put(IncomingMessage("req2", "new_request", _payload("req2")))
-        scheduler.inbox.put(
-            IncomingMessage("req2", "stream_chunk", _chunk("two", 2))
-        )
+        scheduler.inbox.put(IncomingMessage("req2", "stream_chunk", _chunk("two", 2)))
 
         assert talker.first_entered.wait(timeout=1)
         assert not talker.second_entered.wait(timeout=0.1)
@@ -361,7 +355,9 @@ def test_pending_stream_chunk_and_done_are_processed_when_payload_arrives() -> N
         thread.join(timeout=1)
 
 
-def test_non_streaming_request_emits_no_streams_and_returns_concatenated_audio() -> None:
+def test_non_streaming_request_emits_no_streams_and_returns_concatenated_audio() -> (
+    None
+):
     talker = FakeTalker(
         outputs=[
             np.array([0.1, 0.2], dtype=np.float32),

@@ -154,7 +154,11 @@ class Client:
             audio_b64: str | None = None
             if chunk.modality == "audio" and chunk.audio_data is not None:
                 audio_arr = to_numpy(chunk.audio_data)
-                if audio_arr.size == 0 and not chunk.text and chunk.finish_reason is None:
+                if (
+                    audio_arr.size == 0
+                    and not chunk.text
+                    and chunk.finish_reason is None
+                ):
                     continue
                 if audio_arr.size == 0:
                     audio_data = None

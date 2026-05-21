@@ -6,8 +6,8 @@ from __future__ import annotations
 import pytest
 
 from sglang_omni.models.ming_omni.pipeline.next_stage import (
-    AUDIO_STAGE,
     AGGREGATE_STAGE,
+    AUDIO_STAGE,
     DECODE_STAGE,
     IMAGE_STAGE,
     PREPROCESSING_STAGE,
@@ -43,7 +43,9 @@ def test_default_speech_pipeline_stays_non_streaming() -> None:
     assert thinker.stream_to == []
     assert thinker.factory_args == {"thinker_max_seq_len": 8192}
     assert talker.terminal is True
-    assert talker.factory == "sglang_omni.models.ming_omni.stages.create_talker_executor"
+    assert (
+        talker.factory == "sglang_omni.models.ming_omni.stages.create_talker_executor"
+    )
 
 
 def test_streaming_speech_pipeline_is_opt_in_and_v1_native() -> None:
@@ -87,8 +89,7 @@ def test_streaming_speech_pipeline_is_opt_in_and_v1_native() -> None:
         "enable_streaming_outputs": True,
     }
     assert decode.factory == (
-        "sglang_omni.models.ming_omni.stages."
-        "create_streaming_decode_scheduler"
+        "sglang_omni.models.ming_omni.stages." "create_streaming_decode_scheduler"
     )
     assert decode.terminal is True
     assert decode.can_accept_stream_before_payload is True
@@ -98,12 +99,10 @@ def test_streaming_speech_pipeline_is_opt_in_and_v1_native() -> None:
     assert talker_stream.terminal is True
     assert talker_stream.can_accept_stream_before_payload is True
     assert segmenter.factory == (
-        "sglang_omni.models.ming_omni.stages."
-        "create_streaming_segmenter_scheduler"
+        "sglang_omni.models.ming_omni.stages." "create_streaming_segmenter_scheduler"
     )
     assert talker_stream.factory == (
-        "sglang_omni.models.ming_omni.stages."
-        "create_streaming_talker_scheduler"
+        "sglang_omni.models.ming_omni.stages." "create_streaming_talker_scheduler"
     )
 
 

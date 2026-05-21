@@ -288,8 +288,7 @@ class MingStreamingSegmenterScheduler:
             ):
                 continue
             state_remaining_ms = max(
-                self._config.first_segment_max_wait_ms
-                - (now_ms - state.first_text_ms),
+                self._config.first_segment_max_wait_ms - (now_ms - state.first_text_ms),
                 0,
             )
             remaining_ms = (

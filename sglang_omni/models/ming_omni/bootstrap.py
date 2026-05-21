@@ -112,6 +112,8 @@ def make_ming_thinker_stream_output_builder(
     eos_token_id: int | None = None,
 ):
     """Build targeted stream chunks from Ming thinker per-token outputs."""
+    import torch
+
     from sglang_omni.models.ming_omni.components.streaming_text import (
         text_to_uint8_tensor,
     )
@@ -122,8 +124,6 @@ def make_ming_thinker_stream_output_builder(
         SEGMENTER_STAGE,
     )
     from sglang_omni.scheduling.messages import OutgoingMessage
-
-    import torch
 
     states: OrderedDict[str, PipelineState] = OrderedDict()
 

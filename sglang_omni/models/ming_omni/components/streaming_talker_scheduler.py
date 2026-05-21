@@ -17,9 +17,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from sglang_omni.models.ming_omni.components.streaming_text import (
-    uint8_tensor_to_text,
-)
+from sglang_omni.models.ming_omni.components.streaming_text import uint8_tensor_to_text
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.messages import IncomingMessage, OutgoingMessage
@@ -347,8 +345,9 @@ class MingTalkerStreamScheduler:
                                 "sample_rate": self._resolve_sample_rate(),
                                 "segment_id": segment_id,
                             },
-                        )
+                        ),
                     )
+
     def _finalize(
         self,
         request_id: str,
@@ -441,7 +440,9 @@ class MingTalkerStreamScheduler:
         except (TypeError, ValueError):
             return kwargs, True
         params = signature.parameters
-        if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()):
+        if any(
+            param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()
+        ):
             return kwargs, True
         return {key: value for key, value in kwargs.items() if key in params}, False
 

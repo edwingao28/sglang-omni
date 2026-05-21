@@ -294,9 +294,9 @@ async def _chat_stream(
                         completion_tokens=chunk.usage.completion_tokens or 0,
                         total_tokens=chunk.usage.total_tokens or 0,
                     )
-                has_payload = (
-                    bool(chunk.text) and "text" in requested_modalities
-                ) or (chunk.audio_b64 is not None and "audio" in requested_modalities)
+                has_payload = (bool(chunk.text) and "text" in requested_modalities) or (
+                    chunk.audio_b64 is not None and "audio" in requested_modalities
+                )
                 if not has_payload:
                     continue
 
@@ -393,9 +393,7 @@ def _add_streaming_diagnostics(
     if chunk_stage_times:
         stage_times_ms.update(_canonical_stage_times(chunk_stage_times))
     if getattr(chunk, "segmenter_first_emit_ms", None) is not None:
-        stage_times_ms.setdefault(
-            "segmenter_first_emit", chunk.segmenter_first_emit_ms
-        )
+        stage_times_ms.setdefault("segmenter_first_emit", chunk.segmenter_first_emit_ms)
     for key, value in observed_stage_times_ms.items():
         stage_times_ms.setdefault(key, value)
     if stage_times_ms:

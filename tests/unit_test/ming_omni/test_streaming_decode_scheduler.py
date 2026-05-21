@@ -156,7 +156,9 @@ def test_stream_done_before_new_request_is_latched_until_payload_arrives() -> No
         thread.join(timeout=1)
 
 
-def test_streaming_final_result_omits_duplicate_text_but_keeps_events_and_modality() -> None:
+def test_streaming_final_result_omits_duplicate_text_but_keeps_events_and_modality() -> (
+    None
+):
     scheduler = _scheduler()
     thread = _start_scheduler(scheduler)
     try:
@@ -185,7 +187,9 @@ def test_streaming_final_result_omits_duplicate_text_but_keeps_events_and_modali
         thread.join(timeout=1)
 
 
-def test_non_streaming_request_emits_no_streams_and_final_result_includes_full_text() -> None:
+def test_non_streaming_request_emits_no_streams_and_final_result_includes_full_text() -> (
+    None
+):
     scheduler = _scheduler()
     thread = _start_scheduler(scheduler)
     try:
@@ -259,7 +263,9 @@ def test_malformed_chunk_emits_error_and_scheduler_keeps_running() -> None:
         thread.join(timeout=1)
 
 
-def test_factory_uses_ming_tokenizer_and_returns_scheduler_contract(monkeypatch) -> None:
+def test_factory_uses_ming_tokenizer_and_returns_scheduler_contract(
+    monkeypatch,
+) -> None:
     from sglang_omni.models.ming_omni import stages
 
     tokenizer = FakeTokenizer()

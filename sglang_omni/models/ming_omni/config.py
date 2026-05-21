@@ -15,8 +15,8 @@ from sglang_omni.models.ming_omni.pipeline.next_stage import (
     IMAGE_STAGE,
     PREPROCESSING_STAGE,
     SEGMENTER_STAGE,
-    TALKER_STREAM_STAGE,
     TALKER_STAGE,
+    TALKER_STREAM_STAGE,
     THINKER_STAGE,
 )
 

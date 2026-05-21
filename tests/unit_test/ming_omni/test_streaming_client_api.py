@@ -92,7 +92,9 @@ async def test_completion_stream_uses_chunk_sample_rate_and_skips_empty_audio(
     )
 
     class StreamingClient(Client):
-        async def generate(self, request: GenerateRequest, request_id: str | None = None):
+        async def generate(
+            self, request: GenerateRequest, request_id: str | None = None
+        ):
             yield GenerateChunk(request_id=request_id or "req-1", text="hello")
             yield GenerateChunk(
                 request_id=request_id or "req-1",
@@ -119,7 +121,10 @@ async def test_completion_stream_uses_chunk_sample_rate_and_skips_empty_audio(
         )
     ]
 
-    assert [(chunk.text, chunk.modality, chunk.audio_b64, chunk.finish_reason) for chunk in chunks] == [
+    assert [
+        (chunk.text, chunk.modality, chunk.audio_b64, chunk.finish_reason)
+        for chunk in chunks
+    ] == [
         ("hello", "text", None, None),
         ("", "audio", "encoded-22050-wav", None),
         ("", "text", None, "stop"),
@@ -131,7 +136,9 @@ async def test_completion_stream_uses_chunk_sample_rate_and_skips_empty_audio(
 @pytest.mark.asyncio
 async def test_completion_real_wav_uses_chunk_sample_rate() -> None:
     class NonStreamingClient(Client):
-        async def generate(self, request: GenerateRequest, request_id: str | None = None):
+        async def generate(
+            self, request: GenerateRequest, request_id: str | None = None
+        ):
             del request
             yield GenerateChunk(
                 request_id=request_id or "req-1",
@@ -159,7 +166,9 @@ async def test_completion_real_wav_uses_chunk_sample_rate() -> None:
 @pytest.mark.asyncio
 async def test_completion_stream_real_wav_uses_chunk_sample_rate() -> None:
     class StreamingClient(Client):
-        async def generate(self, request: GenerateRequest, request_id: str | None = None):
+        async def generate(
+            self, request: GenerateRequest, request_id: str | None = None
+        ):
             del request
             yield GenerateChunk(
                 request_id=request_id or "req-1",
