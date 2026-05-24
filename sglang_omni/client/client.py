@@ -89,6 +89,7 @@ class Client:
         audio_chunks: list[Any] = []
         last_chunk: GenerateChunk | None = None
         finish_reason: str | None = None
+        sample_rate: int | None = None
 
         async for chunk in self.generate(request, request_id=request_id):
             last_chunk = chunk
@@ -96,6 +97,8 @@ class Client:
                 text_parts.append(chunk.text)
             if chunk.audio_data is not None:
                 audio_chunks.append(chunk.audio_data)
+            if chunk.sample_rate is not None:
+                sample_rate = chunk.sample_rate
             if chunk.finish_reason is not None:
                 finish_reason = chunk.finish_reason
 
@@ -110,7 +113,10 @@ class Client:
                 combined = audio_chunks[0]
             else:
                 combined = np.concatenate([to_numpy(c) for c in audio_chunks])
-            audio_b64 = audio_to_base64(combined, output_format=audio_format)
+            encode_kwargs: dict[str, Any] = {"output_format": audio_format}
+            if sample_rate is not None:
+                encode_kwargs["sample_rate"] = sample_rate
+            audio_b64 = audio_to_base64(combined, **encode_kwargs)
             audio = CompletionAudio(
                 id=f"audio-{request_id}",
                 data=audio_b64,
