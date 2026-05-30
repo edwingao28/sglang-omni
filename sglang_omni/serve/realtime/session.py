@@ -335,6 +335,109 @@ class RealtimeSession:
             )
         )
 
+    async def _send_response_cancelled(
+        self,
+        *,
+        response_id: str,
+        item_id: str,
+        wants_audio: bool,
+        transcript: str,
+        usage: dict[str, Any] | None,
+    ) -> None:
+        if wants_audio:
+            await self._send_audio_response_done(
+                response_id=response_id,
+                item_id=item_id,
+                transcript=transcript,
+            )
+            output_content = [{"type": "audio", "transcript": transcript}]
+        else:
+            await self.send(
+                make_event(
+                    "response.text.done",
+                    response_id=response_id,
+                    item_id=item_id,
+                    output_index=0,
+                    content_index=0,
+                    text=transcript,
+                )
+            )
+            output_content = [{"type": "text", "text": transcript}]
+
+        await self.send(
+            make_event(
+                "response.done",
+                response={
+                    "id": response_id,
+                    "object": "realtime.response",
+                    "status": "cancelled",
+                    "status_details": {"reason": "client_cancelled"},
+                    "output": [
+                        {
+                            "id": item_id,
+                            "object": "realtime.item",
+                            "type": "message",
+                            "role": "assistant",
+                            "content": output_content,
+                        }
+                    ],
+                    "usage": usage,
+                },
+            )
+        )
+
+    async def _send_response_completed(
+        self,
+        *,
+        response_id: str,
+        item_id: str,
+        wants_audio: bool,
+        transcript: str,
+        finish_reason: str,
+        usage: dict[str, Any] | None,
+    ) -> None:
+        if wants_audio:
+            await self._send_audio_response_done(
+                response_id=response_id,
+                item_id=item_id,
+                transcript=transcript,
+            )
+            output_content = [{"type": "audio", "transcript": transcript}]
+        else:
+            await self.send(
+                make_event(
+                    "response.text.done",
+                    response_id=response_id,
+                    item_id=item_id,
+                    output_index=0,
+                    content_index=0,
+                    text=transcript,
+                )
+            )
+            output_content = [{"type": "text", "text": transcript}]
+
+        await self.send(
+            make_event(
+                "response.done",
+                response={
+                    "id": response_id,
+                    "object": "realtime.response",
+                    "status": "completed",
+                    "status_details": {"reason": finish_reason},
+                    "output": [
+                        {
+                            "id": item_id,
+                            "object": "realtime.item",
+                            "type": "message",
+                            "role": "assistant",
+                            "content": output_content,
+                        }
+                    ],
+                    "usage": usage,
+                },
+            )
+        )
+
     async def run_response(self, audio_payload: str) -> str:
         """Emit Realtime response events for text-only or audio-output sessions."""
         response_id = new_id("resp")
@@ -345,6 +448,7 @@ class RealtimeSession:
         text_acc: list[str] = []
         finish_reason = "stop"
         usage: dict[str, Any] | None = None
+        terminalization_started = False
 
         try:
             await self.send(
@@ -417,48 +521,34 @@ class RealtimeSession:
                     break
 
             response_text = "".join(text_acc)
-            if wants_audio:
-                await self._send_audio_response_done(
+            terminalization_started = True
+            terminal_task = asyncio.create_task(
+                self._send_response_completed(
                     response_id=response_id,
                     item_id=resp_item_id,
+                    wants_audio=wants_audio,
                     transcript=response_text,
-                )
-                output_content = [{"type": "audio", "transcript": response_text}]
-            else:
-                await self.send(
-                    make_event(
-                        "response.text.done",
-                        response_id=response_id,
-                        item_id=resp_item_id,
-                        output_index=0,
-                        content_index=0,
-                        text=response_text,
-                    )
-                )
-                output_content = [{"type": "text", "text": response_text}]
-
-            await self.send(
-                make_event(
-                    "response.done",
-                    response={
-                        "id": response_id,
-                        "object": "realtime.response",
-                        "status": "completed",
-                        "status_details": {"reason": finish_reason},
-                        "output": [
-                            {
-                                "id": resp_item_id,
-                                "object": "realtime.item",
-                                "type": "message",
-                                "role": "assistant",
-                                "content": output_content,
-                            }
-                        ],
-                        "usage": usage,
-                    },
+                    finish_reason=finish_reason,
+                    usage=usage,
                 )
             )
+            try:
+                await asyncio.shield(terminal_task)
+            except asyncio.CancelledError:
+                await asyncio.shield(terminal_task)
+                raise
             return response_text
+        except asyncio.CancelledError:
+            if not terminalization_started:
+                response_text = "".join(text_acc)
+                await self._send_response_cancelled(
+                    response_id=response_id,
+                    item_id=resp_item_id,
+                    wants_audio=wants_audio,
+                    transcript=response_text,
+                    usage=usage,
+                )
+            raise
         finally:
             self.active_request_id = None
 

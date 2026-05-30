@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -10,7 +11,7 @@ import pytest
 from starlette.websockets import WebSocketState
 
 from sglang_omni.client import CompletionStreamChunk
-from sglang_omni.serve.realtime.events import SessionUpdate
+from sglang_omni.serve.realtime.events import ResponseCancel, SessionUpdate
 from sglang_omni.serve.realtime.session import RealtimeSession
 
 
@@ -26,6 +27,36 @@ class FakeWebSocket:
     async def close(self) -> None:
         self.application_state = WebSocketState.DISCONNECTED
         self.client_state = WebSocketState.DISCONNECTED
+
+
+class CancelOnCompletedResponseDoneWebSocket(FakeWebSocket):
+    async def send_text(self, data: str) -> None:
+        event = json.loads(data)
+        self.sent.append(event)
+        if (
+            event["type"] == "response.done"
+            and event["response"]["status"] == "completed"
+        ):
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel()
+            await asyncio.sleep(0)
+
+
+class CancelOuterTaskOnAudioDoneWebSocket(FakeWebSocket):
+    def __init__(self) -> None:
+        super().__init__()
+        self.outer_task: asyncio.Task | None = None
+        self.cancel_triggered = False
+
+    async def send_text(self, data: str) -> None:
+        event = json.loads(data)
+        self.sent.append(event)
+        if event["type"] == "response.output_audio.done" and not self.cancel_triggered:
+            assert self.outer_task is not None
+            self.cancel_triggered = True
+            self.outer_task.cancel()
+            await asyncio.sleep(0)
 
 
 class FakeRealtimeClient:
@@ -223,3 +254,149 @@ async def test_text_response_keeps_existing_text_event_names() -> None:
         "response.done",
     ]
     assert "response.output_audio.delta" not in event_types
+
+
+@pytest.mark.asyncio
+async def test_late_response_cancel_does_not_emit_cancelled_terminal_events() -> None:
+    client = FakeRealtimeClient(
+        [
+            CompletionStreamChunk(request_id="req", modality="text", text="Hi"),
+            CompletionStreamChunk(request_id="req", finish_reason="stop"),
+        ]
+    )
+    websocket = CancelOnCompletedResponseDoneWebSocket()
+    session = RealtimeSession(
+        websocket,
+        client=client,
+        model_name="qwen3-omni",
+        session_id="sess_test",
+    )
+
+    results = await asyncio.gather(
+        session.run_response("data:audio/wav;base64,AAAA"),
+        return_exceptions=True,
+    )
+
+    assert len(results) == 1
+    assert isinstance(results[0], asyncio.CancelledError)
+
+    event_types = _types(websocket.sent)
+    assert event_types == [
+        "response.created",
+        "response.text.delta",
+        "response.text.done",
+        "response.done",
+    ]
+
+    response_done_events = [
+        event for event in websocket.sent if event["type"] == "response.done"
+    ]
+    assert len(response_done_events) == 1
+    assert response_done_events[0]["response"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_audio_cancel_during_terminalization_completes_normal_terminal_events() -> None:
+    client = FakeRealtimeClient(
+        [
+            CompletionStreamChunk(request_id="req", modality="text", text="Hello"),
+            CompletionStreamChunk(request_id="req", modality="audio", audio_b64="AAEC"),
+            CompletionStreamChunk(request_id="req", finish_reason="stop"),
+        ]
+    )
+    websocket = CancelOuterTaskOnAudioDoneWebSocket()
+    session = RealtimeSession(
+        websocket,
+        client=client,
+        model_name="qwen3-omni",
+        session_id="sess_test",
+    )
+    session.session_object.modalities = ["audio"]
+
+    task = asyncio.create_task(session.run_response("data:audio/wav;base64,AAAA"))
+    websocket.outer_task = task
+    results = await asyncio.gather(task, return_exceptions=True)
+
+    assert websocket.cancel_triggered is True
+    assert len(results) == 1
+    assert isinstance(results[0], asyncio.CancelledError)
+
+    event_types = _types(websocket.sent)
+    assert event_types[-5:] == [
+        "response.output_audio.done",
+        "response.output_audio_transcript.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.done",
+    ]
+
+    response_done_events = [
+        event for event in websocket.sent if event["type"] == "response.done"
+    ]
+    assert len(response_done_events) == 1
+    assert response_done_events[0]["response"]["status"] == "completed"
+    assert not [
+        event
+        for event in response_done_events
+        if event["response"]["status"] == "cancelled"
+    ]
+
+
+class BlockingAudioClient(FakeRealtimeClient):
+    def __init__(self) -> None:
+        super().__init__([])
+        self.release = asyncio.Event()
+
+    async def completion_stream(
+        self,
+        request: Any,
+        *,
+        request_id: str,
+        audio_format: str = "wav",
+    ):
+        self.requests.append(request)
+        self.audio_formats.append(audio_format)
+        yield CompletionStreamChunk(
+            request_id=request_id, modality="audio", audio_b64="AAEC"
+        )
+        await self.release.wait()
+
+
+async def _wait_for_event(
+    websocket: FakeWebSocket,
+    event_type: str,
+    *,
+    limit: int = 100,
+) -> dict[str, Any]:
+    for _ in range(limit):
+        for event in websocket.sent:
+            if event["type"] == event_type:
+                return event
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"did not see {event_type}; saw {_types(websocket.sent)}")
+
+
+@pytest.mark.asyncio
+async def test_response_cancel_emits_cancelled_audio_terminal_events() -> None:
+    client = BlockingAudioClient()
+    session = _session(client)
+    session.session_object.modalities = ["audio"]
+
+    task = asyncio.create_task(session.run_response("data:audio/wav;base64,AAAA"))
+    session.active_task = task
+
+    await _wait_for_event(session.websocket, "response.output_audio.delta")
+    await session.handle_response_cancel(ResponseCancel(type="response.cancel"))
+    await asyncio.gather(task, return_exceptions=True)
+
+    event_types = _types(session.websocket.sent)
+    assert event_types[-5:] == [
+        "response.output_audio.done",
+        "response.output_audio_transcript.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.done",
+    ]
+    assert session.websocket.sent[-1]["type"] == "response.done"
+    assert session.websocket.sent[-1]["response"]["status"] == "cancelled"
+    assert client.aborted, "engine abort should be requested before task cancellation"
