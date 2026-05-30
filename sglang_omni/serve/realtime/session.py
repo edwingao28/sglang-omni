@@ -250,11 +250,101 @@ class RealtimeSession:
                 ConversationItem(role="assistant", text=response_text)
             )
 
+    async def _send_audio_response_start(
+        self,
+        *,
+        response_id: str,
+        item_id: str,
+    ) -> None:
+        item = {
+            "id": item_id,
+            "object": "realtime.item",
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+        }
+        await self.send(
+            make_event(
+                "response.output_item.added",
+                response_id=response_id,
+                output_index=0,
+                item=item,
+            )
+        )
+        await self.send(
+            make_event(
+                "response.content_part.added",
+                response_id=response_id,
+                item_id=item_id,
+                output_index=0,
+                content_index=0,
+                part={"type": "audio", "transcript": ""},
+            )
+        )
+
+    async def _send_audio_response_done(
+        self,
+        *,
+        response_id: str,
+        item_id: str,
+        transcript: str,
+    ) -> None:
+        content = {"type": "audio", "transcript": transcript}
+        item = {
+            "id": item_id,
+            "object": "realtime.item",
+            "type": "message",
+            "role": "assistant",
+            "content": [content],
+        }
+        await self.send(
+            make_event(
+                "response.output_audio.done",
+                response_id=response_id,
+                item_id=item_id,
+                output_index=0,
+                content_index=0,
+            )
+        )
+        await self.send(
+            make_event(
+                "response.output_audio_transcript.done",
+                response_id=response_id,
+                item_id=item_id,
+                output_index=0,
+                content_index=0,
+                transcript=transcript,
+            )
+        )
+        await self.send(
+            make_event(
+                "response.content_part.done",
+                response_id=response_id,
+                item_id=item_id,
+                output_index=0,
+                content_index=0,
+                part=content,
+            )
+        )
+        await self.send(
+            make_event(
+                "response.output_item.done",
+                response_id=response_id,
+                output_index=0,
+                item=item,
+            )
+        )
+
     async def run_response(self, audio_payload: str) -> str:
-        """Emit response.created → response.text.delta × N → text.done → done."""
+        """Emit Realtime response events for text-only or audio-output sessions."""
         response_id = new_id("resp")
         request_id = f"rt-{self.session_id}-{uuid.uuid4().hex}"
         self.active_request_id = request_id
+        wants_audio = self._wants_audio_output()
+        resp_item_id = new_id("item")
+        text_acc: list[str] = []
+        finish_reason = "stop"
+        usage: dict[str, Any] | None = None
 
         try:
             await self.send(
@@ -269,26 +359,54 @@ class RealtimeSession:
                 )
             )
 
-            resp_item_id = new_id("item")
-            text_acc: list[str] = []
-            finish_reason = "stop"
-            usage: dict[str, Any] | None = None
+            if wants_audio:
+                await self._send_audio_response_start(
+                    response_id=response_id,
+                    item_id=resp_item_id,
+                )
+
             async for chunk in self.client.completion_stream(
                 self.build_response_request(audio_payload),
                 request_id=request_id,
+                audio_format=self._client_audio_format() if wants_audio else "wav",
             ):
                 if chunk.modality == "text" and chunk.text:
                     text_acc.append(chunk.text)
+                    if wants_audio:
+                        await self.send(
+                            make_event(
+                                "response.output_audio_transcript.delta",
+                                response_id=response_id,
+                                item_id=resp_item_id,
+                                output_index=0,
+                                content_index=0,
+                                delta=chunk.text,
+                            )
+                        )
+                    else:
+                        await self.send(
+                            make_event(
+                                "response.text.delta",
+                                response_id=response_id,
+                                item_id=resp_item_id,
+                                output_index=0,
+                                content_index=0,
+                                delta=chunk.text,
+                            )
+                        )
+
+                if wants_audio and chunk.modality == "audio" and chunk.audio_b64:
                     await self.send(
                         make_event(
-                            "response.text.delta",
+                            "response.output_audio.delta",
                             response_id=response_id,
                             item_id=resp_item_id,
                             output_index=0,
                             content_index=0,
-                            delta=chunk.text,
+                            delta=chunk.audio_b64,
                         )
                     )
+
                 if chunk.finish_reason is not None:
                     finish_reason = chunk.finish_reason
                     usage = (
@@ -299,16 +417,26 @@ class RealtimeSession:
                     break
 
             response_text = "".join(text_acc)
-            await self.send(
-                make_event(
-                    "response.text.done",
+            if wants_audio:
+                await self._send_audio_response_done(
                     response_id=response_id,
                     item_id=resp_item_id,
-                    output_index=0,
-                    content_index=0,
-                    text=response_text,
+                    transcript=response_text,
                 )
-            )
+                output_content = [{"type": "audio", "transcript": response_text}]
+            else:
+                await self.send(
+                    make_event(
+                        "response.text.done",
+                        response_id=response_id,
+                        item_id=resp_item_id,
+                        output_index=0,
+                        content_index=0,
+                        text=response_text,
+                    )
+                )
+                output_content = [{"type": "text", "text": response_text}]
+
             await self.send(
                 make_event(
                     "response.done",
@@ -323,7 +451,7 @@ class RealtimeSession:
                                 "object": "realtime.item",
                                 "type": "message",
                                 "role": "assistant",
-                                "content": [{"type": "text", "text": response_text}],
+                                "content": output_content,
                             }
                         ],
                         "usage": usage,

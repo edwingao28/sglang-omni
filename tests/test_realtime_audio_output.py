@@ -131,3 +131,95 @@ async def test_text_only_session_with_voice_omits_audio_output_config() -> None:
     assert request.output_modalities == ["text"]
     assert "audio_config" not in request.metadata
     assert "speaker" not in request.extra_params
+
+
+def _types(events: list[dict[str, Any]]) -> list[str]:
+    return [event["type"] for event in events]
+
+
+@pytest.mark.asyncio
+async def test_audio_response_streams_output_audio_and_transcript_events() -> None:
+    client = FakeRealtimeClient(
+        [
+            CompletionStreamChunk(request_id="req", modality="text", text="Hello "),
+            CompletionStreamChunk(request_id="req", modality="audio", audio_b64="AAEC"),
+            CompletionStreamChunk(request_id="req", modality="text", text="world"),
+            CompletionStreamChunk(request_id="req", modality="audio", audio_b64="AwQF"),
+            CompletionStreamChunk(request_id="req", finish_reason="stop"),
+        ]
+    )
+    session = _session(client)
+    session.session_object.modalities = ["audio"]
+    session.session_object.output_audio_format = "pcm16"
+
+    response_text = await session.run_response("data:audio/wav;base64,AAAA")
+
+    assert response_text == "Hello world"
+    assert client.audio_formats == ["pcm"]
+    assert client.requests[0].output_modalities == ["text", "audio"]
+
+    events = session.websocket.sent
+    event_types = _types(events)
+
+    assert event_types == [
+        "response.created",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.output_audio_transcript.delta",
+        "response.output_audio.delta",
+        "response.output_audio_transcript.delta",
+        "response.output_audio.delta",
+        "response.output_audio.done",
+        "response.output_audio_transcript.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.done",
+    ]
+
+    audio_deltas = [
+        event["delta"]
+        for event in events
+        if event["type"] == "response.output_audio.delta"
+    ]
+    assert audio_deltas == ["AAEC", "AwQF"]
+
+    transcript_deltas = [
+        event["delta"]
+        for event in events
+        if event["type"] == "response.output_audio_transcript.delta"
+    ]
+    assert transcript_deltas == ["Hello ", "world"]
+
+    response_done = events[-1]["response"]
+    assert response_done["status"] == "completed"
+    assert response_done["output"][0]["content"] == [
+        {"type": "audio", "transcript": "Hello world"}
+    ]
+    assert "data" not in response_done["output"][0]["content"][0]
+
+
+@pytest.mark.asyncio
+async def test_text_response_keeps_existing_text_event_names() -> None:
+    client = FakeRealtimeClient(
+        [
+            CompletionStreamChunk(request_id="req", modality="text", text="Hi"),
+            CompletionStreamChunk(request_id="req", finish_reason="stop"),
+        ]
+    )
+    session = _session(client)
+    session.session_object.modalities = ["text"]
+
+    response_text = await session.run_response("data:audio/wav;base64,AAAA")
+
+    assert response_text == "Hi"
+    assert client.audio_formats == ["wav"]
+    assert client.requests[0].output_modalities == ["text"]
+
+    event_types = _types(session.websocket.sent)
+    assert event_types == [
+        "response.created",
+        "response.text.delta",
+        "response.text.done",
+        "response.done",
+    ]
+    assert "response.output_audio.delta" not in event_types
