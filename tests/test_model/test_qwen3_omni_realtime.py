@@ -282,9 +282,7 @@ async def test_vad_audio_can_emit_realtime_output_audio(
     assert "response.done" in types, types
 
     audio_events = [e for e in events if e["type"] == "response.output_audio.delta"]
-    audio_chunks = [
-        base64.b64decode(e["delta"], validate=True) for e in audio_events
-    ]
+    audio_chunks = [base64.b64decode(e["delta"], validate=True) for e in audio_events]
     for chunk in audio_chunks:
         assert chunk, "expected non-empty PCM audio output chunk"
         assert len(chunk) % 2 == 0, "PCM16 output chunks should have whole samples"

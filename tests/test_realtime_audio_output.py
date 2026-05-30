@@ -92,7 +92,9 @@ def _session(client: Any | None = None) -> RealtimeSession:
 
 
 @pytest.mark.asyncio
-async def test_session_update_accepts_audio_output_config_and_builds_audio_request() -> None:
+async def test_session_update_accepts_audio_output_config_and_builds_audio_request() -> (
+    None
+):
     session = _session()
 
     await session.handle_session_update(
@@ -296,7 +298,9 @@ async def test_late_response_cancel_does_not_emit_cancelled_terminal_events() ->
 
 
 @pytest.mark.asyncio
-async def test_audio_cancel_during_terminalization_completes_normal_terminal_events() -> None:
+async def test_audio_cancel_during_terminalization_completes_normal_terminal_events() -> (
+    None
+):
     client = FakeRealtimeClient(
         [
             CompletionStreamChunk(request_id="req", modality="text", text="Hello"),
