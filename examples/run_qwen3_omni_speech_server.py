@@ -161,6 +161,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--model-name", type=str, default="qwen3-omni")
+    parser.add_argument(
+        "--enable-realtime",
+        action="store_true",
+        help="Mount the WebSocket /v1/realtime endpoint.",
+    )
 
     return parser.parse_args()
 
@@ -411,6 +416,7 @@ def _launch_speech_server(args: argparse.Namespace) -> None:
         host=args.host,
         port=args.port,
         model_name=args.model_name,
+        enable_realtime=args.enable_realtime,
     )
 
 

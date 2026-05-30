@@ -72,6 +72,27 @@ def server_process(tmp_path_factory: pytest.TempPathFactory):
     stop_server(proc)
 
 
+@pytest.fixture(scope="module")
+def speech_server_process(tmp_path_factory: pytest.TempPathFactory):
+    port = find_available_port()
+    log_file = server_log_file(tmp_path_factory, "realtime_speech_logs")
+    cmd = [
+        sys.executable,
+        "examples/run_qwen3_omni_speech_server.py",
+        "--model-path",
+        MODEL_PATH,
+        "--model-name",
+        MODEL_NAME,
+        "--enable-realtime",
+        "--port",
+        str(port),
+    ]
+    proc = start_server_from_cmd(cmd, log_file, port, timeout=STARTUP_TIMEOUT)
+    proc.port = port  # type: ignore[attr-defined]
+    yield proc
+    stop_server(proc)
+
+
 def _ws_url(port: int) -> str:
     return f"ws://localhost:{port}/v1/realtime"
 
@@ -91,6 +112,21 @@ def _wav_with_silence_trailer() -> bytes:
 
 async def _recv_event(ws) -> dict:
     return json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
+
+
+async def _send_session_update(ws, session: dict) -> dict:
+    await ws.send(
+        json.dumps(
+            {
+                "type": "session.update",
+                "session": session,
+            }
+        )
+    )
+    while True:
+        evt = await _recv_event(ws)
+        if evt["type"] == "session.updated":
+            return evt
 
 
 async def _recv_until(ws, terminal_type: str, *, limit: int = 300) -> list[dict]:
@@ -137,6 +173,7 @@ async def test_vad_audio_emits_response_then_transcription(
     with disable_proxy():
         async with websockets.connect(_ws_url(port)) as ws:
             await _recv_event(ws)  # session.created
+            await _send_session_update(ws, {"modalities": ["text"]})
             await _stream_audio(ws, pcm)
             # transcription.completed is the last event in the per-turn sequence.
             events = await _recv_until(
@@ -194,6 +231,7 @@ async def test_disconnect_during_response_keeps_server_healthy(
     with disable_proxy():
         async with websockets.connect(_ws_url(port)) as ws:
             await _recv_event(ws)  # session.created
+            await _send_session_update(ws, {"modalities": ["text"]})
             await _stream_audio(ws, pcm)
             # Take a few events to confirm the response task is alive on the
             # server, then close abruptly without draining the rest.
@@ -207,3 +245,55 @@ async def test_disconnect_during_response_keeps_server_healthy(
         async with websockets.connect(_ws_url(port)) as ws:
             evt = await _recv_event(ws)
             assert evt["type"] == "session.created", evt
+
+
+@pytest.mark.benchmark
+@pytest.mark.asyncio
+async def test_vad_audio_can_emit_realtime_output_audio(
+    speech_server_process: subprocess.Popen,
+) -> None:
+    """Audio output mode emits raw PCM deltas plus output transcript events."""
+    port: int = speech_server_process.port  # type: ignore[attr-defined]
+    pcm = _wav_with_silence_trailer()
+
+    with disable_proxy():
+        async with websockets.connect(_ws_url(port)) as ws:
+            await _recv_event(ws)  # session.created
+            await _send_session_update(
+                ws,
+                {
+                    "modalities": ["audio"],
+                    "output_audio_format": "pcm16",
+                },
+            )
+            await _stream_audio(ws, pcm)
+            events = await _recv_until(
+                ws, "conversation.item.input_audio_transcription.completed"
+            )
+
+    types = [e["type"] for e in events]
+    assert "response.created" in types, types
+    assert "response.output_item.added" in types, types
+    assert "response.content_part.added" in types, types
+    assert "response.output_audio.delta" in types, types
+    assert "response.output_audio.done" in types, types
+    assert "response.output_audio_transcript.delta" in types, types
+    assert "response.output_audio_transcript.done" in types, types
+    assert "response.done" in types, types
+
+    audio_events = [e for e in events if e["type"] == "response.output_audio.delta"]
+    audio_chunks = [
+        base64.b64decode(e["delta"], validate=True) for e in audio_events
+    ]
+    for chunk in audio_chunks:
+        assert chunk, "expected non-empty PCM audio output chunk"
+        assert len(chunk) % 2 == 0, "PCM16 output chunks should have whole samples"
+        assert not chunk.startswith(b"RIFF"), "Realtime audio deltas must be raw PCM"
+    audio_bytes = b"".join(audio_chunks)
+    assert audio_bytes, "expected non-empty PCM audio output"
+
+    response_done = next(e for e in events if e["type"] == "response.done")
+    content = response_done["response"]["output"][0]["content"][0]
+    assert content["type"] == "audio"
+    assert content.get("transcript", "").strip()
+    assert "data" not in content

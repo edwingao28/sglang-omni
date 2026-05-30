@@ -74,6 +74,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         host="0.0.0.0",
         port=8000,
         model_name="qwen3-omni",
+        enable_realtime=False,
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -149,6 +150,14 @@ def test_partial_start_updates_talker_factory_args(mock_launch_server):
 
     assert talker.factory_args["enable_partial_start"] is True
     assert talker.factory_args["partial_start_min_chunks"] == 7
+
+
+def test_speech_server_forwards_enable_realtime(mock_launch_server):
+    args = _make_args(enable_realtime=True)
+
+    _launch_speech_server(args)
+
+    assert mock_launch_server.call_args.kwargs["enable_realtime"] is True
 
 
 def test_partial_start_defaults_on(mock_launch_server):
