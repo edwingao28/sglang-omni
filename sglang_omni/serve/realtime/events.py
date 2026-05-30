@@ -11,6 +11,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+AudioFormat = Literal["pcm16", "g711_ulaw", "g711_alaw"]
+
 
 # Forward compatibility for future event types.
 class EventBase(BaseModel):
@@ -38,7 +40,9 @@ class SessionConfig(EventBase):
 
     modalities: list[str] | None = None
     instructions: str | None = None
-    input_audio_format: Literal["pcm16", "g711_ulaw", "g711_alaw"] | None = None
+    input_audio_format: AudioFormat | None = None
+    output_audio_format: AudioFormat | None = None
+    voice: str | None = None
     turn_detection: TurnDetection | None = None
     temperature: float | None = None
     max_response_output_tokens: int | str | None = None
@@ -50,7 +54,9 @@ class SessionObject(EventBase):
     model: str
     modalities: list[str] = Field(default_factory=lambda: ["text"])
     instructions: str = ""
-    input_audio_format: str = "pcm16"
+    input_audio_format: AudioFormat = "pcm16"
+    output_audio_format: AudioFormat = "pcm16"
+    voice: str | None = None
     turn_detection: TurnDetection | None = None
     temperature: float = 0.8
     max_response_output_tokens: int | str = "inf"

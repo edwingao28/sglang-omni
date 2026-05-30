@@ -32,6 +32,8 @@ DEFAULT_INSTRUCTIONS = (
     "You are a helpful realtime voice assistant. Respond conversationally."
 )
 
+_REALTIME_TO_CLIENT_AUDIO_FORMAT = {"pcm16": "pcm"}
+
 # Hardcoded — transcription must be verbatim regardless of session instructions.
 _TRANSCRIPTION_PROMPT = (
     "You are a speech-to-text engine. Transcribe the user's spoken audio "
@@ -146,7 +148,12 @@ class RealtimeSession:
         candidate = SessionObject.model_validate(
             self.session_object.model_dump() | update
         )
-        assert candidate.input_audio_format == "pcm16", "Only pcm16 is supported"
+        assert (
+            candidate.input_audio_format == "pcm16"
+        ), "Only pcm16 input audio is supported"
+        assert (
+            candidate.output_audio_format == "pcm16"
+        ), "Only pcm16 output audio is supported"
         self.session_object = candidate
         await self.send(
             make_event(
@@ -370,6 +377,36 @@ class RealtimeSession:
             max_new_tokens=max_tokens if isinstance(max_tokens, int) else None,
         )
 
+    def _wants_audio_output(self) -> bool:
+        return "audio" in (self.session_object.modalities or [])
+
+    def _client_audio_format(self) -> str:
+        try:
+            return _REALTIME_TO_CLIENT_AUDIO_FORMAT[
+                self.session_object.output_audio_format
+            ]
+        except KeyError as exc:
+            raise AssertionError(
+                f"Unsupported output audio format: "
+                f"{self.session_object.output_audio_format}"
+            ) from exc
+
+    def _response_output_modalities(self) -> list[str]:
+        if self._wants_audio_output():
+            return ["text", "audio"]
+        return ["text"]
+
+    def _response_metadata(self, audio_payload: str) -> dict[str, Any]:
+        metadata: dict[str, Any] = {"audios": [audio_payload]}
+        if self._wants_audio_output() and self.session_object.voice:
+            metadata["audio_config"] = {"voice": self.session_object.voice}
+        return metadata
+
+    def _response_extra_params(self) -> dict[str, Any]:
+        if self._wants_audio_output() and self.session_object.voice:
+            return {"speaker": self.session_object.voice}
+        return {}
+
     def build_response_request(self, audio_payload: str) -> GenerateRequest:
         """Response pass: session instructions + conversation history + current audio.
 
@@ -397,8 +434,9 @@ class RealtimeSession:
             messages=messages,
             sampling=self._sampling(),
             stream=True,
-            output_modalities=["text"],
-            metadata={"audios": [audio_payload]},
+            output_modalities=self._response_output_modalities(),
+            extra_params=self._response_extra_params(),
+            metadata=self._response_metadata(audio_payload),
         )
 
     def build_transcription_request(self, audio_payload: str) -> GenerateRequest:
