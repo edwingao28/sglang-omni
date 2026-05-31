@@ -206,6 +206,10 @@ class CreateSpeechRequest(BaseModel):
     # Per-stage overrides (sglang-omni specific)
     stage_params: dict[str, dict[str, Any]] | None = None
 
+    # Long-form synthesis: split input into reliable-window chunks, synthesize
+    # each sequentially, and concatenate the audio. ``<= 0`` disables chunking.
+    chunk_max_chars: int = 200
+
 
 # ---------------------------------------------------------------------------
 # Model listing

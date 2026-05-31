@@ -18,8 +18,10 @@ import json
 import logging
 import time
 import uuid
+from dataclasses import replace
 from typing import Any
 
+import numpy as np
 from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -37,6 +39,7 @@ from sglang_omni.client.audio import (
     encode_audio,
     to_numpy,
 )
+from sglang_omni.models.higgs_tts.text_chunker import chunk_text
 from sglang_omni.serve.protocol import (
     ChatCompletionAudio,
     ChatCompletionChoice,
@@ -495,11 +498,13 @@ def _register_speech(app: FastAPI) -> None:
         request_id = f"speech-{uuid.uuid4()}"
 
         gen_req = build_speech_generate_request(req, default_model)
+        chunks = chunk_text(req.input, req.chunk_max_chars)
         if req.stream:
             return StreamingResponse(
                 _speech_stream(
                     client=client,
                     gen_req=gen_req,
+                    chunks=chunks,
                     request_id=request_id,
                     response_format=req.response_format,
                     speed=req.speed,
@@ -507,89 +512,192 @@ def _register_speech(app: FastAPI) -> None:
                 media_type="text/event-stream",
             )
 
-        try:
-            result = await client.speech(
-                gen_req,
-                request_id=request_id,
-                response_format=req.response_format,
-                speed=req.speed,
-            )
-        except ClientError as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-        except Exception as exc:
-            logger.exception("Error generating speech for request %s", request_id)
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if len(chunks) == 1:
+            try:
+                result = await client.speech(
+                    gen_req,
+                    request_id=request_id,
+                    response_format=req.response_format,
+                    speed=req.speed,
+                )
+            except ClientError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+            except Exception as exc:
+                logger.exception("Error generating speech for request %s", request_id)
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+            audio_bytes = result.audio_bytes
+            mime_type = result.mime_type
+            actual_format = result.format
+            usage = result.usage
+        else:
+            try:
+                audio, sample_rate, usage = await _synthesize_chunks(
+                    client, gen_req, chunks, request_id
+                )
+            except ClientError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+            except Exception as exc:
+                logger.exception("Error generating speech for request %s", request_id)
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+            encode_kwargs: dict[str, Any] = {
+                "response_format": req.response_format,
+                "speed": req.speed,
+            }
+            if sample_rate is not None:
+                encode_kwargs["sample_rate"] = sample_rate
+            audio_bytes, mime_type = encode_audio(audio, **encode_kwargs)
+            actual_format = MIME_TO_FORMAT.get(mime_type, req.response_format)
 
         headers = {
-            "Content-Disposition": f'attachment; filename="speech.{result.format}"',
+            "Content-Disposition": f'attachment; filename="speech.{actual_format}"',
         }
-        if result.usage is not None:
-            if result.usage.prompt_tokens is not None:
-                headers["X-Prompt-Tokens"] = str(result.usage.prompt_tokens)
-            if result.usage.completion_tokens is not None:
-                headers["X-Completion-Tokens"] = str(result.usage.completion_tokens)
-            if result.usage.engine_time_s is not None:
-                headers["X-Engine-Time"] = str(result.usage.engine_time_s)
+        if usage is not None:
+            if usage.prompt_tokens is not None:
+                headers["X-Prompt-Tokens"] = str(usage.prompt_tokens)
+            if usage.completion_tokens is not None:
+                headers["X-Completion-Tokens"] = str(usage.completion_tokens)
+            if usage.engine_time_s is not None:
+                headers["X-Engine-Time"] = str(usage.engine_time_s)
 
         return Response(
-            content=result.audio_bytes,
-            media_type=result.mime_type,
+            content=audio_bytes,
+            media_type=mime_type,
             headers=headers,
         )
+
+
+def _with_chunk_text(gen_req: GenerateRequest, text: str) -> GenerateRequest:
+    """Clone ``gen_req`` with its input text replaced by ``text``.
+
+    Preserves every other field (sampling, references, metadata) so each
+    chunk shares the same voice via the existing reference caches.
+    """
+    if isinstance(gen_req.prompt, dict):
+        prompt: Any = {**gen_req.prompt, "text": text}
+    else:
+        prompt = text
+    return replace(gen_req, prompt=prompt)
+
+
+async def _synthesize_chunks(
+    client: Client,
+    gen_req: GenerateRequest,
+    chunks: list[str],
+    request_id: str,
+) -> tuple[np.ndarray, int | None, Any]:
+    """Synthesize each text chunk sequentially and crossfade-concatenate PCM.
+
+    Returns the joined float audio, the sample rate, and the usage of the
+    final chunk.
+    """
+    audio_parts: list[np.ndarray] = []
+    sample_rate: int | None = None
+    last_usage: Any = None
+
+    for index, text in enumerate(chunks):
+        chunk_req = replace(_with_chunk_text(gen_req, text), stream=False)
+        chunk_audio: list[Any] = []
+        async for chunk in client.generate(
+            chunk_req, request_id=f"{request_id}-{index}"
+        ):
+            if chunk.audio_data is not None:
+                chunk_audio.append(chunk.audio_data)
+            if chunk.sample_rate is not None:
+                sample_rate = chunk.sample_rate
+            if chunk.usage is not None:
+                last_usage = chunk.usage
+        if chunk_audio:
+            audio_parts.append(
+                np.concatenate([_as_mono(c) for c in chunk_audio])
+            )
+
+    if not audio_parts:
+        raise ClientError("No audio output generated from the pipeline.")
+
+    audio = audio_parts[0]
+    for part in audio_parts[1:]:
+        audio = _crossfade_concat(audio, part, sample_rate or DEFAULT_SAMPLE_RATE)
+    return audio, sample_rate, last_usage
+
+
+def _as_mono(audio_data: Any) -> np.ndarray:
+    audio = to_numpy(audio_data)
+    if audio.ndim > 1:
+        audio = audio.squeeze()
+    return np.ascontiguousarray(audio, dtype=np.float32)
+
+
+def _crossfade_concat(
+    left: np.ndarray, right: np.ndarray, sample_rate: int
+) -> np.ndarray:
+    """Join two PCM segments with a short linear crossfade at the boundary."""
+    fade = min(int(sample_rate * 0.008), left.shape[-1], right.shape[-1])
+    if fade <= 0:
+        return np.concatenate([left, right])
+    ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+    blended = left[-fade:] * (1.0 - ramp) + right[:fade] * ramp
+    return np.concatenate([left[:-fade], blended, right[fade:]])
 
 
 async def _speech_stream(
     client: Client,
     gen_req: GenerateRequest,
+    chunks: list[str],
     request_id: str,
     response_format: str,
     speed: float,
 ):
     """Streaming speech generator (yields SSE events with audio chunks)."""
     chunk_index = 0
-    emitted_samples = 0
     finish_reason: str | None = None
     usage: dict | None = None
 
-    async for chunk in client.generate(gen_req, request_id=request_id):
-        if chunk.finish_reason is not None:
-            finish_reason = chunk.finish_reason
-            if chunk.usage is not None:
-                usage = chunk.usage.to_dict()
+    for sub_index, text in enumerate(chunks):
+        chunk_req = _with_chunk_text(gen_req, text)
+        emitted_samples = 0
+        async for chunk in client.generate(
+            chunk_req, request_id=f"{request_id}-{sub_index}"
+        ):
+            if chunk.finish_reason is not None:
+                finish_reason = chunk.finish_reason
+                if chunk.usage is not None:
+                    usage = chunk.usage.to_dict()
 
-        if chunk.audio_data is None:
-            continue
+            if chunk.audio_data is None:
+                continue
 
-        sample_rate = chunk.sample_rate or DEFAULT_SAMPLE_RATE
-        audio_data, emitted_samples = _select_speech_audio_delta(
-            chunk.audio_data,
-            emitted_samples=emitted_samples,
-            is_terminal=chunk.finish_reason is not None,
-        )
-        if audio_data is None:
-            continue
+            sample_rate = chunk.sample_rate or DEFAULT_SAMPLE_RATE
+            audio_data, emitted_samples = _select_speech_audio_delta(
+                chunk.audio_data,
+                emitted_samples=emitted_samples,
+                is_terminal=chunk.finish_reason is not None,
+            )
+            if audio_data is None:
+                continue
 
-        audio_bytes, mime_type = encode_audio(
-            audio_data,
-            response_format=response_format,
-            sample_rate=sample_rate,
-            speed=speed,
-        )
-        actual_format = MIME_TO_FORMAT.get(mime_type, response_format)
-        payload = {
-            "id": f"speech-{request_id}",
-            "object": "audio.speech.chunk",
-            "index": chunk_index,
-            "audio": {
-                "data": base64.b64encode(audio_bytes).decode("ascii"),
-                "format": actual_format,
-                "mime_type": mime_type,
-                "sample_rate": sample_rate,
-            },
-            "finish_reason": None,
-        }
-        yield f"data: {json.dumps(payload)}\n\n"
-        chunk_index += 1
+            audio_bytes, mime_type = encode_audio(
+                audio_data,
+                response_format=response_format,
+                sample_rate=sample_rate,
+                speed=speed,
+            )
+            actual_format = MIME_TO_FORMAT.get(mime_type, response_format)
+            payload = {
+                "id": f"speech-{request_id}",
+                "object": "audio.speech.chunk",
+                "index": chunk_index,
+                "audio": {
+                    "data": base64.b64encode(audio_bytes).decode("ascii"),
+                    "format": actual_format,
+                    "mime_type": mime_type,
+                    "sample_rate": sample_rate,
+                },
+                "finish_reason": None,
+            }
+            yield f"data: {json.dumps(payload)}\n\n"
+            chunk_index += 1
 
     final_payload = {
         "id": f"speech-{request_id}",

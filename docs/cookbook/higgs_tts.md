@@ -436,6 +436,22 @@ resp = requests.post(
 | `top_p` | float | `null` | Top-p sampling |
 | `top_k` | int | `null` | Top-k sampling |
 | `seed` | int | `null` | Random seed for reproducibility |
+| `chunk_max_chars` | int | `200` | Long-form chunk size; see below. Set `<= 0` to disable |
+
+
+### Long-form synthesis (automatic chunking)
+
+The Higgs autoregressive decoder loses text-audio alignment on long input and
+emits end-of-chunk early (or loops the middle of repetitive text), so very long
+prompts collapse to a few seconds of audio. To keep each synthesized span inside
+the reliable alignment window, the server automatically splits the `input` into
+sentence/clause chunks of at most `chunk_max_chars` characters (default `200`),
+synthesizes each chunk sequentially sharing the same voice/reference, and
+concatenates the audio with a short crossfade at each boundary. This mirrors
+boson-ai's `word_sentence` chunking.
+
+Short prompts (`len(input) <= chunk_max_chars`) take the single-request path
+unchanged. Set `chunk_max_chars` to `0` to disable chunking entirely.
 
 
 ### Throughput

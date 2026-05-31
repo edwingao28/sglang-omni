@@ -9,6 +9,7 @@ import torch
 
 from sglang_omni.models.higgs_tts import stages
 from sglang_omni.models.higgs_tts.config import HiggsTtsPipelineConfig
+from sglang_omni.models.higgs_tts.text_chunker import chunk_text
 from sglang_omni.models.higgs_tts.model_runner import HiggsTTSModelRunner
 from sglang_omni.models.higgs_tts.payload_types import HiggsTtsState
 from sglang_omni.models.higgs_tts.utils import EOC_ID, apply_delay_pattern
@@ -17,6 +18,22 @@ from sglang_omni.models.higgs_tts.vocoder_scheduler import (
 )
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.proto import OmniRequest, StagePayload
+
+
+def test_higgs_long_prompt_is_chunked_within_window() -> None:
+    text = "。".join(f"这是第{i}个句子内容" for i in range(80)) + "。"
+    assert len(text) > 500
+    max_chars = 200
+    chunks = chunk_text(text, max_chars=max_chars)
+
+    assert len(chunks) > 1
+    assert all(len(c) <= max_chars for c in chunks)
+    assert "".join(chunks) == text
+
+
+def test_higgs_short_prompt_single_chunk_passthrough() -> None:
+    text = "这是一个简短的句子。"
+    assert chunk_text(text, max_chars=200) == [text]
 
 
 def test_higgs_streaming_pipeline_routes_chunks_to_vocoder() -> None:

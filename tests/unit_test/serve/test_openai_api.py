@@ -165,6 +165,7 @@ async def _collect_speech_stream(client: Any) -> list[str]:
     async for chunk in _speech_stream(
         client=client,
         gen_req=GenerateRequest(model="s2-pro", prompt="hello", stream=True),
+        chunks=["hello"],
         request_id="req-1",
         response_format="wav",
         speed=1.0,
@@ -197,6 +198,7 @@ def test_speech_stream_failure_closes_without_done_sentinel() -> None:
                 stream=True,
                 metadata={"tts_params": {}},
             ),
+            chunks=["hello"],
             request_id="req-1",
             response_format="wav",
             speed=1.0,
