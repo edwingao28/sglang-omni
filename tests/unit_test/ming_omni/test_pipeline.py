@@ -115,6 +115,7 @@ def test_ming_speech_launcher_places_thinker_tp_and_talker(monkeypatch) -> None:
         host="127.0.0.1",
         port=8000,
         model_name="ming-omni",
+        enable_realtime=False,
     )
 
     _launch_speech_server(args)

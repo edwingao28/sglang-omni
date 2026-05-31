@@ -513,12 +513,15 @@ class RealtimeSession:
 
                 if chunk.finish_reason is not None:
                     finish_reason = chunk.finish_reason
-                    usage = (
-                        dataclasses.asdict(chunk.usage)
-                        if chunk.usage is not None
-                        else None
-                    )
-                    break
+                    if chunk.usage is not None:
+                        usage = dataclasses.asdict(chunk.usage)
+                    # Audio-output requests have two terminal stages (decode +
+                    # code2wav); the decode CompleteMessage carries a finish
+                    # reason but the audio chunks arrive later. Drain the stream
+                    # to natural exhaustion so code2wav's PCM is emitted, exactly
+                    # like the chat-completions path does.
+                    if not wants_audio:
+                        break
 
             response_text = "".join(text_acc)
             terminalization_started = True

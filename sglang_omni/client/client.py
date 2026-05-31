@@ -145,7 +145,13 @@ class Client:
             audio_b64: str | None = None
             if chunk.modality == "audio" and chunk.audio_data is not None:
                 audio_b64 = audio_to_base64(
-                    chunk.audio_data, output_format=audio_format
+                    chunk.audio_data,
+                    output_format=audio_format,
+                    **(
+                        {"sample_rate": chunk.sample_rate}
+                        if chunk.sample_rate is not None
+                        else {}
+                    ),
                 )
 
             yield CompletionStreamChunk(
