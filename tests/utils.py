@@ -389,6 +389,11 @@ def apply_wer_slack(reference: float, slack: float = 1.25) -> float:
     return round(reference * slack, 4)
 
 
+def apply_mos_slack(reference: float, slack: float = 0.97) -> float:
+    """Derive a min MOS threshold from a reference value with downward slack."""
+    return round(reference * slack, 4)
+
+
 def assert_speed_thresholds(
     summary: dict,
     thresholds: dict,

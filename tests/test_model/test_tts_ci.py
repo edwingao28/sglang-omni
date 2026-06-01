@@ -55,6 +55,7 @@ from tests.test_model.omni_router_utils import (
 )
 from tests.utils import (
     MetricCheckCollector,
+    apply_mos_slack,
     apply_slack,
     apply_wer_slack,
     assert_speed_thresholds,
@@ -75,6 +76,7 @@ STARTUP_TIMEOUT = 180
 BENCHMARK_TIMEOUT = 600
 WER_TIMEOUT = 600
 SIMILARITY_TIMEOUT = 600
+UTMOS_TIMEOUT = 600
 
 SIMILARITY_CHECKPOINT_ENV = "SEEDTTS_SIM_CHECKPOINT"
 TTS_STAGE_OUTPUT_ROOT_ENV = "TTS_STAGE_OUTPUT_ROOT"
@@ -104,6 +106,10 @@ VC_STREAM_WER_MAX_CORPUS = 0.0098
 VC_STREAM_WER_CORPUS_THRESHOLD = apply_wer_slack(VC_STREAM_WER_MAX_CORPUS)
 
 VC_SIMILARITY_MEAN_MIN = 66.18289001464844
+# Calibrated from worst-of-5 full generate+score runs on SeedTTS-50 EN, H200 SXM.
+# worst-of-5 = 4.1538 · mean = 4.1618 · stdev = 0.0079
+VC_UTMOS_MEAN_REFERENCE = 4.1538
+VC_UTMOS_MEAN_MIN = apply_mos_slack(VC_UTMOS_MEAN_REFERENCE)
 
 # Note (Chenyang): Only thresholds for the CI concurrency are dedicatedly tuned,
 # others may not pass the CI.
@@ -310,6 +316,69 @@ def _assert_similarity_results(
         checks.assert_all()
 
 
+def _run_utmos(output_dir: str, *, device: str = "cuda:0") -> dict:
+    cmd = [
+        sys.executable,
+        "-m",
+        WER_MODULE,
+        "--utmos-only",
+        "--meta",
+        DATASETS["seedtts-50"],
+        "--output-dir",
+        output_dir,
+        "--model",
+        TTS_MODEL_PATH,
+        "--device",
+        device,
+    ]
+    env = no_proxy_env()
+    existing_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        f"{PROJECT_ROOT}{os.pathsep}{existing_pp}" if existing_pp else str(PROJECT_ROOT)
+    )
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=UTMOS_TIMEOUT,
+        env=env,
+        cwd=str(PROJECT_ROOT),
+    )
+    assert result.returncode == 0, (
+        f"UTMOS eval failed (rc={result.returncode}).\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    results_path = Path(output_dir) / "utmos_results.json"
+    assert results_path.exists(), f"UTMOS results file not found: {results_path}"
+    with open(results_path) as f:
+        return json.load(f)
+
+
+def _assert_utmos_results(
+    results: dict,
+    threshold: float,
+    *,
+    collector: MetricCheckCollector | None = None,
+) -> None:
+    checks = collector or MetricCheckCollector("UTMOS")
+    summary = results.get("summary", {})
+    checks.check(bool(results.get("per_sample")), "per_sample must be non-empty")
+    checks.check(
+        summary.get("skipped", 0) == 0,
+        f"UTMOS: {summary.get('skipped')} skipped samples != 0",
+    )
+    mean = summary.get("utmos_mean")
+    if mean is None:
+        checks.fail("Missing utmos_mean in summary")
+    else:
+        checks.check(
+            mean >= threshold,
+            f"utmos_mean {mean:.4f} < threshold {threshold:.4f}",
+        )
+    if collector is None:
+        checks.assert_all()
+
+
 def _load_speed_results(results_path: Path) -> dict:
     assert results_path.exists(), f"Speed results file not found: {results_path}"
     with open(results_path) as f:
@@ -502,9 +571,6 @@ def _generate_consistency_inputs(
     tmp_path_factory: pytest.TempPathFactory,
     selected_tts_concurrencies: tuple[int, ...],
 ) -> None:
-    # Lazily resolve fixtures via getfixturevalue so that the server is only
-    # started when stage 3 actually needs to generate its own inputs (local
-    # dev path).  In CI the artifact path returns early above.
     router_server = request.getfixturevalue("router_server")
     dataset_repo = request.getfixturevalue("dataset_repo")
     output_root = tmp_path_factory.mktemp("tts_consistency")
@@ -796,9 +862,6 @@ def test_voice_cloning_streaming_consistency(
             ns,
             st,
             expected_stream_count=len(ns),
-            # Stage 1/2 tolerate a small request-failure budget to keep
-            # diagnostics flowing, but stage 3 must only pass when the
-            # compared artifacts are complete.
             max_failed_requests=0,
             collector=checks,
         )
@@ -862,6 +925,20 @@ def test_voice_cloning_similarity(
             max_samples=TTS_SIMILARITY_MAX_SAMPLES,
         )
         _assert_similarity_results(results, VC_SIMILARITY_MEAN_MIN, collector=checks)
+    checks.assert_all()
+
+
+@pytest.mark.tts_stage(TTS_STAGE_NONSTREAM)
+@pytest.mark.benchmark
+def test_voice_cloning_utmos(
+    wer_input_dirs: dict[str, dict[int, str]],
+    selected_tts_concurrencies: tuple[int, ...],
+) -> None:
+    checks = MetricCheckCollector("TTS non-streaming UTMOS")
+    for concurrency in selected_tts_concurrencies:
+        _print_stage("UTMOS", "non-streaming", concurrency, "score speed-stage WAVs")
+        results = _run_utmos(wer_input_dirs["non_stream"][concurrency])
+        _assert_utmos_results(results, VC_UTMOS_MEAN_MIN, collector=checks)
     checks.assert_all()
 
 
