@@ -164,16 +164,17 @@ class Qwen3TTSModelRunner(ModelRunner):
             self._emit_code_chunk(sched_req, code_chunk)
 
     def _emit_code_chunk(self, sched_req: Any, code_chunk: torch.Tensor) -> None:
-        if self._outbox is None:
+        outbox = getattr(self, "_outbox", None)
+        if outbox is None:
             return
         metadata = getattr(sched_req.data, "stream_metadata", None)
         if metadata is None:
             return
-        self._outbox.put(
+        outbox.put(
             OutgoingMessage(
                 request_id=sched_req.request_id,
                 type="stream",
-                target=self._vocoder_target,
+                target=getattr(self, "_vocoder_target", "vocoder"),
                 data=code_chunk,
                 metadata=metadata,
             )
