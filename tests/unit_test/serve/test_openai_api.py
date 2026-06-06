@@ -322,6 +322,20 @@ def test_raw_pcm_speech_request_defaults_initial_codec_chunk_frames() -> None:
     assert gen_req.extra_params["initial_codec_chunk_frames"] == 1
 
 
+def test_speech_stream_passes_initial_codec_chunk_frames_for_raw_pcm() -> None:
+    req = CreateSpeechRequest(
+        input="hello",
+        stream=True,
+        stream_format="audio",
+        response_format="pcm",
+    )
+
+    gen_req = build_speech_generate_request(req, default_model="qwen3-tts")
+
+    assert gen_req.stream is True
+    assert gen_req.extra_params["initial_codec_chunk_frames"] == 1
+
+
 def test_sse_speech_request_does_not_default_initial_codec_chunk_frames() -> None:
     req = CreateSpeechRequest(
         input="hello",
@@ -331,6 +345,19 @@ def test_sse_speech_request_does_not_default_initial_codec_chunk_frames() -> Non
 
     gen_req = build_speech_generate_request(req, default_model="higgs-audio-v2")
 
+    assert "initial_codec_chunk_frames" not in gen_req.extra_params
+
+
+def test_speech_sse_stream_does_not_force_initial_codec_chunk_frames() -> None:
+    req = CreateSpeechRequest(
+        input="hello",
+        stream=True,
+        stream_format="sse",
+    )
+
+    gen_req = build_speech_generate_request(req, default_model="qwen3-tts")
+
+    assert gen_req.stream is True
     assert "initial_codec_chunk_frames" not in gen_req.extra_params
 
 
