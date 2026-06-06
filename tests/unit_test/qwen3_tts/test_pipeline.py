@@ -23,8 +23,8 @@ from sglang_omni.models.qwen3_tts.request_builders import (
     Qwen3TTSSGLangRequestData,
     apply_sglang_qwen3_tts_result,
     build_embedding_cache_key_ids,
-    build_qwen3_tts_stream_metadata,
     build_qwen3_tts_state,
+    build_qwen3_tts_stream_metadata,
     build_sglang_qwen3_tts_request,
     derive_qwen3_tts_sampling_seeds,
 )
@@ -786,6 +786,39 @@ def test_qwen3_tts_vocoder_batches_decode_requests(
     assert "audio_codes" not in results[0].data
     second_audio = np.frombuffer(results[1].data["audio_waveform"], dtype=np.float32)
     assert second_audio.tolist() == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+
+
+def test_qwen3_tts_create_vocoder_executor_returns_streaming_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sglang_omni.models.qwen3_tts import stages
+    from sglang_omni.models.qwen3_tts.streaming_vocoder import (
+        Qwen3TTSStreamingVocoderScheduler,
+    )
+
+    class FakeTokenizer:
+        def decode(self, encoded):
+            return [torch.arange(4, dtype=torch.float32) for _ in encoded], 24000
+
+    monkeypatch.setattr(
+        stages,
+        "_load_qwen3_tts_tokenizer",
+        lambda *args, **kwargs: FakeTokenizer(),
+    )
+
+    scheduler = stages.create_vocoder_executor(
+        "model",
+        max_batch_size=2,
+        max_batch_wait_ms=3,
+        stream_chunk_frames=4,
+        left_context_frames=2,
+    )
+
+    assert isinstance(scheduler, Qwen3TTSStreamingVocoderScheduler)
+    assert scheduler._max_batch_size == 2
+    assert scheduler._max_batch_wait_s == pytest.approx(0.003)
+    assert scheduler._stream_chunk_frames == 4
+    assert scheduler._left_context_frames == 2
 
 
 def test_qwen3_tts_result_adapter_keeps_code_handoff_tensor_native() -> None:
@@ -1926,10 +1959,20 @@ def test_qwen3_tts_engine_reenables_cuda_graph_after_bootstrap(
         "SGLangOutputProcessor",
         lambda **kwargs: SimpleNamespace(**kwargs),
     )
+
+    class FakeModelRunner:
+        def __init__(self, *args, **kwargs) -> None:
+            self.args = args
+            self.kwargs = kwargs
+            self.outbox = None
+
+        def set_stream_outbox(self, outbox) -> None:
+            self.outbox = outbox
+
     monkeypatch.setattr(
         model_runner_mod,
         "Qwen3TTSModelRunner",
-        lambda *args, **kwargs: SimpleNamespace(args=args, kwargs=kwargs),
+        FakeModelRunner,
     )
     monkeypatch.setattr(
         scheduler_mod,
@@ -1950,3 +1993,94 @@ def test_qwen3_tts_engine_reenables_cuda_graph_after_bootstrap(
     assert scheduler.server_args.enable_torch_compile is False
     assert scheduler.server_args.torch_compile_max_bs == 16
     clear_qwen3_tts_preprocessing_context()
+
+
+def test_qwen3_tts_engine_factory_sets_model_runner_stream_outbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sglang_omni.models.qwen3_tts.model_runner as model_runner_mod
+    import sglang_omni.scheduling.bootstrap as bootstrap_mod
+    import sglang_omni.scheduling.omni_scheduler as omni_scheduler_mod
+    import sglang_omni.scheduling.sglang_backend as sglang_backend_mod
+    from sglang_omni.models.qwen3_tts import stages
+
+    created = {}
+
+    class FakeModelRunner:
+        def __init__(self, model_worker, output_proc):
+            del model_worker, output_proc
+            self.outbox = None
+            created["runner"] = self
+
+        def set_stream_outbox(self, outbox):
+            self.outbox = outbox
+
+    class FakeScheduler:
+        def __init__(self, **kwargs):
+            self.outbox = object()
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(stages, "_register_qwen3_tts_hf_config", lambda: None)
+    monkeypatch.setattr(stages, "_resolve_checkpoint", lambda model_path: model_path)
+    monkeypatch.setattr(stages, "_load_qwen3_tts_tokenizer", lambda *a, **k: object())
+    monkeypatch.setattr(
+        stages,
+        "_load_qwen3_tts_generate_defaults",
+        lambda checkpoint: {},
+    )
+    monkeypatch.setattr(stages, "_compile_qwen3_tts_backbone", lambda model: None)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "qwen_tts",
+        SimpleNamespace(Qwen3TTSModel=lambda **kwargs: SimpleNamespace(**kwargs)),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(
+            AutoProcessor=SimpleNamespace(from_pretrained=lambda *a, **k: object())
+        ),
+    )
+
+    fake_model = SimpleNamespace(load_speech_tokenizer=lambda tokenizer: None)
+    fake_worker = SimpleNamespace(model_runner=SimpleNamespace(model=fake_model))
+
+    monkeypatch.setattr(
+        bootstrap_mod,
+        "create_sglang_infrastructure",
+        lambda *a, **k: (
+            fake_worker,
+            object(),
+            object(),
+            object(),
+            object(),
+            object(),
+            object(),
+        ),
+    )
+    monkeypatch.setattr(
+        sglang_backend_mod,
+        "build_sglang_server_args",
+        lambda *a, **k: SimpleNamespace(
+            disable_cuda_graph=True,
+            enable_torch_compile=False,
+        ),
+    )
+    monkeypatch.setattr(
+        sglang_backend_mod,
+        "SGLangOutputProcessor",
+        lambda **kwargs: object(),
+    )
+    monkeypatch.setattr(omni_scheduler_mod, "OmniScheduler", FakeScheduler)
+    monkeypatch.setattr(
+        stages,
+        "make_qwen3_tts_scheduler_adapters",
+        lambda **kwargs: (lambda payload: payload, lambda data: data),
+        raising=False,
+    )
+    monkeypatch.setattr(model_runner_mod, "Qwen3TTSModelRunner", FakeModelRunner)
+
+    scheduler = stages.create_sglang_tts_engine_executor("model", device="cuda:0")
+
+    assert created["runner"].outbox is scheduler.outbox

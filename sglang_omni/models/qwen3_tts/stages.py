@@ -16,9 +16,11 @@ from sglang_omni.models.qwen3_tts.request_builders import (
     preprocess_qwen3_tts_payload,
     set_qwen3_tts_preprocessing_context,
 )
+from sglang_omni.models.qwen3_tts.streaming_vocoder import (
+    Qwen3TTSStreamingVocoderScheduler,
+)
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
-from sglang_omni.utils.audio_payload import audio_waveform_payload
 
 logger = logging.getLogger(__name__)
 
@@ -170,13 +172,10 @@ def create_sglang_tts_engine_executor(
     from qwen_tts import Qwen3TTSModel
     from transformers import AutoProcessor
 
-    from sglang_omni.models.qwen3_tts.model_runner import Qwen3TTSModelRunner
-    from sglang_omni.scheduling.bootstrap import create_sglang_infrastructure
-    from sglang_omni.scheduling.omni_scheduler import OmniScheduler
-    from sglang_omni.scheduling.sglang_backend import (
-        SGLangOutputProcessor,
-        build_sglang_server_args,
-    )
+    import sglang_omni.models.qwen3_tts.model_runner as model_runner_mod
+    import sglang_omni.scheduling.bootstrap as bootstrap_mod
+    import sglang_omni.scheduling.omni_scheduler as omni_scheduler_mod
+    import sglang_omni.scheduling.sglang_backend as sglang_backend_mod
 
     _register_qwen3_tts_hf_config()
     checkpoint_dir = _resolve_checkpoint(model_path)
@@ -184,7 +183,7 @@ def create_sglang_tts_engine_executor(
         device = f"cuda:{gpu_id}"
     gpu_id = int(device.split(":")[-1]) if ":" in device else 0
 
-    server_args = build_sglang_server_args(
+    server_args = sglang_backend_mod.build_sglang_server_args(
         checkpoint_dir,
         context_length=8192,
         dtype=dtype,
@@ -211,7 +210,7 @@ def create_sglang_tts_engine_executor(
         prefill_mgr,
         decode_mgr,
         model_config,
-    ) = create_sglang_infrastructure(
+    ) = bootstrap_mod.create_sglang_infrastructure(
         server_args,
         gpu_id,
         model_arch_override="Qwen3TTSTalker",
@@ -241,7 +240,7 @@ def create_sglang_tts_engine_executor(
     if want_cuda_graph:
         model_worker.model_runner.init_device_graphs()
 
-    output_proc = SGLangOutputProcessor(
+    output_proc = sglang_backend_mod.SGLangOutputProcessor(
         capture_hidden=False,
         capture_hidden_layers=None,
         model=model,
@@ -251,7 +250,8 @@ def create_sglang_tts_engine_executor(
         wrapper=wrapper,
     )
 
-    return OmniScheduler(
+    model_runner = model_runner_mod.Qwen3TTSModelRunner(model_worker, output_proc)
+    scheduler = omni_scheduler_mod.OmniScheduler(
         tp_worker=model_worker,
         tree_cache=tree_cache,
         req_to_token_pool=req_to_token_pool,
@@ -260,11 +260,13 @@ def create_sglang_tts_engine_executor(
         model_config=model_config,
         prefill_manager=prefill_mgr,
         decode_manager=decode_mgr,
-        model_runner=Qwen3TTSModelRunner(model_worker, output_proc),
+        model_runner=model_runner,
         request_builder=request_builder,
         result_adapter=result_adapter,
         abort_callback=cleanup_prepared_qwen3_tts_request,
     )
+    model_runner.set_stream_outbox(scheduler.outbox)
+    return scheduler
 
 
 def create_tts_engine_executor(*args, **kwargs) -> Any:
@@ -280,7 +282,9 @@ def create_vocoder_executor(
     attn_implementation: str | None = None,
     max_batch_size: int = 8,
     max_batch_wait_ms: int = 2,
-) -> SimpleScheduler:
+    stream_chunk_frames: int = 6,
+    left_context_frames: int = 6,
+) -> Qwen3TTSStreamingVocoderScheduler:
     if gpu_id is not None:
         device = f"cuda:{gpu_id}"
     tokenizer = _load_qwen3_tts_tokenizer(
@@ -289,68 +293,10 @@ def create_vocoder_executor(
         dtype=dtype,
         attn_implementation=attn_implementation,
     )
-
-    def _prepare_vocoder_item(
-        payload: StagePayload,
-    ) -> tuple[Qwen3TTSState, torch.Tensor]:
-        state = load_state(payload)
-        if state.audio_codes is None:
-            raise RuntimeError("Qwen3-TTS vocoder requires audio_codes from tts_engine")
-
-        codes = torch.as_tensor(state.audio_codes, dtype=torch.long)
-        return state, codes
-
-    def _store_vocoder_result(
-        payload: StagePayload,
-        state: Qwen3TTSState,
-        codes: torch.Tensor,
-        wav: Any,
-        sample_rate: int,
-    ) -> StagePayload:
-        if wav is None:
-            raise RuntimeError("Qwen3-TTS speech tokenizer did not return audio")
-
-        if state.ref_code_len:
-            total_len = int(codes.shape[0])
-            cut = int(state.ref_code_len / max(total_len, 1) * wav.shape[0])
-            wav = wav[cut:]
-        audio_payload = audio_waveform_payload(wav, source_hint="Qwen3-TTS")
-        state.audio_samples = None
-        state.sample_rate = int(sample_rate)
-        state.audio_codes = None
-
-        payload = store_state(payload, state)
-        payload.data.update(audio_payload)
-        payload.data["sample_rate"] = state.sample_rate
-        payload.data["modality"] = "audio"
-        usage = _build_usage(state)
-        if usage is not None:
-            payload.data["usage"] = usage
-        return payload
-
-    def _vocode(payload: StagePayload) -> StagePayload:
-        state, codes = _prepare_vocoder_item(payload)
-        wavs, sample_rate = tokenizer.decode([{"audio_codes": codes}])
-        wav = wavs[0] if wavs else None
-        return _store_vocoder_result(payload, state, codes, wav, sample_rate)
-
-    def _vocode_batch(payloads: list[StagePayload]) -> list[StagePayload]:
-        items = [_prepare_vocoder_item(payload) for payload in payloads]
-        wavs, sample_rate = tokenizer.decode(
-            [{"audio_codes": codes} for _, codes in items]
-        )
-        if len(wavs) != len(items):
-            raise RuntimeError(
-                f"Qwen3-TTS speech tokenizer returned {len(wavs)} audios for {len(items)} requests"
-            )
-        return [
-            _store_vocoder_result(payload, state, codes, wav, sample_rate)
-            for payload, (state, codes), wav in zip(payloads, items, wavs)
-        ]
-
-    return SimpleScheduler(
-        _vocode,
-        batch_compute_fn=_vocode_batch,
+    return Qwen3TTSStreamingVocoderScheduler(
+        tokenizer,
         max_batch_size=max_batch_size,
         max_batch_wait_ms=max_batch_wait_ms,
+        stream_chunk_frames=stream_chunk_frames,
+        left_context_frames=left_context_frames,
     )
