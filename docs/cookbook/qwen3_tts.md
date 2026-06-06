@@ -126,7 +126,12 @@ curl -X POST http://localhost:8000/v1/audio/speech \
 
 ### Streaming
 
-Set `"stream": true` to receive audio chunks in real time over Server-Sent Events (SSE):
+Set `"stream": true` to receive audio chunks while Qwen3-TTS Base is still
+generating codec frames. For Base/reference-cloning checkpoints, SGLang-Omni
+streams generated codec rows from `tts_engine` into the vocoder and returns
+incremental audio chunks over SSE. CustomVoice and VoiceDesign checkpoints keep
+the existing full-result behavior because their prompt path uses Qwen's
+non-streaming model mode.
 
 ```bash
 curl -N -X POST http://localhost:8000/v1/audio/speech \

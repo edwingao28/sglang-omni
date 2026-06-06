@@ -358,6 +358,33 @@ def test_qwen3_tts_stream_metadata_for_base_stream_request() -> None:
     }
 
 
+def test_qwen3_tts_stream_metadata_injects_ref_context_tail() -> None:
+    payload = make_payload(
+        inputs={
+            "input": "hello",
+            "references": [{"audio_path": "ref.wav", "text": "hi"}],
+        },
+        params={"stream": True},
+    )
+    state = Qwen3TTSState(
+        task_type="Base",
+        non_streaming_mode=False,
+        sample_rate=24000,
+    )
+    # 30 ref frames, 2 codebooks; only the last CAP (25) ride the wire.
+    ref_code = torch.arange(60, dtype=torch.long).reshape(30, 2)
+
+    metadata = build_qwen3_tts_stream_metadata(
+        payload,
+        state,
+        num_codebooks=2,
+        ref_code=ref_code,
+    )
+
+    assert metadata["ref_context_codes"] == ref_code[-25:].tolist()
+    assert len(metadata["ref_context_codes"]) == 25
+
+
 def test_qwen3_tts_stream_metadata_disabled_for_non_streaming_model_mode() -> None:
     payload = make_payload(inputs="hello", params={"stream": True})
     state = Qwen3TTSState(
@@ -1977,7 +2004,7 @@ def test_qwen3_tts_engine_reenables_cuda_graph_after_bootstrap(
     monkeypatch.setattr(
         scheduler_mod,
         "OmniScheduler",
-        lambda **kwargs: SimpleNamespace(**kwargs),
+        lambda **kwargs: SimpleNamespace(outbox=object(), **kwargs),
     )
 
     scheduler = stages.create_sglang_tts_engine_executor("model", device="cuda:0")

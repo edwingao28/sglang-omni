@@ -161,6 +161,13 @@ curl -N -X POST http://localhost:8000/v1/audio/speech \
 
 The server returns a stream of SSE events. Each event contains an `audio.speech.chunk` object with a base64-encoded audio chunk. The stream ends with `data: [DONE]`.
 
+Qwen3-TTS streaming is real incremental streaming for Base/reference-cloning
+requests. CustomVoice and VoiceDesign requests may still produce a single final
+audio event because those modes use the model's non-streaming prompt path.
+For raw PCM clients, the server defaults `initial_codec_chunk_frames` to `1`
+to reduce first-audio latency; set it to `0` to use the steady chunk size from
+the first vocoder decode.
+
 For clients that want a continuous byte stream instead of SSE framing, request raw PCM explicitly:
 
 ```bash

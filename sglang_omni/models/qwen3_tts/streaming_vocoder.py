@@ -30,6 +30,7 @@ class _Qwen3TTSStreamState:
     sample_rate: int = 24000
     initial_codec_chunk_frames: int = 0
     has_emitted: bool = False
+    ref_seeded: bool = False
 
 
 class Qwen3TTSStreamingVocoderScheduler(StreamingSimpleScheduler):
@@ -216,6 +217,50 @@ class Qwen3TTSStreamingVocoderScheduler(StreamingSimpleScheduler):
                 state,
                 metadata,
             )
+        self._maybe_seed_ref_context(
+            request_id, state, metadata.get("ref_context_codes")
+        )
+
+    def _maybe_seed_ref_context(
+        self,
+        request_id: str,
+        state: _Qwen3TTSStreamState,
+        ref_context_codes: Any,
+    ) -> None:
+        """Seed the first decode window with reference-clone left-context.
+
+        Non-streaming decodes ``[ref_code ++ output_codes]`` and trims the ref
+        prefix, so its first output frames carry the clone's acoustic history.
+        Streaming decodes output codes alone; we prepend the tail of the ref
+        codes (clamped to ``left_context_frames``) as already-emitted rows so the
+        first window's overlap-decode sees that history and then trims it away,
+        exactly as ``_decode_delta`` trims any left-context. Consumed once, before
+        any output row arrives; never marks ``has_emitted`` so the
+        ``initial_codec_chunk_frames`` first-chunk latency path is preserved.
+        """
+        if (
+            ref_context_codes is None
+            or state.ref_seeded
+            or state.has_emitted
+            or state.rows
+            or self._left_context_frames <= 0
+        ):
+            state.ref_seeded = True
+            return
+        num_codebooks = self._require_num_codebooks(state, request_id)
+        seeded: list[torch.Tensor] = []
+        for frame in ref_context_codes[-self._left_context_frames :]:
+            row = torch.as_tensor(frame, dtype=torch.long).reshape(-1)
+            if int(row.shape[0]) != num_codebooks:
+                state.ref_seeded = True
+                return
+            seeded.append(row)
+        if not seeded:
+            state.ref_seeded = True
+            return
+        state.rows.extend(seeded)
+        state.emitted_frame_count = len(seeded)
+        state.ref_seeded = True
 
     @staticmethod
     def _latch_num_codebooks(
@@ -338,7 +383,15 @@ class Qwen3TTSStreamingVocoderScheduler(StreamingSimpleScheduler):
         )
 
     def _decode_rows(self, rows: list[torch.Tensor]) -> np.ndarray:
-        codes = torch.stack(rows, dim=0).to(dtype=torch.long)
+        # Seeded ref-context rows arrive on CPU (relayed as plain ints in
+        # metadata) while emitted output rows keep the model's device, so
+        # normalize to the native output device before stacking. The last row
+        # is always an emitted output frame; ``.to`` is a no-op when devices
+        # already match (the common, unseeded path).
+        target_device = rows[-1].device
+        codes = torch.stack([row.to(target_device) for row in rows], dim=0).to(
+            dtype=torch.long
+        )
         wavs, _sample_rate = self._tokenizer.decode([{"audio_codes": codes}])
         wav = wavs[0] if wavs else None
         if wav is None:

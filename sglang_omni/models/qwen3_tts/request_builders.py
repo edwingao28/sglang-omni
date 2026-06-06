@@ -83,6 +83,10 @@ def derive_qwen3_tts_sampling_seeds(seed: int) -> tuple[int, int]:
 
 
 QWEN3_TTS_STREAM_CODEC = "qwen3_tts"
+# Upper bound on ref-clone frames shipped to the streaming vocoder as decode
+# left-context. The vocoder re-clamps to its own ``left_context_frames``; this
+# only caps the per-chunk metadata size (kept well under the CUDA-IPC inline limit).
+QWEN3_TTS_REF_CONTEXT_CAP = 25
 
 
 def build_qwen3_tts_stream_metadata(
@@ -90,6 +94,7 @@ def build_qwen3_tts_stream_metadata(
     state: Qwen3TTSState,
     *,
     num_codebooks: int,
+    ref_code: torch.Tensor | None = None,
 ) -> dict[str, Any] | None:
     params = payload.request.params
     if not isinstance(params, dict):
@@ -117,6 +122,15 @@ def build_qwen3_tts_stream_metadata(
         metadata[INITIAL_CODEC_CHUNK_FRAMES_PARAM] = params[
             INITIAL_CODEC_CHUNK_FRAMES_PARAM
         ]
+    # Reference-clone acoustic left-context. Non-streaming decodes
+    # ``[ref_code ++ output_codes]`` then trims the ref prefix, so its first
+    # output frames carry the clone's acoustic history. Streaming decodes
+    # output codes alone, so seed the vocoder's first window with the tail of
+    # the ref codes to recover that onset context (parity with the
+    # ``ref_code is not None and ref_code.shape[0] > 0`` guard non-streaming uses).
+    if ref_code is not None and int(ref_code.shape[0]) > 0:
+        tail = ref_code[-QWEN3_TTS_REF_CONTEXT_CAP:].to(dtype=torch.long).cpu()
+        metadata["ref_context_codes"] = tail.tolist()
     return metadata
 
 
@@ -821,6 +835,7 @@ def build_sglang_qwen3_tts_request(
             payload,
             state,
             num_codebooks=num_codebooks,
+            ref_code=prepared.ref_code,
         ),
     )
     data.suppress_tokens = list(req._codec_suppress_tokens)
