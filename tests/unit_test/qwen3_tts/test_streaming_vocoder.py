@@ -104,7 +104,7 @@ def test_qwen3_tts_streaming_vocoder_emits_incremental_audio() -> None:
     assert tokenizer.decode_inputs[0].tolist() == [[1, 11], [2, 12], [3, 13]]
 
 
-def test_qwen3_tts_initial_codec_chunk_frames_controls_first_audio() -> None:
+def test_qwen3_tts_initial_codec_chunk_frames_only_controls_first_audio() -> None:
     tokenizer = FakeQwen3TTSTokenizer()
     scheduler = Qwen3TTSStreamingVocoderScheduler(
         tokenizer,
@@ -120,6 +120,34 @@ def test_qwen3_tts_initial_codec_chunk_frames_controls_first_audio() -> None:
     assert len(stream_messages) == 1
     audio = np.frombuffer(stream_messages[0].data["audio_waveform"], dtype=np.float32)
     assert audio.tolist() == [7.0, 8.0]
+
+    for idx, row in enumerate(
+        [
+            torch.tensor([8, 18], dtype=torch.long),
+            torch.tensor([9, 19], dtype=torch.long),
+            torch.tensor([10, 20], dtype=torch.long),
+        ],
+        start=1,
+    ):
+        scheduler._on_chunk("req", _item(row, chunk_id=idx))
+
+    stream_messages = [msg for msg in _drain(scheduler) if msg.type == "stream"]
+    assert stream_messages == []
+
+    scheduler._on_chunk(
+        "req", _item(torch.tensor([11, 21], dtype=torch.long), chunk_id=4)
+    )
+
+    stream_messages = [msg for msg in _drain(scheduler) if msg.type == "stream"]
+    assert len(stream_messages) == 1
+    audio = np.frombuffer(stream_messages[0].data["audio_waveform"], dtype=np.float32)
+    assert audio.tolist() == [8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0]
+    assert tokenizer.decode_inputs[1].tolist() == [
+        [8, 18],
+        [9, 19],
+        [10, 20],
+        [11, 21],
+    ]
 
 
 def test_qwen3_tts_streaming_vocoder_final_result_is_metadata_only() -> None:
