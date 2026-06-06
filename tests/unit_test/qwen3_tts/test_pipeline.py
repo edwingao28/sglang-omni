@@ -217,6 +217,9 @@ def test_qwen3_tts_config_and_registry_contracts() -> None:
         "vocoder",
     ]
     assert config.stages[1].factory.endswith("create_sglang_tts_engine_executor")
+    assert config.stages[1].next == "vocoder"
+    assert config.stages[1].stream_to == ["vocoder"]
+    assert config.stages[2].can_accept_stream_before_payload is True
     assert config.terminal_stages == ["vocoder"]
     assert config.gpu_placement == {"tts_engine": 0, "vocoder": 0}
     assert "device" not in config.stages[1].factory_args
