@@ -22,11 +22,13 @@ from sglang_omni.models.qwen3_tts.request_builders import (
     Qwen3TTSSGLangRequestData,
     apply_sglang_qwen3_tts_result,
     build_embedding_cache_key_ids,
+    build_qwen3_tts_stream_metadata,
     build_qwen3_tts_state,
     build_sglang_qwen3_tts_request,
     derive_qwen3_tts_sampling_seeds,
 )
 from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
+from sglang_omni.models.tts_streaming import INITIAL_CODEC_CHUNK_FRAMES_PARAM
 from sglang_omni.proto import OmniRequest, StagePayload
 from sglang_omni.scheduling.messages import IncomingMessage
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
@@ -323,6 +325,82 @@ def test_qwen3_tts_ignores_client_sampling_defaults() -> None:
     state = build_qwen3_tts_state(payload)
 
     assert state.generation_kwargs == {"max_new_tokens": 2048}
+
+
+def test_qwen3_tts_stream_metadata_for_base_stream_request() -> None:
+    payload = make_payload(
+        inputs={
+            "input": "hello",
+            "references": [{"audio_path": "ref.wav", "text": "hi"}],
+        },
+        params={"stream": True, INITIAL_CODEC_CHUNK_FRAMES_PARAM: "1"},
+    )
+    state = Qwen3TTSState(
+        task_type="Base",
+        non_streaming_mode=False,
+        sample_rate=24000,
+    )
+
+    metadata = build_qwen3_tts_stream_metadata(
+        payload,
+        state,
+        num_codebooks=4,
+    )
+
+    assert metadata == {
+        "modality": "audio_codes",
+        "stream": True,
+        "codec": "qwen3_tts",
+        "sample_rate": 24000,
+        "num_codebooks": 4,
+        INITIAL_CODEC_CHUNK_FRAMES_PARAM: "1",
+    }
+
+
+def test_qwen3_tts_stream_metadata_disabled_for_non_streaming_model_mode() -> None:
+    payload = make_payload(inputs="hello", params={"stream": True})
+    state = Qwen3TTSState(
+        task_type="CustomVoice",
+        non_streaming_mode=True,
+        sample_rate=24000,
+    )
+
+    metadata = build_qwen3_tts_stream_metadata(
+        payload,
+        state,
+        num_codebooks=4,
+    )
+
+    assert metadata is None
+
+
+def test_qwen3_tts_stream_metadata_disabled_without_client_stream() -> None:
+    payload = make_payload(inputs="hello", params={"stream": False})
+    state = Qwen3TTSState(
+        task_type="Base",
+        non_streaming_mode=False,
+        sample_rate=24000,
+    )
+
+    metadata = build_qwen3_tts_stream_metadata(
+        payload,
+        state,
+        num_codebooks=4,
+    )
+
+    assert metadata is None
+
+
+def test_qwen3_tts_stream_metadata_rejects_missing_codebook_count() -> None:
+    payload = make_payload(inputs="hello", params={"stream": True})
+    state = Qwen3TTSState(
+        task_type="Base",
+        non_streaming_mode=False,
+        sample_rate=24000,
+    )
+
+    with pytest.raises(ValueError, match="num_codebooks"):
+        build_qwen3_tts_stream_metadata(payload, state, num_codebooks=0)
 
 
 def test_qwen3_tts_embedding_cache_keys_are_stable_and_content_based() -> None:

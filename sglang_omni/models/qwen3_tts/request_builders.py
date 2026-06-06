@@ -14,6 +14,7 @@ import torch
 
 from sglang_omni.models.qwen3_omni.pending_text_queue import PendingTextTensorQueue
 from sglang_omni.models.qwen3_tts.payload_types import Qwen3TTSState
+from sglang_omni.models.tts_streaming import INITIAL_CODEC_CHUNK_FRAMES_PARAM
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
 
@@ -81,6 +82,44 @@ def derive_qwen3_tts_sampling_seeds(seed: int) -> tuple[int, int]:
     )
 
 
+QWEN3_TTS_STREAM_CODEC = "qwen3_tts"
+
+
+def build_qwen3_tts_stream_metadata(
+    payload: StagePayload,
+    state: Qwen3TTSState,
+    *,
+    num_codebooks: int,
+) -> dict[str, Any] | None:
+    params = payload.request.params
+    if not isinstance(params, dict):
+        raise TypeError(
+            f"Qwen3-TTS request params must be a dict, got {type(params).__name__}"
+        )
+    if not bool(params.get("stream", False)):
+        return None
+    if state.non_streaming_mode:
+        return None
+    num_codebooks = int(num_codebooks)
+    if num_codebooks <= 0:
+        raise ValueError(
+            f"Qwen3-TTS stream num_codebooks must be > 0, got {num_codebooks}"
+        )
+
+    metadata: dict[str, Any] = {
+        "modality": "audio_codes",
+        "stream": True,
+        "codec": QWEN3_TTS_STREAM_CODEC,
+        "sample_rate": int(state.sample_rate),
+        "num_codebooks": num_codebooks,
+    }
+    if params.get(INITIAL_CODEC_CHUNK_FRAMES_PARAM) is not None:
+        metadata[INITIAL_CODEC_CHUNK_FRAMES_PARAM] = params[
+            INITIAL_CODEC_CHUNK_FRAMES_PARAM
+        ]
+    return metadata
+
+
 @dataclass
 class Qwen3TTSSGLangRequestData(SGLangARRequestData):
     """Qwen3-TTS scheduler-owned request state."""
@@ -97,6 +136,8 @@ class Qwen3TTSSGLangRequestData(SGLangARRequestData):
     subtalker_top_k: int = 50
     subtalker_sampling_seed: int = field(default_factory=_new_qwen3_tts_sampling_seed)
     engine_start_s: float = 0.0
+    num_codebooks: int = 0
+    stream_metadata: dict[str, Any] | None = None
 
 
 @dataclass
@@ -753,6 +794,9 @@ def build_sglang_qwen3_tts_request(
     ref_code_len = (
         int(prepared.ref_code.shape[0]) if prepared.ref_code is not None else 0
     )
+    num_codebooks = int(getattr(model.config, "num_code_groups", 0) or 0)
+    if num_codebooks <= 0 and prepared.ref_code is not None:
+        num_codebooks = int(prepared.ref_code.shape[1])
     data = Qwen3TTSSGLangRequestData(
         input_ids=prepared.input_ids,
         attention_mask=prepared.attention_mask,
@@ -772,6 +816,12 @@ def build_sglang_qwen3_tts_request(
         subtalker_top_k=int(gen_kwargs.get("subtalker_top_k", 50)),
         subtalker_sampling_seed=subtalker_sampling_seed,
         engine_start_s=time.perf_counter(),
+        num_codebooks=num_codebooks,
+        stream_metadata=build_qwen3_tts_stream_metadata(
+            payload,
+            state,
+            num_codebooks=num_codebooks,
+        ),
     )
     data.suppress_tokens = list(req._codec_suppress_tokens)
     data.pending_text_queue = PendingTextTensorQueue.from_tensor(
