@@ -10,6 +10,7 @@ from sglang.srt.managers.scheduler import GenerationBatchResult
 
 from sglang_omni.model_runner.base import ModelRunner
 from sglang_omni.models.qwen3_omni.talker_model_runner import QwenTalkerModelRunner
+from sglang_omni.scheduling.messages import OutgoingMessage
 from sglang_omni.scheduling.types import RequestOutput
 
 
@@ -19,6 +20,11 @@ class Qwen3TTSModelRunner(ModelRunner):
     def __init__(self, tp_worker: Any, output_processor: Any):
         super().__init__(tp_worker, output_processor)
         self._has_pending_code_step = False
+        self._outbox: Any | None = None
+        self._vocoder_target = "vocoder"
+
+    def set_stream_outbox(self, outbox: Any) -> None:
+        self._outbox = outbox
 
     def before_prefill(
         self,
@@ -155,6 +161,23 @@ class Qwen3TTSModelRunner(ModelRunner):
             feedback = self.model._output_embeds[row_idx].detach().clone()
             sched_req.data.output_codes.append(code_chunk)
             sched_req.data.pending_feedback_queue.append(feedback)
+            self._emit_code_chunk(sched_req, code_chunk)
+
+    def _emit_code_chunk(self, sched_req: Any, code_chunk: torch.Tensor) -> None:
+        if self._outbox is None:
+            return
+        metadata = getattr(sched_req.data, "stream_metadata", None)
+        if metadata is None:
+            return
+        self._outbox.put(
+            OutgoingMessage(
+                request_id=sched_req.request_id,
+                type="stream",
+                target=self._vocoder_target,
+                data=code_chunk,
+                metadata=metadata,
+            )
+        )
 
     def _sample_positions(
         self, forward_batch: Any, device: torch.device

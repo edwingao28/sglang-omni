@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import queue
 import sys
 import threading
 import types
@@ -1320,6 +1321,72 @@ def test_qwen3_tts_collect_codes_excludes_semantic_eos(
 
     runner.post_process_outputs(result, SimpleNamespace(requests=requests), {})
     assert len(requests[0].data.output_codes) == 1
+
+
+def test_qwen3_tts_model_runner_emits_stream_code_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_sglang(monkeypatch)
+    from sglang_omni.models.qwen3_tts.model_runner import Qwen3TTSModelRunner
+
+    runner = Qwen3TTSModelRunner.__new__(Qwen3TTSModelRunner)
+    runner._has_pending_code_step = True
+    runner._outbox = queue.Queue()
+    runner._vocoder_target = "vocoder"
+    runner.model = SimpleNamespace(
+        config=SimpleNamespace(codec_eos_token_id=42),
+        _output_codes=torch.tensor([[1, 2], [3, 4]], dtype=torch.long),
+        _output_embeds=torch.tensor([[0.1, 0.2], [0.3, 0.4]]),
+    )
+    active_data = Qwen3TTSSGLangRequestData(
+        stream_metadata={
+            "modality": "audio_codes",
+            "stream": True,
+            "codec": "qwen3_tts",
+            "sample_rate": 24000,
+            "num_codebooks": 2,
+        }
+    )
+    eos_data = Qwen3TTSSGLangRequestData(
+        stream_metadata={
+            "modality": "audio_codes",
+            "stream": True,
+            "codec": "qwen3_tts",
+            "sample_rate": 24000,
+            "num_codebooks": 2,
+        }
+    )
+    requests = [
+        SimpleNamespace(request_id="active", data=active_data),
+        SimpleNamespace(request_id="eos", data=eos_data),
+    ]
+    outputs = {
+        "active": RequestOutput("active", data=7),
+        "eos": RequestOutput("eos", data=42),
+    }
+
+    runner.post_process_outputs(
+        result=SimpleNamespace(),
+        scheduler_output=SimpleNamespace(requests=requests),
+        outputs=outputs,
+    )
+
+    out = runner._outbox.get_nowait()
+    assert out.request_id == "active"
+    assert out.type == "stream"
+    assert out.target == "vocoder"
+    assert out.data.tolist() == [1, 2]
+    assert out.metadata == {
+        "modality": "audio_codes",
+        "stream": True,
+        "codec": "qwen3_tts",
+        "sample_rate": 24000,
+        "num_codebooks": 2,
+    }
+    with pytest.raises(queue.Empty):
+        runner._outbox.get_nowait()
+    assert [chunk.tolist() for chunk in active_data.output_codes] == [[1, 2]]
+    assert eos_data.output_codes == []
 
 
 def test_qwen3_tts_steady_decode_reports_cuda_graph_ready(
