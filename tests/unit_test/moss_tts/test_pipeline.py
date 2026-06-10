@@ -188,9 +188,14 @@ def test_moss_tts_engine_uses_auto_mem_fraction_by_default(monkeypatch) -> None:
         def __init__(self, model_worker, output_proc) -> None:
             captured["model_runner_args"] = (model_worker, output_proc)
 
+        def set_stream_outbox(self, outbox) -> None:
+            self._outbox = outbox
+            captured["stream_outbox"] = outbox
+
     class FakeOmniScheduler:
         def __init__(self, **kwargs) -> None:
             captured["scheduler_kwargs"] = kwargs
+            self.outbox = object()
 
     fake_model_runner_module = types.ModuleType(
         "sglang_omni.models.moss_tts.model_runner"
@@ -237,6 +242,10 @@ def test_moss_tts_engine_uses_auto_mem_fraction_by_default(monkeypatch) -> None:
     assert explicit_kwargs["mem_fraction_static"] == 0.61
     assert captured["context_length"] == 8192
     assert captured["model_arch_override"] == "MossTTSDelaySGLangModel"
+    assert (
+        captured["stream_outbox"]
+        is captured["scheduler_kwargs"]["model_runner"]._outbox
+    )
 
 
 def test_moss_tts_talker_torch_compile_cli_override_targets_tts_engine() -> None:
@@ -780,6 +789,7 @@ def test_moss_post_process_outputs_skips_im_end() -> None:
 
     runner = MossTTSModelRunner.__new__(MossTTSModelRunner)
     runner.model = SimpleNamespace(config=SimpleNamespace(im_end_token_id=14))
+    runner._outbox = None
     runner._pending_rows = torch.tensor([[12, 2, 4], [14, 4, 4]], dtype=torch.long)
     runner._pending_embeds = torch.ones((2, 3))
     requests = [

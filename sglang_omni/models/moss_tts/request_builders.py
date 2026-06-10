@@ -17,6 +17,7 @@ from typing import Any
 import torch
 
 from sglang_omni.models.moss_tts.payload_types import MossTTSState
+from sglang_omni.models.tts_streaming import INITIAL_CODEC_CHUNK_FRAMES_PARAM
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.types import ARRequestData
 
@@ -96,6 +97,7 @@ class MossTTSSGLangRequestData(ARRequestData):
     delayed_length: int = _INF_DELAY
     is_audio: bool = False
     engine_start_s: float = 0.0
+    stream_metadata: dict[str, Any] | None = None
 
 
 @dataclass
@@ -562,6 +564,44 @@ def _initialize_generation_state(
     data.state.assistant_start_length = int(data.assistant_prefix_rows.shape[0])
 
 
+def build_moss_stream_metadata(
+    payload: StagePayload,
+    data: MossTTSSGLangRequestData,
+    cfg: Any,
+) -> dict[str, Any] | None:
+    """Per-chunk decode contract for streaming; None when streaming is off."""
+    params = payload.request.params
+    if not isinstance(params, dict):
+        raise TypeError(
+            f"MOSS-TTS request params must be a dict, got {type(params).__name__}"
+        )
+    if not bool(params.get("stream", False)):
+        return None
+    if data.prompt_rows is None or data.prompt_rows.numel() == 0:
+        return None
+
+    metadata: dict[str, Any] = {
+        "modality": "moss_delayed_audio_row",
+        "stream": True,
+        "n_vq": int(data.prompt_rows.shape[1] - 1),
+        "audio_pad_code": int(cfg.audio_pad_code),
+        "audio_start_token_id": int(cfg.audio_start_token_id),
+        "audio_end_token_id": int(cfg.audio_end_token_id),
+        "audio_assistant_gen_slot_token_id": int(cfg.audio_assistant_gen_slot_token_id),
+        "audio_assistant_delay_slot_token_id": int(
+            cfg.audio_assistant_delay_slot_token_id
+        ),
+        "assistant_start_length": int(data.state.assistant_start_length),
+    }
+    if data.assistant_prefix_rows is not None and data.assistant_prefix_rows.numel():
+        metadata["assistant_prefix_rows"] = data.assistant_prefix_rows.tolist()
+    if params.get(INITIAL_CODEC_CHUNK_FRAMES_PARAM) is not None:
+        metadata[INITIAL_CODEC_CHUNK_FRAMES_PARAM] = params[
+            INITIAL_CODEC_CHUNK_FRAMES_PARAM
+        ]
+    return metadata
+
+
 def build_sglang_moss_tts_request(
     payload: StagePayload,
     *,
@@ -629,6 +669,7 @@ def build_sglang_moss_tts_request(
     data.input_embeds_are_projected = True
     _initialize_generation_state(data, model=model)
     data.stage_payload = payload
+    data.stream_metadata = build_moss_stream_metadata(payload, data, cfg)
     return data
 
 

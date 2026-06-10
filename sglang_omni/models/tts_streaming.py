@@ -8,6 +8,24 @@ from typing import Any, Mapping
 INITIAL_CODEC_CHUNK_FRAMES_PARAM = "initial_codec_chunk_frames"
 
 
+def build_tts_usage(
+    prompt_tokens: int,
+    completion_tokens: int,
+    engine_time_s: float = 0.0,
+) -> dict[str, Any] | None:
+    """Build the shared TTS usage payload; None when there is nothing to report."""
+    if not (prompt_tokens or completion_tokens or engine_time_s):
+        return None
+    usage: dict[str, Any] = {
+        "prompt_tokens": int(prompt_tokens),
+        "completion_tokens": int(completion_tokens),
+        "total_tokens": int(prompt_tokens) + int(completion_tokens),
+    }
+    if engine_time_s:
+        usage["engine_time_s"] = round(float(engine_time_s), 6)
+    return usage
+
+
 def resolve_initial_codec_chunk_frames(
     params: Mapping[str, Any] | None,
     *,

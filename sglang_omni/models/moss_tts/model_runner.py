@@ -10,6 +10,7 @@ from sglang.srt.layers.sampler import multinomial_with_seed
 
 from sglang_omni.model_runner.base import ModelRunner
 from sglang_omni.models.moss_tts.request_builders import _INF_DELAY
+from sglang_omni.scheduling.messages import OutgoingMessage
 from sglang_omni.scheduling.types import RequestOutput
 
 _NEG_INF = float("-inf")
@@ -23,6 +24,11 @@ class MossTTSModelRunner(ModelRunner):
         super().__init__(tp_worker, output_processor)
         self._pending_rows: torch.Tensor | None = None
         self._pending_embeds: torch.Tensor | None = None
+        self._outbox: Any | None = None
+        self._vocoder_target = "vocoder"
+
+    def set_stream_outbox(self, outbox: Any) -> None:
+        self._outbox = outbox
 
     def custom_prefill_forward(
         self,
@@ -547,6 +553,13 @@ class MossTTSModelRunner(ModelRunner):
         if rows is None or embeds is None:
             return
 
+        rows_cpu: torch.Tensor | None = None
+        if self._outbox is not None and any(
+            sched_req.data.stream_metadata is not None
+            for sched_req in scheduler_output.requests
+        ):
+            rows_cpu = rows.detach().to("cpu", torch.long)
+
         eos_id = int(self.model.config.im_end_token_id)
         for row_idx, sched_req in enumerate(scheduler_output.requests):
             req_output = outputs[sched_req.request_id]
@@ -556,3 +569,13 @@ class MossTTSModelRunner(ModelRunner):
             sched_req.data.pending_feedback_queue.append(
                 embeds[row_idx].detach().clone()
             )
+            if rows_cpu is not None and sched_req.data.stream_metadata is not None:
+                self._outbox.put(
+                    OutgoingMessage(
+                        request_id=sched_req.request_id,
+                        type="stream",
+                        target=self._vocoder_target,
+                        data=rows_cpu[row_idx].clone(),
+                        metadata=sched_req.data.stream_metadata,
+                    )
+                )

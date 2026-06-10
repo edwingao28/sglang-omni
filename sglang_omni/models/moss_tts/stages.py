@@ -22,6 +22,8 @@ from sglang_omni.models.moss_tts.request_builders import (
     preprocess_moss_tts_payload,
     set_moss_tts_preprocessing_context,
 )
+from sglang_omni.models.moss_tts.streaming_vocoder import MossStreamingVocoderScheduler
+from sglang_omni.models.tts_streaming import build_tts_usage
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 from sglang_omni.utils.audio_payload import audio_waveform_payload
@@ -171,19 +173,6 @@ def _load_moss_processor(
     return processor
 
 
-def _build_usage(state: MossTTSState) -> dict[str, Any] | None:
-    if not (state.prompt_tokens or state.completion_tokens or state.engine_time_s):
-        return None
-    usage = {
-        "prompt_tokens": int(state.prompt_tokens),
-        "completion_tokens": int(state.completion_tokens),
-        "total_tokens": int(state.prompt_tokens + state.completion_tokens),
-    }
-    if state.engine_time_s:
-        usage["engine_time_s"] = round(float(state.engine_time_s), 6)
-    return usage
-
-
 def create_preprocessing_executor(
     model_path: str, *, max_concurrency: int = 8
 ) -> SimpleScheduler:
@@ -277,8 +266,9 @@ def create_sglang_tts_engine_executor(
         model=model,
     )
     request_builder, result_adapter = make_moss_tts_scheduler_adapters(model=model)
+    model_runner = MossTTSModelRunner(model_worker, output_proc)
 
-    return OmniScheduler(
+    scheduler = OmniScheduler(
         tp_worker=model_worker,
         tree_cache=tree_cache,
         req_to_token_pool=req_to_token_pool,
@@ -287,11 +277,13 @@ def create_sglang_tts_engine_executor(
         model_config=model_config,
         prefill_manager=prefill_mgr,
         decode_manager=decode_mgr,
-        model_runner=MossTTSModelRunner(model_worker, output_proc),
+        model_runner=model_runner,
         request_builder=request_builder,
         result_adapter=result_adapter,
         abort_callback=cleanup_prepared_moss_tts_request,
     )
+    model_runner.set_stream_outbox(scheduler.outbox)
+    return scheduler
 
 
 def create_tts_engine_executor(*args, **kwargs) -> Any:
@@ -306,7 +298,11 @@ def create_vocoder_executor(
     dtype: str = "float32",
     max_batch_size: int = 8,
     max_batch_wait_ms: int = 2,
-) -> SimpleScheduler:
+    stream_stride: int = 40,
+    stream_followup_stride: int = 25,
+    stream_overlap_frames: int = 16,
+    stream_holdback_frames: int = 4,
+) -> MossStreamingVocoderScheduler:
     if gpu_id is not None:
         device = f"cuda:{gpu_id}"
     processor = _load_moss_processor(model_path, device=device, dtype=dtype)
@@ -373,7 +369,9 @@ def create_vocoder_executor(
         payload.data.update(audio_payload)
         payload.data["sample_rate"] = state.sample_rate
         payload.data["modality"] = "audio"
-        usage = _build_usage(state)
+        usage = build_tts_usage(
+            state.prompt_tokens, state.completion_tokens, state.engine_time_s
+        )
         if usage is not None:
             payload.data["usage"] = usage
         return payload
@@ -386,9 +384,15 @@ def create_vocoder_executor(
     def _vocode_batch(payloads: list[StagePayload]) -> list[StagePayload]:
         return [_vocode(payload) for payload in payloads]
 
-    return SimpleScheduler(
-        _vocode,
+    return MossStreamingVocoderScheduler(
+        processor,
+        compute_fn=_vocode,
         batch_compute_fn=_vocode_batch,
+        device=device,
         max_batch_size=max_batch_size,
         max_batch_wait_ms=max_batch_wait_ms,
+        stream_stride=stream_stride,
+        stream_followup_stride=stream_followup_stride,
+        stream_overlap_frames=stream_overlap_frames,
+        stream_holdback_frames=stream_holdback_frames,
     )
