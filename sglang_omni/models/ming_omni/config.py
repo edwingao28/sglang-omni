@@ -12,6 +12,7 @@ from sglang_omni.models.ming_omni.pipeline.next_stage import (
     AGGREGATE_STAGE,
     AUDIO_STAGE,
     DECODE_STAGE,
+    IMAGE_GEN_STAGE,
     IMAGE_STAGE,
     PREPROCESSING_STAGE,
     SEGMENTER_STAGE,
@@ -46,11 +47,17 @@ def _validate_ming_stage_tp_support(stages: list[StageConfig]) -> None:
         validate_stage_tp_support(stage_name=stage.name, tp_size=stage.tp_size)
 
 
-def _preprocessing_stage(*, process: str) -> StageConfig:
+def _preprocessing_stage(
+    *,
+    process: str,
+    enable_image_gen: bool = False,
+) -> StageConfig:
+    factory_args = {"enable_image_gen": True} if enable_image_gen else {}
     return StageConfig(
         name=PREPROCESSING_STAGE,
         process=process,
         factory=f"{_PKG}.stages.create_preprocessing_executor",
+        factory_args=factory_args,
         next=[AUDIO_STAGE, IMAGE_STAGE, AGGREGATE_STAGE],
         project_payload={
             AUDIO_STAGE: f"{_PKG}.stages.project_preprocessing_to_audio_encoder",
@@ -102,14 +109,30 @@ def _aggregate_stage(*, process: str) -> StageConfig:
     )
 
 
-def _thinker_stage(*, gpu: int, speech_enabled: bool, process: str) -> StageConfig:
+def _thinker_stage(
+    *,
+    gpu: int,
+    speech_enabled: bool,
+    process: str,
+    image_gen_enabled: bool = False,
+) -> StageConfig:
+    factory_args: dict[str, Any] = {"thinker_max_seq_len": 8192}
+    if image_gen_enabled:
+        factory_args["capture_hidden"] = True
+
+    next_stages = [DECODE_STAGE]
+    if speech_enabled:
+        next_stages.append(TALKER_STAGE)
+    if image_gen_enabled:
+        next_stages.append(IMAGE_GEN_STAGE)
+
     return StageConfig(
         name=THINKER_STAGE,
         process=process,
         factory=f"{_PKG}.stages.create_sglang_thinker_executor_from_config",
-        factory_args={"thinker_max_seq_len": 8192},
+        factory_args=factory_args,
         gpu=gpu,
-        next=[DECODE_STAGE, TALKER_STAGE] if speech_enabled else DECODE_STAGE,
+        next=next_stages if len(next_stages) > 1 else DECODE_STAGE,
     )
 
 
@@ -174,6 +197,25 @@ def _talker_stage(*, gpu: int, process: str) -> StageConfig:
     )
 
 
+def _image_gen_stage(
+    gpu: int,
+    process: str,
+    dit_type: str = "zimage",
+    dit_model_path: str | None = None,
+) -> StageConfig:
+    factory_args = {"device": "cuda", "dit_type": dit_type}
+    if dit_model_path is not None:
+        factory_args["dit_model_path"] = dit_model_path
+    return StageConfig(
+        name=IMAGE_GEN_STAGE,
+        process=process,
+        factory=f"{_PKG}.stages.create_image_gen_executor",
+        factory_args=factory_args,
+        gpu=gpu,
+        terminal=True,
+    )
+
+
 def _ming_text_stages() -> list[StageConfig]:
     return [
         _preprocessing_stage(process="preprocessing"),
@@ -208,6 +250,107 @@ def _ming_streaming_speech_stages() -> list[StageConfig]:
         _segmenter_stage(process="segmenter"),
         _talker_stream_stage(gpu=1, process="talker_stream"),
     ]
+
+
+def _ming_image_stages(
+    *,
+    dit_type: str = "zimage",
+    dit_model_path: str | None = None,
+) -> list[StageConfig]:
+    return [
+        _preprocessing_stage(process="preprocessing", enable_image_gen=True),
+        _audio_encoder_stage(gpu=0, process="audio_encoder"),
+        _image_encoder_stage(gpu=0, process="image_encoder"),
+        _aggregate_stage(process="mm_aggregate"),
+        _thinker_stage(
+            gpu=0,
+            speech_enabled=False,
+            image_gen_enabled=True,
+            process="thinker",
+        ),
+        _decode_stage(process="decode"),
+        _image_gen_stage(
+            gpu=1,
+            process="image_gen",
+            dit_type=dit_type,
+            dit_model_path=dit_model_path,
+        ),
+    ]
+
+
+def _ming_full_stages(
+    *,
+    dit_type: str = "zimage",
+    dit_model_path: str | None = None,
+) -> list[StageConfig]:
+    return [
+        _preprocessing_stage(process="preprocessing", enable_image_gen=True),
+        _audio_encoder_stage(gpu=0, process="audio_encoder"),
+        _image_encoder_stage(gpu=0, process="image_encoder"),
+        _aggregate_stage(process="mm_aggregate"),
+        _thinker_stage(
+            gpu=0,
+            speech_enabled=True,
+            image_gen_enabled=True,
+            process="thinker",
+        ),
+        _decode_stage(process="decode"),
+        _talker_stage(gpu=1, process="talker"),
+        _image_gen_stage(
+            gpu=2,
+            process="image_gen",
+            dit_type=dit_type,
+            dit_model_path=dit_model_path,
+        ),
+    ]
+
+
+def _apply_image_gen_factory_args(
+    stages: list[StageConfig],
+    *,
+    dit_type: str,
+    dit_model_path: str | None,
+) -> None:
+    image_gen = _stage_by_name(stages, IMAGE_GEN_STAGE)
+    if image_gen is None:
+        return
+
+    factory_args = dict(image_gen.factory_args)
+    factory_args["device"] = factory_args.get("device", "cuda")
+    factory_args["dit_type"] = dit_type
+    if dit_model_path is not None:
+        factory_args["dit_model_path"] = dit_model_path
+    else:
+        factory_args.pop("dit_model_path", None)
+    image_gen.factory_args = factory_args
+
+
+def _validate_stage_gpus_do_not_overlap(
+    stages: list[StageConfig],
+    *,
+    subject_name: str,
+    subject_label: str,
+    owner_name: str,
+    owner_label: str,
+    error_prefix: str,
+) -> None:
+    subject = _stage_by_name(stages, subject_name)
+    owner = _stage_by_name(stages, owner_name)
+    if subject is None or owner is None:
+        return
+
+    subject_gpus = _stage_gpu_set(subject.gpu, subject.tp_size)
+    owner_gpus = _stage_gpu_set(owner.gpu, owner.tp_size)
+    collisions = subject_gpus & owner_gpus
+    if not collisions:
+        return
+
+    raise ValueError(
+        f"{error_prefix}: "
+        f"{subject_label} gpus={sorted(subject_gpus)}, "
+        f"{owner_label} gpus={sorted(owner_gpus)}, "
+        f"collisions={sorted(collisions)}"
+    )
 
 
 class MingOmniPipelineConfig(PipelineConfig):
@@ -285,22 +428,151 @@ class MingOmniSpeechPipelineConfig(PipelineConfig):
         self._validate_talker_gpu_not_in_thinker_tp_range()
 
     def _validate_talker_gpu_not_in_thinker_tp_range(self) -> None:
-        thinker = _stage_by_name(self.stages, THINKER_STAGE)
-        talker = _stage_by_name(self.stages, TALKER_STAGE)
-        if thinker is None or talker is None:
-            return
+        _validate_stage_gpus_do_not_overlap(
+            self.stages,
+            subject_name=TALKER_STAGE,
+            subject_label="talker",
+            owner_name=THINKER_STAGE,
+            owner_label="thinker",
+            error_prefix=(
+                "Ming-Omni speech talker GPU collides with thinker TP range"
+            ),
+        )
 
-        thinker_gpus = _stage_gpu_set(thinker.gpu, thinker.tp_size)
-        talker_gpus = _stage_gpu_set(talker.gpu, talker.tp_size)
-        collisions = thinker_gpus & talker_gpus
-        if not collisions:
-            return
 
-        raise ValueError(
-            "Ming-Omni speech talker GPU collides with thinker TP range: "
-            f"talker gpus={sorted(talker_gpus)}, "
-            f"thinker gpus={sorted(thinker_gpus)}, "
-            f"collisions={sorted(collisions)}"
+class MingOmniImagePipelineConfig(PipelineConfig):
+    """7-stage image generation pipeline."""
+
+    architecture: ClassVar[str] = "BailingMoeV2ForCausalLM"
+
+    @classmethod
+    def mem_fraction_role_to_stage(cls) -> dict[str, str]:
+        return {"thinker": THINKER_STAGE}
+
+    @classmethod
+    def tensor_parallel_server_args_overrides(
+        cls,
+        *,
+        stage_name: str,
+        tp_size: int,
+    ) -> dict[str, object]:
+        if stage_name == THINKER_STAGE and tp_size > 1:
+            return {"disable_custom_all_reduce": True}
+        return {}
+
+    model_path: str
+    dit_type: str = "zimage"
+    dit_model_path: str | None = None
+    entry_stage: str = PREPROCESSING_STAGE
+    placement: PlacementConfig = Field(
+        default_factory=lambda: PlacementConfig(
+            require_memory_fraction_for_colocation=False
+        )
+    )
+    stages: list[StageConfig] = Field(default_factory=_ming_image_stages)
+
+    def model_post_init(self, __context: Any = None) -> None:
+        super().model_post_init(__context)
+        _validate_ming_stage_tp_support(self.stages)
+        _apply_image_gen_factory_args(
+            self.stages,
+            dit_type=self.dit_type,
+            dit_model_path=self.dit_model_path,
+        )
+        self._validate_image_gen_gpu_not_in_thinker_tp_range()
+
+    def _validate_image_gen_gpu_not_in_thinker_tp_range(self) -> None:
+        _validate_stage_gpus_do_not_overlap(
+            self.stages,
+            subject_name=IMAGE_GEN_STAGE,
+            subject_label="image_gen",
+            owner_name=THINKER_STAGE,
+            owner_label="thinker",
+            error_prefix=(
+                "Ming-Omni image image_gen GPU collides with thinker TP range"
+            ),
+        )
+
+
+class MingOmniFullPipelineConfig(PipelineConfig):
+    """8-stage speech and image generation pipeline."""
+
+    architecture: ClassVar[str] = "BailingMoeV2ForCausalLM"
+
+    @classmethod
+    def mem_fraction_role_to_stage(cls) -> dict[str, str]:
+        return {"thinker": THINKER_STAGE}
+
+    @classmethod
+    def talker_role_to_stage(cls) -> dict[str, str]:
+        return {"talker": TALKER_STAGE}
+
+    @classmethod
+    def tensor_parallel_server_args_overrides(
+        cls,
+        *,
+        stage_name: str,
+        tp_size: int,
+    ) -> dict[str, object]:
+        if stage_name == THINKER_STAGE and tp_size > 1:
+            return {"disable_custom_all_reduce": True}
+        return {}
+
+    model_path: str
+    dit_type: str = "zimage"
+    dit_model_path: str | None = None
+    entry_stage: str = PREPROCESSING_STAGE
+    placement: PlacementConfig = Field(
+        default_factory=lambda: PlacementConfig(
+            require_memory_fraction_for_colocation=False
+        )
+    )
+    stages: list[StageConfig] = Field(default_factory=_ming_full_stages)
+
+    def model_post_init(self, __context: Any = None) -> None:
+        super().model_post_init(__context)
+        _validate_ming_stage_tp_support(self.stages)
+        _apply_image_gen_factory_args(
+            self.stages,
+            dit_type=self.dit_type,
+            dit_model_path=self.dit_model_path,
+        )
+        self._validate_talker_gpu_not_in_thinker_tp_range()
+        self._validate_image_gen_gpu_not_in_thinker_tp_range()
+        self._validate_talker_gpu_not_on_image_gen_gpu()
+
+    def _validate_talker_gpu_not_in_thinker_tp_range(self) -> None:
+        _validate_stage_gpus_do_not_overlap(
+            self.stages,
+            subject_name=TALKER_STAGE,
+            subject_label="talker",
+            owner_name=THINKER_STAGE,
+            owner_label="thinker",
+            error_prefix=(
+                "Ming-Omni full talker GPU collides with thinker TP range"
+            ),
+        )
+
+    def _validate_image_gen_gpu_not_in_thinker_tp_range(self) -> None:
+        _validate_stage_gpus_do_not_overlap(
+            self.stages,
+            subject_name=IMAGE_GEN_STAGE,
+            subject_label="image_gen",
+            owner_name=THINKER_STAGE,
+            owner_label="thinker",
+            error_prefix=(
+                "Ming-Omni full image_gen GPU collides with thinker TP range"
+            ),
+        )
+
+    def _validate_talker_gpu_not_on_image_gen_gpu(self) -> None:
+        _validate_stage_gpus_do_not_overlap(
+            self.stages,
+            subject_name=TALKER_STAGE,
+            subject_label="talker",
+            owner_name=IMAGE_GEN_STAGE,
+            owner_label="image_gen",
+            error_prefix="Ming-Omni full talker/image_gen GPU collides",
         )
 
 
@@ -376,4 +648,6 @@ Variants = {
     "text": MingOmniPipelineConfig,
     "speech": MingOmniSpeechPipelineConfig,
     "streaming_speech": MingOmniStreamingSpeechPipelineConfig,
+    "image": MingOmniImagePipelineConfig,
+    "full": MingOmniFullPipelineConfig,
 }

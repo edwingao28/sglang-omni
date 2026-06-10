@@ -106,11 +106,18 @@ def _attach_decode_final_metadata(
     result.setdefault("usage", build_text_usage(state, thinker_out))
 
 
-def create_preprocessing_executor(model_path: str):
+def create_preprocessing_executor(
+    model_path: str,
+    *,
+    enable_image_gen: bool = False,
+):
     from sglang_omni.models.ming_omni.components.preprocessor import MingPreprocessor
     from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
-    preprocessor = MingPreprocessor(model_path=model_path)
+    preprocessor = MingPreprocessor(
+        model_path=model_path,
+        enable_image_gen=enable_image_gen,
+    )
 
     async def _preprocess(payload: StagePayload) -> StagePayload:
         return await preprocessor(payload)
@@ -235,6 +242,7 @@ def create_sglang_thinker_executor_from_config(
     thinker_max_seq_len: int = 8192,
     server_args_overrides: dict[str, Any] | None = None,
     enable_streaming_tts: bool = False,
+    capture_hidden: bool = False,
 ):
     validate_stage_tp_support(stage_name="thinker", tp_size=tp_size)
 
@@ -260,6 +268,7 @@ def create_sglang_thinker_executor_from_config(
         tp_size=tp_size,
         nccl_port=nccl_port,
         enable_streaming_tts=enable_streaming_tts,
+        capture_hidden=capture_hidden,
     )
 
 
@@ -321,6 +330,57 @@ def create_streaming_talker_executor(
         device=device,
         voice=voice,
     )
+
+
+def create_image_gen_executor(
+    model_path: str,
+    *,
+    dit_type: str = "zimage",
+    dit_model_path: str | None = None,
+    device: str = "cuda",
+    skip_semantic_encoder: bool = False,
+):
+    from sglang_omni.models.ming_omni.components.image_gen_executor import (
+        MingImageGenExecutor,
+    )
+    from sglang_omni.models.weight_loader import resolve_model_path
+    from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
+
+    local_path = str(resolve_model_path(model_path))
+    conditioner = None
+    backend_skip_semantic_encoder = skip_semantic_encoder
+    if dit_type == "zimage":
+        from sglang_omni.models.ming_omni.diffusion.semantic_conditioner import (
+            SemanticConditioner,
+        )
+
+        conditioner = SemanticConditioner()
+        backend_skip_semantic_encoder = True
+
+    executor_kwargs: dict[str, Any] = {
+        "model_path": local_path,
+        "dit_type": dit_type,
+        "dit_model_path": dit_model_path,
+        "device": device,
+        "skip_semantic_encoder": backend_skip_semantic_encoder,
+    }
+    if conditioner is not None:
+        executor_kwargs["conditioner"] = conditioner
+
+    executor = MingImageGenExecutor(**executor_kwargs)
+    started = False
+
+    async def _image_gen(payload: StagePayload) -> StagePayload:
+        nonlocal started
+        if not executor.should_generate_image(payload):
+            return executor.build_empty_image_result(payload)
+        if not started:
+            await executor.start()
+            started = True
+        await executor.add_request(payload)
+        return await executor.get_result()
+
+    return SimpleScheduler(_image_gen)
 
 
 def create_decode_executor(model_path: str):

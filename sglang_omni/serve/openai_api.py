@@ -49,6 +49,7 @@ from sglang_omni.models.tts_streaming import INITIAL_CODEC_CHUNK_FRAMES_PARAM
 from sglang_omni.serve.protocol import (
     ChatCompletionAudio,
     ChatCompletionChoice,
+    ChatCompletionImage,
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionStreamChoice,
@@ -243,7 +244,19 @@ async def _chat_non_stream(
             "transcript": result.audio.transcript,
         }
 
-    if "content" not in message and "audio" not in message:
+    if "image" in requested_modalities and result.images:
+        message["images"] = [
+            {
+                "id": image.id,
+                "data": image.data,
+                "format": image.format,
+                "width": image.width,
+                "height": image.height,
+            }
+            for image in result.images
+        ]
+
+    if "content" not in message and "audio" not in message and "images" not in message:
         message["content"] = result.text
 
     # Build usage
@@ -309,9 +322,9 @@ async def _chat_stream(
                 and bool(chunk.text)
                 and "text" in requested_modalities
             ) or (
-                chunk.modality == "audio"
-                and chunk.audio_b64 is not None
-                and "audio" in requested_modalities
+                chunk.audio_b64 is not None and "audio" in requested_modalities
+            ) or (
+                bool(chunk.images) and "image" in requested_modalities
             )
             if not has_payload:
                 continue
@@ -331,15 +344,25 @@ async def _chat_stream(
             emit = True
 
         # Audio chunk
-        if (
-            chunk.modality == "audio"
-            and chunk.audio_b64 is not None
-            and "audio" in requested_modalities
-        ):
+        if chunk.audio_b64 is not None and "audio" in requested_modalities:
             delta.audio = ChatCompletionAudio(
                 id=f"audio-{request_id}",
                 data=chunk.audio_b64,
             )
+            emit = True
+
+        # Image chunk
+        if chunk.images and "image" in requested_modalities:
+            delta.images = [
+                ChatCompletionImage(
+                    id=f"image-{request_id}-{idx}",
+                    data=image.get("b64_json") or image.get("data") or "",
+                    format=image.get("format", "png"),
+                    width=image.get("width"),
+                    height=image.get("height"),
+                )
+                for idx, image in enumerate(chunk.images)
+            ]
             emit = True
 
         if not emit:
@@ -438,6 +461,8 @@ def _build_chat_generate_request(req: ChatCompletionRequest) -> GenerateRequest:
     metadata: dict[str, Any] = {}
     if req.audio:
         metadata["audio_config"] = req.audio
+    if req.image_generation is not None:
+        metadata["image_generation"] = req.image_generation
     if audios:
         metadata["audios"] = audios
     if images:
