@@ -27,11 +27,11 @@ from sglang_omni.models.moss_tts_local.request_builders import (
     preprocess_moss_tts_local_payload,
     set_moss_tts_local_preprocessing_context,
 )
-from sglang_omni.preprocessing.cache_key import (
-    reference_path_cache_key as _reference_path_cache_key,
-)
 from sglang_omni.models.moss_tts_local.streaming_vocoder import (
     MossTTSLocalStreamingVocoderScheduler,
+)
+from sglang_omni.preprocessing.cache_key import (
+    reference_path_cache_key as _reference_path_cache_key,
 )
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 from sglang_omni.scheduling.stage_cache import StageOutputCache
@@ -216,8 +216,8 @@ class _BatchedReferenceEncoder:
 class CachedReferenceEncoder:
     """Content-addressed LRU cache + single-flight dedup in front of _BatchedReferenceEncoder.
 
-    Miss path returns the encoder's tensor unchanged (bit-identical to cache-off).
-    Hit path returns a fresh .clone().to(long) so callers cannot mutate cached state.
+    Every path (miss, hit, follower) returns an independent CPU long tensor, so
+    downstream sees one device/dtype regardless of cache temperature.
     Stores codes as int32 on CPU (lossless for codebook values in [0, 1023]).
     """
 
@@ -274,9 +274,9 @@ class CachedReferenceEncoder:
     ) -> torch.Tensor:
         """Single-flight skeleton shared by encode() and encode_data_uri().
 
-        Hit -> independent .clone().to(long). Miss leader runs encode_fn and returns
-        its tensor unchanged (bit-identical to cache-off). revalidate(), if given, is
-        evaluated outside the lock and gates the put (TOCTOU guard for file paths).
+        All paths return an independent CPU long tensor. revalidate(), if given,
+        is evaluated outside the lock and gates the put (TOCTOU guard for file
+        paths).
         """
         leader_fut: concurrent.futures.Future | None = None
         follower_fut: concurrent.futures.Future | None = None
@@ -328,11 +328,13 @@ class CachedReferenceEncoder:
             self._inflight.pop(key, None)
         leader_fut.set_result(stored)
         self._maybe_log()
-        return result  # original tensor: miss path stays bit-identical to cache-off
+        # CPU long like the hit path, so cache temperature never changes the
+        # device/dtype downstream sees (.to with a dtype change always copies).
+        return stored.to(torch.long)
 
     def _maybe_log(self) -> None:
         now = time.monotonic()
-        if now - self._last_log_time < 60.0:
+        if now - self._last_log_time < self.LOG_INTERVAL_S:
             return
         with self._lock:
             if now - self._last_log_time < self.LOG_INTERVAL_S:
