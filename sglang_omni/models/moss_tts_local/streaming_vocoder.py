@@ -417,10 +417,16 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
     def _pump_streams(self) -> list[OutgoingMessage]:
         """Decode every stream whose buffer crossed its threshold.
 
-        All due slots advance together with one uniform step length (the
-        smallest due buffer, capped at the causal-context limit); other slots
-        with at least that many frames join the same step as free riders.
+        A step's cost is one decoder forward over the FULL slot width
+        (exec_mask freezes masked slots' state but does not skip their
+        compute), so under concurrency the worst case is every stream
+        stepping alone. To coalesce, a due stream does not set the step
+        length by itself: the step is the smallest buffer among all streams
+        holding at least the join floor, so near-due peers ride along in the
+        same forward and the steady state converges to one batched step per
+        cadence instead of one per stream.
         """
+        join_floor = max(1, min(self._default_initial_chunk_frames or 5, self._stream_chunk_frames))
         messages: list[OutgoingMessage] = []
         while True:
             slotted = [
@@ -433,12 +439,17 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
             ]
             if not due:
                 break
-            step_t = min(
-                min(len(state.pending) for _, state in due), self._max_step_frames
+            floor = min(
+                min(len(state.pending) for _, state in due),
+                join_floor,
             )
             participants = [
-                entry for entry in slotted if len(entry[1].pending) >= step_t
+                entry for entry in slotted if len(entry[1].pending) >= floor
             ]
+            step_t = min(
+                min(len(state.pending) for _, state in participants),
+                self._max_step_frames,
+            )
             plan: dict[int, torch.Tensor] = {}
             for _, state in participants:
                 plan[state.slot] = torch.stack(state.pending[:step_t], dim=1)

@@ -68,6 +68,7 @@ class FakeCodec(nn.Module):
         self.dummy = nn.Parameter(torch.zeros(1))
         self._streaming_state: _FakeStreamingState | None = None
         self.config = SimpleNamespace(sampling_rate=SAMPLE_RATE)
+        self.frame_calls = 0
 
     @contextmanager
     def streaming(self, batch_size: int):
@@ -84,6 +85,7 @@ class FakeCodec(nn.Module):
         self._streaming_state.set_exec_mask(exec_mask)
 
     def _decode_frame(self, codes: torch.Tensor, codes_lengths: torch.Tensor):
+        self.frame_calls += 1
         _, batch_size, step_t = codes.shape
         state = self._streaming_state
         audio = torch.zeros(batch_size, 2, step_t * SAMPLES_PER_FRAME)
@@ -376,6 +378,73 @@ def test_interleaved_streams_are_isolated(monkeypatch) -> None:
     audio_b = _concat_stream_audio(messages, "b")
     np.testing.assert_array_equal(audio_a, reference_waveform(rows_a[:, 1:]).numpy())
     np.testing.assert_array_equal(audio_b, reference_waveform(rows_b[:, 1:]).numpy())
+
+
+def test_near_due_streams_coalesce_into_one_step(monkeypatch) -> None:
+    """A due stream must not step alone past near-due peers.
+
+    A decode step costs one forward over the full slot width regardless of
+    how many slots are active, so when A (6 buffered, due) steps while B sits
+    at 5, B's own step a moment later doubles the GPU work. The pump must
+    instead step both at T=5 in a single _decode_frame call.
+    """
+    processor = FakeProcessor()
+    codec = processor.audio_tokenizer
+    scheduler = _make_scheduler(
+        monkeypatch,
+        processor,
+        stream_chunk_frames=6,
+        initial_chunk_frames=3,
+    )
+    rows_a = _rows(9, seed=40)
+    rows_b = _rows(8, seed=41)
+    metadata = _metadata()
+    messages: list = []
+    chunk_id = 0
+    # Warm both streams past their initial chunk so both sit at the steady
+    # threshold (6) with empty buffers.
+    for index in range(3):
+        scheduler._on_chunk("a", _stream_item(rows_a[index], metadata, chunk_id))
+        chunk_id += 1
+    for index in range(3):
+        scheduler._on_chunk("b", _stream_item(rows_b[index], metadata, chunk_id))
+        chunk_id += 1
+    messages += _drain(scheduler)
+    # B buffers 5 frames (one short of due); then A crosses its threshold.
+    for index in range(3, 8):
+        scheduler._on_chunk("b", _stream_item(rows_b[index], metadata, chunk_id))
+        chunk_id += 1
+    calls_before = codec.frame_calls
+    for index in range(3, 9):
+        scheduler._on_chunk("a", _stream_item(rows_a[index], metadata, chunk_id))
+        chunk_id += 1
+    assert codec.frame_calls - calls_before == 1
+    coalesced = _drain(scheduler)
+    sizes = {
+        msg.request_id: _decode_audio(msg.data).shape[1]
+        for msg in coalesced
+        if msg.type == "stream"
+    }
+    assert sizes == {
+        "a": 5 * SAMPLES_PER_FRAME,
+        "b": 5 * SAMPLES_PER_FRAME,
+    }
+    messages += coalesced
+    # Finishing both streams must still produce exactly the offline waveform,
+    # proving the rider step advanced B's slot state correctly.
+    scheduler._on_done("a")
+    scheduler._on_streaming_new_request("a", _terminal_payload(rows_a, request_id="a"))
+    scheduler._on_done("b")
+    scheduler._on_streaming_new_request("b", _terminal_payload(rows_b, request_id="b"))
+    messages += _drain(scheduler)
+    np.testing.assert_array_equal(
+        _concat_stream_audio(messages, "a"),
+        reference_waveform(rows_a[:, 1:]).numpy(),
+    )
+    np.testing.assert_array_equal(
+        _concat_stream_audio(messages, "b"),
+        reference_waveform(rows_b[:, 1:]).numpy(),
+    )
 
 
 def test_slot_reuse_after_release(monkeypatch) -> None:
