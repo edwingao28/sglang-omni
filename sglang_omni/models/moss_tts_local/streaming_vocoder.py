@@ -116,7 +116,8 @@ class _CodecStreamSession:
         """Advance the participating slots by one uniform-length step.
 
         ``slot_codes`` maps slot -> ``[n_vq, T]`` codes with the SAME ``T``
-        for every participant. Returns slot -> ``[channels, samples]`` audio.
+        for every participant. Returns slot -> ``[channels, samples]`` float32
+        CPU audio.
         """
         if not slot_codes:
             return {}
@@ -138,10 +139,14 @@ class _CodecStreamSession:
             exec_mask[slot] = True
         self._codec._set_streaming_exec_mask(exec_mask)
         result = self._codec._decode_frame(codes_step, codes_lengths)
+        # One batched D2H per step: per-slot .item()/.to() round-trips would
+        # block the scheduler loop on a GPU sync once per participant.
+        audio_cpu = result.audio.detach().to("cpu", torch.float32)
+        lengths_cpu = result.audio_lengths.detach().to("cpu")
         out: dict[int, torch.Tensor] = {}
         for slot in slot_codes:
-            n_samples = int(result.audio_lengths[slot].item())
-            out[slot] = result.audio[slot, :, :n_samples].detach().clone()
+            n_samples = int(lengths_cpu[slot])
+            out[slot] = audio_cpu[slot, :, :n_samples]
         return out
 
     def decode_offline(
