@@ -28,6 +28,7 @@ non-streaming requests take the exact pre-existing
 from __future__ import annotations
 
 import contextlib
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -43,6 +44,8 @@ from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.messages import OutgoingMessage
 from sglang_omni.scheduling.streaming_simple_scheduler import StreamingSimpleScheduler
 from sglang_omni.utils.audio_payload import audio_waveform_payload
+
+logger = logging.getLogger(__name__)
 
 _SOURCE_HINT = "MOSS-TTS Local"
 
@@ -90,7 +93,8 @@ class _CodecStreamSession:
         self._device = next(codec.parameters()).device
         self._free_stream_slots = list(range(self._stream_slots))
         self._exit_stack = contextlib.ExitStack()
-        self._exit_stack.enter_context(codec.streaming(self._batch_size))
+        with torch.no_grad():
+            self._exit_stack.enter_context(codec.streaming(self._batch_size))
 
     def acquire(self) -> int | None:
         if not self._free_stream_slots:
@@ -102,7 +106,9 @@ class _CodecStreamSession:
         self._free_stream_slots.append(slot)
 
     def _reset_slots(self, slots: list[int]) -> None:
-        reset_mask = torch.zeros(self._batch_size, dtype=torch.bool, device=self._device)
+        reset_mask = torch.zeros(
+            self._batch_size, dtype=torch.bool, device=self._device
+        )
         reset_mask[slots] = True
 
         def _reset(module: Any) -> None:
@@ -110,7 +116,8 @@ class _CodecStreamSession:
             if state is not None:
                 state.reset(reset_mask.to(state.device))
 
-        self._codec.apply(_reset)
+        with torch.no_grad():
+            self._codec.apply(_reset)
 
     def step(self, slot_codes: dict[int, torch.Tensor]) -> dict[int, torch.Tensor]:
         """Advance the participating slots by one uniform-length step.
@@ -131,14 +138,19 @@ class _CodecStreamSession:
         codes_step = torch.zeros(
             n_vq, self._batch_size, step_t, dtype=torch.long, device=self._device
         )
-        codes_lengths = torch.zeros(self._batch_size, dtype=torch.long, device=self._device)
+        codes_lengths = torch.zeros(
+            self._batch_size, dtype=torch.long, device=self._device
+        )
         exec_mask = torch.zeros(self._batch_size, dtype=torch.bool, device=self._device)
         for slot, codes in slot_codes.items():
             codes_step[:, slot, :] = codes.to(device=self._device, dtype=torch.long)
             codes_lengths[slot] = step_t
             exec_mask[slot] = True
-        self._codec._set_streaming_exec_mask(exec_mask)
-        result = self._codec._decode_frame(codes_step, codes_lengths)
+        # no_grad: .eval() alone does not disable autograd, and a graph chained
+        # through the session's per-slot caches would grow unboundedly.
+        with torch.no_grad():
+            self._codec._set_streaming_exec_mask(exec_mask)
+            result = self._codec._decode_frame(codes_step, codes_lengths)
         # One batched D2H per step: per-slot .item()/.to() round-trips would
         # block the scheduler loop on a GPU sync once per participant. Gather
         # the active slots first — copying the full session width taxes
@@ -228,7 +240,22 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
             )
         codec = getattr(processor, "audio_tokenizer", None)
         if codec is None:
-            raise RuntimeError("MOSS-TTS Local vocoder requires processor.audio_tokenizer")
+            raise RuntimeError(
+                "MOSS-TTS Local vocoder requires processor.audio_tokenizer"
+            )
+        # The session drives the codec through these private members; fail at
+        # startup with a clear message instead of mid-request if the installed
+        # MOSS-Audio-Tokenizer-v2 modeling code drifts.
+        missing = [
+            name
+            for name in ("streaming", "_set_streaming_exec_mask", "_decode_frame")
+            if not hasattr(codec, name)
+        ]
+        if missing:
+            raise RuntimeError(
+                f"MOSS-TTS Local streaming vocoder: codec is missing {missing}; "
+                "the installed MOSS-Audio-Tokenizer-v2 version is incompatible"
+            )
         self._processor = processor
         self._codec = codec
         self._stream_slots = int(stream_slots)
@@ -264,7 +291,9 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
 
     def on_streaming_new_request(self, request_id: str, payload: StagePayload) -> None:
         state = self._stream_states.setdefault(request_id, _LocalStreamState())
-        params = payload.request.params if isinstance(payload.request.params, dict) else None
+        params = (
+            payload.request.params if isinstance(payload.request.params, dict) else None
+        )
         self._latch_thresholds(state, params)
 
     def on_stream_chunk(
@@ -289,7 +318,8 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
         # Row layout matches output_rows: [text_token, code_0, ..., code_{n_vq-1}].
         state.pending.append(row[1 : 1 + n_vq])
         self._ensure_slot(state)
-        return self._pump_streams()
+        self._pump_streams()
+        return []
 
     def on_stream_done(self, request_id: str) -> list[OutgoingMessage]:
         payload = self._stream_payloads[request_id]
@@ -422,7 +452,7 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
         else:
             state.threshold = self._stream_chunk_frames
 
-    def _pump_streams(self) -> list[OutgoingMessage]:
+    def _pump_streams(self) -> None:
         """Decode every stream whose buffer crossed its threshold.
 
         A step's cost is one decoder forward over the FULL slot width
@@ -433,9 +463,16 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
         holding at least the join floor, so near-due peers ride along in the
         same forward and the steady state converges to one batched step per
         cadence instead of one per stream.
+
+        Each iteration's chunks go to the outbox immediately, so a decode
+        failure in a later iteration cannot drop audio that was already
+        produced. A failed step leaves its participants' slot state
+        indeterminate, so all of them are failed and aborted — requests that
+        did not participate are untouched.
         """
-        join_floor = max(1, min(self._default_initial_chunk_frames or 5, self._stream_chunk_frames))
-        messages: list[OutgoingMessage] = []
+        join_floor = max(
+            1, min(self._default_initial_chunk_frames or 5, self._stream_chunk_frames)
+        )
         while True:
             slotted = [
                 (request_id, state)
@@ -443,10 +480,12 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
                 if state.slot is not None and state.threshold > 0
             ]
             due = [
-                entry for entry in slotted if len(entry[1].pending) >= entry[1].threshold
+                entry
+                for entry in slotted
+                if len(entry[1].pending) >= entry[1].threshold
             ]
             if not due:
-                break
+                return
             floor = min(
                 min(len(state.pending) for _, state in due),
                 join_floor,
@@ -461,15 +500,26 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
             plan: dict[int, torch.Tensor] = {}
             for _, state in participants:
                 plan[state.slot] = torch.stack(state.pending[:step_t], dim=1)
-            decoded = self._ensure_session().step(plan)
+            try:
+                decoded = self._ensure_session().step(plan)
+            except Exception as exc:
+                logger.exception(
+                    "MOSS-TTS Local streaming decode step failed; aborting %d "
+                    "participating request(s)",
+                    len(participants),
+                )
+                for request_id, _ in participants:
+                    self._emit_error(request_id, exc)
+                    self.abort(request_id)
+                return
             for request_id, state in participants:
                 del state.pending[:step_t]
                 state.emitted_any = True
                 state.threshold = self._stream_chunk_frames
-                messages.append(
-                    self._chunk_message(request_id, decoded[state.slot])
-                )
-        return messages
+                if not self._is_aborted(request_id):
+                    self.outbox.put(
+                        self._chunk_message(request_id, decoded[state.slot])
+                    )
 
     def _chunk_message(self, request_id: str, audio: torch.Tensor) -> OutgoingMessage:
         data = audio_waveform_payload(

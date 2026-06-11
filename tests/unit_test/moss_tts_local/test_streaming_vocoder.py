@@ -634,6 +634,73 @@ def test_offline_lane_waves_split_across_slots(monkeypatch) -> None:
         )
 
 
+class _FailingCodec(FakeCodec):
+    """FakeCodec whose Nth ``_decode_frame`` call raises."""
+
+    def __init__(self, fail_on_call: int) -> None:
+        super().__init__()
+        self._fail_on_call = fail_on_call
+
+    def _decode_frame(self, codes: torch.Tensor, codes_lengths: torch.Tensor):
+        if self.frame_calls + 1 == self._fail_on_call:
+            self.frame_calls += 1
+            raise RuntimeError("codec decode exploded")
+        return super()._decode_frame(codes, codes_lengths)
+
+
+def test_decode_step_failure_fails_participants_only(monkeypatch) -> None:
+    """A failed decode step errors every participant, releases their slots,
+    leaves non-participants and already-emitted audio untouched, and keeps
+    the scheduler usable for new streams.
+    """
+    processor = FakeProcessor()
+    processor.audio_tokenizer = _FailingCodec(fail_on_call=2)
+    scheduler = _make_scheduler(
+        monkeypatch,
+        processor,
+        stream_chunk_frames=10,
+        initial_chunk_frames=2,
+    )
+    metadata = _metadata()
+
+    # Decode #1 succeeds: "c" emits its initial 2-frame chunk.
+    rows_c = _rows(2, seed=100)
+    for index, row in enumerate(rows_c):
+        scheduler._on_chunk("c", _stream_item(row, metadata, index))
+    early = _drain(scheduler)
+    assert [m.type for m in early] == ["stream"]
+    assert early[0].request_id == "c"
+
+    # "b" buffers 3 frames below its steady threshold (explicit initial=0),
+    # then "a" crossing its 2-frame initial threshold pulls "b" into the same
+    # step as a free rider — decode #2 raises with both participating.
+    metadata_b = _metadata(**{INITIAL_CODEC_CHUNK_FRAMES_PARAM: 0})
+    rows_b = _rows(3, seed=101)
+    for index, row in enumerate(rows_b):
+        scheduler._on_chunk("b", _stream_item(row, metadata_b, index))
+    rows_a = _rows(2, seed=102)
+    for index, row in enumerate(rows_a):
+        scheduler._on_chunk("a", _stream_item(row, metadata, index))
+
+    messages = _drain(scheduler)
+    errors = [m for m in messages if m.type == "error"]
+    assert {m.request_id for m in errors} == {"a", "b"}
+    assert all(m.request_id != "c" for m in messages if m.type == "stream")
+
+    # Both participants' state is gone and their slots are back in the pool.
+    assert "a" not in scheduler._stream_states
+    assert "b" not in scheduler._stream_states
+    assert len(scheduler._session._free_stream_slots) == scheduler._stream_slots - 1
+
+    # The scheduler keeps serving: a fresh stream decodes normally.
+    rows_d = _rows(6, seed=103)
+    messages_d = _run_stream(scheduler, rows_d, request_id="d")
+    np.testing.assert_array_equal(
+        _concat_stream_audio(messages_d, "d"),
+        reference_waveform(rows_d[:, 1:]).numpy(),
+    )
+
+
 def test_stream_chunk_requires_metadata_contract(monkeypatch) -> None:
     processor = FakeProcessor()
     scheduler = _make_scheduler(monkeypatch, processor)
@@ -641,7 +708,9 @@ def test_stream_chunk_requires_metadata_contract(monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="missing metadata"):
         scheduler.on_stream_chunk("req", _stream_item(row, None))
     with pytest.raises(RuntimeError, match="stream"):
-        scheduler.on_stream_chunk("req2", _stream_item(row, {"modality": "audio_codes"}))
+        scheduler.on_stream_chunk(
+            "req2", _stream_item(row, {"modality": "audio_codes"})
+        )
     with pytest.raises(ValueError, match="modality"):
         scheduler.on_stream_chunk(
             "req3", _stream_item(row, {"stream": True, "modality": "text"})
