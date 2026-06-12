@@ -93,6 +93,7 @@ class _CodecStreamSession:
         self._device = next(codec.parameters()).device
         self._free_stream_slots = list(range(self._stream_slots))
         self._exit_stack = contextlib.ExitStack()
+        self._closed = False
         with torch.no_grad():
             self._exit_stack.enter_context(codec.streaming(self._batch_size))
 
@@ -102,8 +103,17 @@ class _CodecStreamSession:
         return self._free_stream_slots.pop()
 
     def release(self, slot: int) -> None:
+        if self._closed:
+            return
         self._reset_slots([slot])
         self._free_stream_slots.append(slot)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        with torch.no_grad():
+            self._exit_stack.close()
+        self._closed = True
 
     def _reset_slots(self, slots: list[int]) -> None:
         reset_mask = torch.zeros(
@@ -275,6 +285,25 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
             max_batch_size=max_batch_size,
             max_batch_wait_ms=max_batch_wait_ms,
         )
+
+    def start(self) -> None:
+        try:
+            super().start()
+        finally:
+            self._close_streaming_session()
+
+    def stop(self) -> None:
+        was_running = self._running
+        super().stop()
+        if not was_running:
+            self._close_streaming_session()
+
+    def _close_streaming_session(self) -> None:
+        with self._state_lock:
+            self._stream_states.clear()
+            if self._session is not None:
+                self._session.close()
+                self._session = None
 
     # ------------------------------------------------------------------
     # Streaming hooks
@@ -491,7 +520,9 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
                 join_floor,
             )
             participants = [
-                entry for entry in slotted if len(entry[1].pending) >= floor
+                entry
+                for entry in slotted
+                if self._can_join_coalesced_step(entry[1], floor)
             ]
             step_t = min(
                 min(len(state.pending) for _, state in participants),
@@ -520,6 +551,14 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
                     self.outbox.put(
                         self._chunk_message(request_id, decoded[state.slot])
                     )
+
+    @staticmethod
+    def _can_join_coalesced_step(state: _LocalStreamState, floor: int) -> bool:
+        if len(state.pending) >= state.threshold:
+            return True
+        if not state.emitted_any and state.initial_chunk_frames == 0:
+            return False
+        return len(state.pending) >= floor
 
     def _chunk_message(self, request_id: str, audio: torch.Tensor) -> OutgoingMessage:
         data = audio_waveform_payload(

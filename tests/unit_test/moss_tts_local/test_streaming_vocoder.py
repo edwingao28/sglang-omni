@@ -447,6 +447,42 @@ def test_near_due_streams_coalesce_into_one_step(monkeypatch) -> None:
     )
 
 
+def test_explicit_zero_initial_chunk_is_not_pulled_below_steady(monkeypatch) -> None:
+    processor = FakeProcessor()
+    scheduler = _make_scheduler(
+        monkeypatch,
+        processor,
+        stream_chunk_frames=6,
+        initial_chunk_frames=2,
+    )
+    rows_a = _rows(2, seed=42)
+    rows_b = _rows(6, seed=43)
+    metadata_a = _metadata()
+    metadata_b = _metadata(**{INITIAL_CODEC_CHUNK_FRAMES_PARAM: 0})
+    chunk_id = 0
+
+    # B explicitly opts out of a smaller first chunk, so five buffered frames
+    # must not ride along when A crosses its own first-chunk threshold.
+    for index in range(5):
+        scheduler._on_chunk("b", _stream_item(rows_b[index], metadata_b, chunk_id))
+        chunk_id += 1
+    for index in range(2):
+        scheduler._on_chunk("a", _stream_item(rows_a[index], metadata_a, chunk_id))
+        chunk_id += 1
+
+    messages = _drain(scheduler)
+    assert [m.request_id for m in messages if m.type == "stream"] == ["a"]
+
+    scheduler._on_chunk("b", _stream_item(rows_b[5], metadata_b, chunk_id))
+    messages += _drain(scheduler)
+    b_chunks = [
+        _decode_audio(m.data).shape[1] // SAMPLES_PER_FRAME
+        for m in messages
+        if m.type == "stream" and m.request_id == "b"
+    ]
+    assert b_chunks == [6]
+
+
 def test_slot_reuse_after_release(monkeypatch) -> None:
     processor = FakeProcessor()
     scheduler = _make_scheduler(
@@ -634,6 +670,28 @@ def test_offline_lane_waves_split_across_slots(monkeypatch) -> None:
         )
 
 
+def test_stop_closes_persistent_streaming_session(monkeypatch) -> None:
+    processor = FakeProcessor()
+    scheduler = _make_scheduler(monkeypatch, processor)
+    scheduler._on_chunk("req", _stream_item(_rows(1, seed=74)[0], _metadata()))
+    assert scheduler._session is not None
+    assert processor.audio_tokenizer._streaming_state is not None
+
+    scheduler.stop()
+
+    assert scheduler._session is None
+    assert scheduler._stream_states == {}
+    assert processor.audio_tokenizer._streaming_state is None
+
+    # Reusing the same codec instance after stop must be able to open a fresh
+    # streaming context instead of tripping the codec's nested-session guard.
+    restarted = _make_scheduler(monkeypatch, processor)
+    restarted._on_chunk("req2", _stream_item(_rows(1, seed=75)[0], _metadata()))
+    assert restarted._session is not None
+    assert processor.audio_tokenizer._streaming_state is not None
+    restarted.stop()
+
+
 class _FailingCodec(FakeCodec):
     """FakeCodec whose Nth ``_decode_frame`` call raises."""
 
@@ -654,7 +712,7 @@ def test_decode_step_failure_fails_participants_only(monkeypatch) -> None:
     the scheduler usable for new streams.
     """
     processor = FakeProcessor()
-    processor.audio_tokenizer = _FailingCodec(fail_on_call=2)
+    processor.audio_tokenizer = _FailingCodec(fail_on_call=3)
     scheduler = _make_scheduler(
         monkeypatch,
         processor,
@@ -671,13 +729,15 @@ def test_decode_step_failure_fails_participants_only(monkeypatch) -> None:
     assert [m.type for m in early] == ["stream"]
     assert early[0].request_id == "c"
 
-    # "b" buffers 3 frames below its steady threshold (explicit initial=0),
-    # then "a" crossing its 2-frame initial threshold pulls "b" into the same
-    # step as a free rider — decode #2 raises with both participating.
-    metadata_b = _metadata(**{INITIAL_CODEC_CHUNK_FRAMES_PARAM: 0})
-    rows_b = _rows(3, seed=101)
+    # "b" first emits its configured initial chunk, then buffers below its
+    # steady threshold. When "a" crosses its 2-frame initial threshold, "b" can
+    # ride along because it did not opt out of smaller initial chunks.
+    rows_b = _rows(5, seed=101)
     for index, row in enumerate(rows_b):
-        scheduler._on_chunk("b", _stream_item(row, metadata_b, index))
+        scheduler._on_chunk("b", _stream_item(row, metadata, index))
+    early_b = _drain(scheduler)
+    assert [m.type for m in early_b] == ["stream"]
+    assert early_b[0].request_id == "b"
     rows_a = _rows(2, seed=102)
     for index, row in enumerate(rows_a):
         scheduler._on_chunk("a", _stream_item(row, metadata, index))
