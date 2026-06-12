@@ -483,6 +483,41 @@ def test_explicit_zero_initial_chunk_is_not_pulled_below_steady(monkeypatch) -> 
     assert b_chunks == [6]
 
 
+def test_positive_initial_chunk_is_not_pulled_below_threshold(monkeypatch) -> None:
+    processor = FakeProcessor()
+    scheduler = _make_scheduler(
+        monkeypatch,
+        processor,
+        stream_chunk_frames=6,
+        initial_chunk_frames=2,
+    )
+    rows_a = _rows(1, seed=44)
+    rows_b = _rows(5, seed=45)
+    metadata_a = _metadata(**{INITIAL_CODEC_CHUNK_FRAMES_PARAM: 1})
+    metadata_b = _metadata(**{INITIAL_CODEC_CHUNK_FRAMES_PARAM: 5})
+    chunk_id = 0
+
+    # B asked for a 5-frame first chunk; four buffered frames must not ride
+    # along when A becomes due with a 1-frame floor.
+    for index in range(4):
+        scheduler._on_chunk("b", _stream_item(rows_b[index], metadata_b, chunk_id))
+        chunk_id += 1
+    scheduler._on_chunk("a", _stream_item(rows_a[0], metadata_a, chunk_id))
+    chunk_id += 1
+
+    messages = _drain(scheduler)
+    assert [m.request_id for m in messages if m.type == "stream"] == ["a"]
+
+    scheduler._on_chunk("b", _stream_item(rows_b[4], metadata_b, chunk_id))
+    messages += _drain(scheduler)
+    b_chunks = [
+        _decode_audio(m.data).shape[1] // SAMPLES_PER_FRAME
+        for m in messages
+        if m.type == "stream" and m.request_id == "b"
+    ]
+    assert b_chunks == [5]
+
+
 def test_slot_reuse_after_release(monkeypatch) -> None:
     processor = FakeProcessor()
     scheduler = _make_scheduler(

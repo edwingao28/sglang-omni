@@ -556,7 +556,7 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
     def _can_join_coalesced_step(state: _LocalStreamState, floor: int) -> bool:
         if len(state.pending) >= state.threshold:
             return True
-        if not state.emitted_any and state.initial_chunk_frames == 0:
+        if not state.emitted_any:
             return False
         return len(state.pending) >= floor
 
