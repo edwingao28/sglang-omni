@@ -58,8 +58,7 @@ class MossTTSLocalSGLangRequestData(ARRequestData):
     seed: int | None = None
     sampling_seed: int = field(default_factory=_new_moss_tts_sampling_seed)
     engine_start_s: float = 0.0
-    # Non-None marks a streaming request: the model runner forwards every
-    # generated row to the vocoder stage tagged with this metadata.
+    # Non-None marks a streaming request.
     stream_metadata: dict[str, Any] | None = None
 
 

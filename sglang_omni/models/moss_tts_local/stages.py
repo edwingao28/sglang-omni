@@ -44,14 +44,10 @@ _MOSS_TTS_LOCAL_INSTALL_HINT = (
     "OpenMOSS-Team/MOSS-Audio-Tokenizer-v2."
 )
 
-# NOTE: the preprocessing and vocoder stages each load their own processor
-# (and thus their own ~4.3 GB bf16 codec instance). The codec's streaming
-# decode flips module-global state (`model.streaming()`), so a decode on a
-# shared instance corrupts any concurrently running reference encode; with
-# separate instances the encoder side only ever runs stateless forwards and
-# all decoding stays confined to the single-threaded vocoder scheduler loop
-# (which may hold one long-lived streaming session on its instance, see
-# streaming_vocoder.py).
+# NOTE: preprocessing and vocoder stages each load their own processor (and
+# ~4.3 GB bf16 codec instance): `model.streaming()` flips module-global codec
+# state, so a decode on a shared instance would corrupt a concurrent
+# reference encode (see streaming_vocoder.py).
 
 
 def _normalize_processor_config(processor: Any) -> None:
@@ -328,8 +324,7 @@ class CachedReferenceEncoder:
             self._inflight.pop(key, None)
         leader_fut.set_result(stored)
         self._maybe_log()
-        # CPU long like the hit path, so cache temperature never changes the
-        # device/dtype downstream sees (.to with a dtype change always copies).
+        # CPU long like the hit path.
         return stored.to(torch.long)
 
     def _maybe_log(self) -> None:
@@ -482,10 +477,8 @@ def create_sglang_tts_engine_executor(
         "enable_torch_compile": False,
         "max_prefill_tokens": 8192,
         "max_running_requests": 16,
-        # Leave headroom for the two ~4.3 GB bf16 codec instances plus their
-        # activations: on multi-GPU hosts the codec lives on the second GPU
-        # (0.6 of an 80 GB card still gives the 4B backbone a ~35 GB KV pool);
-        # on a single GPU everything co-locates, so back off further.
+        # Headroom for the two ~4.3 GB bf16 codec instances; back off further
+        # when everything co-locates on a single GPU.
         "mem_fraction_static": 0.6 if torch.cuda.device_count() > 1 else 0.5,
         "sampling_backend": "pytorch",
         "torch_compile_max_bs": 16,

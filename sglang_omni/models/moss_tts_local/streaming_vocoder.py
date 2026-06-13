@@ -1,28 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Streaming vocoder scheduler for MOSS-TTS Local (v1.5).
 
-The MOSS-Audio-Tokenizer-v2 decoder is natively streamable: every conv and
-attention block is causal and carries per-slot state under
-``model.streaming()``, so chunked decoding yields the same audio as one
-offline decode regardless of where the chunk boundaries fall. This scheduler
-holds ONE long-lived batched streaming session on the stage's codec and
-multiplexes requests onto its slots:
-
-- streaming requests occupy a slot for their lifetime; frames are decoded
-  incrementally as the AR engine pushes them and the slot state is reset for
-  reuse on completion;
-- non-streaming requests decode through dedicated offline slots of the same
-  session, because the codec forbids nested ``streaming()`` contexts: once a
-  session is live, ``processor.decode_audio_codes`` (which opens its own
-  context via ``chunk_duration``) would raise on the same instance;
-- every decode step advances all participating slots by one uniform length
-  with the others masked out via ``exec_mask`` — per-slot streaming state
-  advances by the step's full time dimension, so ragged steps would
-  desynchronize the masked padding into the caches.
-
-Until the first streaming request arrives the session is not started and
-non-streaming requests take the exact pre-existing
-``processor.decode_audio_codes`` path.
+The MOSS-Audio-Tokenizer-v2 decoder is natively streamable: every block is
+causal and carries per-slot state under ``model.streaming()``, so chunked
+decoding matches one offline decode regardless of chunk boundaries. This
+scheduler holds ONE long-lived batched streaming session on the stage's
+codec: streaming requests occupy a slot for their lifetime, non-streaming
+requests decode through dedicated offline slots of the same session (the
+codec forbids nested ``streaming()`` contexts), and every step advances all
+participating slots by one uniform length with the rest masked via
+``exec_mask``. Until the first streaming request arrives, non-streaming
+requests take the pre-existing ``processor.decode_audio_codes`` path.
 """
 
 from __future__ import annotations
@@ -156,15 +144,10 @@ class _CodecStreamSession:
             codes_step[:, slot, :] = codes.to(device=self._device, dtype=torch.long)
             codes_lengths[slot] = step_t
             exec_mask[slot] = True
-        # no_grad: .eval() alone does not disable autograd, and a graph chained
-        # through the session's per-slot caches would grow unboundedly.
         with torch.no_grad():
             self._codec._set_streaming_exec_mask(exec_mask)
             result = self._codec._decode_frame(codes_step, codes_lengths)
-        # One batched D2H per step: per-slot .item()/.to() round-trips would
-        # block the scheduler loop on a GPU sync once per participant. Gather
-        # the active slots first — copying the full session width taxes
-        # low-concurrency streams with bytes for empty slots.
+        # One batched D2H per step, active slots only.
         slots = list(slot_codes)
         audio_cpu = result.audio[slots].detach().to("cpu", torch.float32)
         lengths_cpu = result.audio_lengths[slots].detach().to("cpu")
@@ -179,10 +162,8 @@ class _CodecStreamSession:
     ) -> list[torch.Tensor]:
         """Decode complete utterances ``[n_vq, T]`` through the offline lane.
 
-        Replays the codec's own chunked ``batch_decode`` step plan (full steps
-        while any item has one left, then drain the shortest stragglers) from
-        freshly reset slots, so the output matches the non-session
-        ``processor.decode_audio_codes`` path.
+        Replays the codec's own chunked ``batch_decode`` step plan so the
+        output matches the non-session ``processor.decode_audio_codes`` path.
         """
         wavs: list[torch.Tensor] = []
         for wave_start in range(0, len(codes_list), self._offline_slots):
@@ -253,9 +234,6 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
             raise RuntimeError(
                 "MOSS-TTS Local vocoder requires processor.audio_tokenizer"
             )
-        # The session drives the codec through these private members; fail at
-        # startup with a clear message instead of mid-request if the installed
-        # MOSS-Audio-Tokenizer-v2 modeling code drifts.
         missing = [
             name
             for name in ("streaming", "_set_streaming_exec_mask", "_decode_frame")
@@ -356,8 +334,7 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
 
         audio_parts: list[torch.Tensor] = []
         if state.slot is None and state.pending:
-            # Slot-starved request: every frame is still buffered, so it is
-            # effectively an offline job now.
+            # Slot-starved: every frame is still buffered, decode offline.
             codes = torch.stack(state.pending, dim=1)
             state.pending = []
             audio_parts.extend(
@@ -468,8 +445,7 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
             and params.get(INITIAL_CODEC_CHUNK_FRAMES_PARAM) is not None
         )
         if explicit:
-            # An explicit 0 means "no smaller first chunk" — don't substitute
-            # the scheduler default for it.
+            # Explicit 0 opts out of a smaller first chunk.
             state.initial_chunk_frames = resolve_initial_codec_chunk_frames(
                 params,
                 steady_chunk_frames=self._stream_chunk_frames,
@@ -484,20 +460,11 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
     def _pump_streams(self) -> None:
         """Decode every stream whose buffer crossed its threshold.
 
-        A step's cost is one decoder forward over the FULL slot width
-        (exec_mask freezes masked slots' state but does not skip their
-        compute), so under concurrency the worst case is every stream
-        stepping alone. To coalesce, a due stream does not set the step
-        length by itself: the step is the smallest buffer among all streams
-        holding at least the join floor, so near-due peers ride along in the
-        same forward and the steady state converges to one batched step per
-        cadence instead of one per stream.
-
-        Each iteration's chunks go to the outbox immediately, so a decode
-        failure in a later iteration cannot drop audio that was already
-        produced. A failed step leaves its participants' slot state
-        indeterminate, so all of them are failed and aborted — requests that
-        did not participate are untouched.
+        A step costs one decoder forward over the full slot width, so a due
+        stream does not step alone: peers holding at least the join floor
+        ride along in the same forward. Chunks go to the outbox per
+        iteration. A failed step leaves its participants' slot state
+        indeterminate, so all of them are failed and aborted.
         """
         join_floor = max(
             1, min(self._default_initial_chunk_frames or 5, self._stream_chunk_frames)
@@ -599,8 +566,7 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
             raise RuntimeError("MOSS-TTS Local vocoder requires audio_codes")
         codes = torch.as_tensor(state.audio_codes, dtype=torch.long)
         if codes.numel() == 0:
-            # Immediate stop decision: emit no audio so only this request
-            # fails downstream instead of poisoning the whole decode batch.
+            # Emit no audio: only this request fails downstream, not the batch.
             return state, None
         return state, codes
 
@@ -610,8 +576,7 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
         state: MossTTSLocalState,
         wav: torch.Tensor,
     ) -> StagePayload:
-        # The v2 codec is natively stereo: keep the [channels, samples]
-        # layout end to end so the client receives a 2-channel waveform.
+        # The v2 codec is natively stereo: keep [channels, samples] end to end.
         audio_payload = audio_waveform_payload(
             wav, source_hint=_SOURCE_HINT, keep_channels=True
         )
@@ -629,8 +594,8 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
     def _decode_codes_rows(self, codes_list: list[torch.Tensor]) -> list[torch.Tensor]:
         """Decode ``[T, >=n_vq]`` row tensors to fp32 CPU waveforms."""
         if self._session is None:
-            # No live streaming session: keep the pre-existing processor path
-            # (it opens its own short streaming context internally).
+            # Processor path opens its own streaming context; illegal once a
+            # session is live.
             return [
                 torch.as_tensor(wav).detach().to("cpu")
                 for wav in self._processor.decode_audio_codes(codes_list)
@@ -638,8 +603,7 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
         channels_first = [
             codes[:, : self._n_vq].transpose(0, 1).contiguous() for codes in codes_list
         ]
-        # Non-streaming compute runs on the loop thread without _state_lock,
-        # while abort() resets slots under it from other threads: serialize
+        # abort() resets slots under _state_lock from other threads; serialize
         # every session access on the same lock.
         with self._state_lock:
             wavs = self._session.decode_offline(
@@ -654,8 +618,6 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
         results = []
         for payload, (state, codes) in zip(payloads, prepared):
             if codes is None:
-                # No audio fields: the client surfaces a per-request
-                # "no audio output" error without failing batch peers.
                 state.audio_codes = None
                 payload.data = state.to_dict()
                 results.append(payload)
