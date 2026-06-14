@@ -297,3 +297,74 @@ def test_result_adapter_hides_fallback_token_for_prefill_only_request() -> None:
 
     assert state.thinker_out["output_ids"] == []
     assert state.thinker_out["extra_model_outputs"] == {"hidden_states": "kept"}
+
+
+def _build_image_gen_payload_with_patch_tokens(*, request_id="image-gen-prefill"):
+    torch = pytest.importorskip("torch")
+
+    from sglang_omni.models.ming_omni.io import MingOmniPipelineState
+    from sglang_omni.proto import OmniRequest, StagePayload
+
+    state = MingOmniPipelineState(
+        prompt={
+            "input_ids": torch.tensor([11, 157157, 157157, 12], dtype=torch.long),
+            "attention_mask": torch.ones(4, dtype=torch.long),
+        },
+        mm_inputs={
+            "image_gen": {
+                "prefill_only": True,
+                "image_patch_token_id": 157157,
+                "gen_mask": [0, 1, 1, 0],
+            }
+        },
+        thinker_inputs={
+            "capture_model_output_keys": ("hidden_states",),
+            "model_inputs": {"image_embeds": torch.ones(2, 3)},
+        },
+    )
+    return StagePayload(
+        request_id=request_id,
+        request=OmniRequest(inputs={}, params={}),
+        data=state.to_dict(),
+    )
+
+
+def test_request_builder_substitutes_query_patch_tokens_per_request(
+    monkeypatch,
+) -> None:
+    _install_fake_sglang_request_modules(monkeypatch)
+
+    req_data = _request_builder()(_build_image_gen_payload_with_patch_tokens())
+
+    ids = list(req_data.req.origin_input_ids)
+    assert 157157 not in ids
+    pad = req_data.model_inputs["pad_values"]["image"]
+    assert pad >= 32000
+    assert ids == [11, pad, pad, 12]
+    tensor_ids = req_data.input_ids.tolist()
+    assert tensor_ids == [11, pad, pad, 12]
+
+
+def test_request_builder_query_pad_is_unique_per_request_id(monkeypatch) -> None:
+    _install_fake_sglang_request_modules(monkeypatch)
+    builder = _request_builder()
+
+    pad_a = builder(
+        _build_image_gen_payload_with_patch_tokens(request_id="req-a")
+    ).model_inputs["pad_values"]["image"]
+    pad_b = builder(
+        _build_image_gen_payload_with_patch_tokens(request_id="req-b")
+    ).model_inputs["pad_values"]["image"]
+
+    assert pad_a != pad_b
+
+
+def test_request_builder_without_patch_token_id_keeps_input_ids(monkeypatch) -> None:
+    _install_fake_sglang_request_modules(monkeypatch)
+
+    # Existing helper builds a prefill-only payload with no patch tokens and
+    # no image_patch_token_id — substitution must be a no-op.
+    req_data = _request_builder()(_build_image_gen_payload())
+
+    assert list(req_data.req.origin_input_ids) == [11, 12, 13]
+    assert "pad_values" not in req_data.model_inputs

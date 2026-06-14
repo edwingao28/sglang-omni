@@ -165,8 +165,6 @@ def make_thinker_scheduler_adapters(
                 for _orig_id, _pad in token_id_map.items():
                     input_ids[input_ids == _orig_id] = _pad
 
-        input_ids_list = input_ids.to(dtype=_torch_long()).flatten().tolist()
-
         image_gen = (
             state.mm_inputs.get("image_gen")
             if hasattr(state.mm_inputs, "get")
@@ -177,6 +175,22 @@ def make_thinker_scheduler_adapters(
             if hasattr(image_gen, "get")
             else False
         )
+
+        # Substitute query patch tokens with a per-request pad so the radix
+        # prefix cache never serves the query region from another request —
+        # captured hidden states must always include all query positions.
+        if prefill_only:
+            patch_token_id = image_gen.get("image_patch_token_id") or image_token_id
+            if patch_token_id is not None:
+                import xxhash
+
+                _h = xxhash.xxh3_64(payload.request_id.encode()).intdigest()
+                _pad = vocab_size + _h % (1 << 62)
+                input_ids = input_ids.clone()
+                input_ids[input_ids == int(patch_token_id)] = _pad
+                pad_values["image"] = _pad
+
+        input_ids_list = input_ids.to(dtype=_torch_long()).flatten().tolist()
 
         params = payload.request.params or {}
         if prefill_only and "max_new_tokens" not in params:
