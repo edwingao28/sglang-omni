@@ -258,11 +258,13 @@ class MingImageGenExecutor:
         if gen_mask.dim() != 1:
             return None, None
         if hs.dim() == 2:
-            if gen_mask.numel() != hs.shape[0]:
+            gen_mask = self._align_gen_mask(gen_mask, hs.shape[0])
+            if gen_mask is None:
                 return None, None
             query_hidden = hs[gen_mask].unsqueeze(0)
         elif hs.dim() == 3:
-            if gen_mask.numel() != hs.shape[1]:
+            gen_mask = self._align_gen_mask(gen_mask, hs.shape[1])
+            if gen_mask is None:
                 return None, None
             query_hidden = hs[:, gen_mask, :]
         else:
@@ -275,6 +277,33 @@ class MingImageGenExecutor:
         condition_embeds = self._conditioner.project(query_hidden)
         negative_embeds = condition_embeds * 0.0
         return list(condition_embeds.unbind(dim=0)), list(negative_embeds.unbind(dim=0))
+
+    @staticmethod
+    def _align_gen_mask(
+        gen_mask: torch.Tensor, seq_len: int
+    ) -> torch.Tensor | None:
+        """Align gen_mask to captured hidden states.
+
+        Radix prefix-cache hits and chunked prefill leave only the trailing
+        computed segment of the sequence in the captured hidden states, while
+        gen_mask covers the full original sequence. The query tokens sit at
+        the end of the prompt, so the tail of the mask is the valid view.
+        """
+        if gen_mask.numel() == seq_len:
+            return gen_mask
+        if gen_mask.numel() < seq_len:
+            return None
+        tail_mask = gen_mask[gen_mask.numel() - seq_len :]
+        if int(tail_mask.sum()) != int(gen_mask.sum()):
+            logger.warning(
+                "[IMG_GEN] captured hidden states cover %d trailing positions "
+                "but the %d query positions extend beyond them; dropping "
+                "semantic conditioning",
+                seq_len,
+                int(gen_mask.sum()),
+            )
+            return None
+        return tail_mask
 
     @staticmethod
     def _select_hidden_state_tensor(hidden_states: Any) -> torch.Tensor | None:
