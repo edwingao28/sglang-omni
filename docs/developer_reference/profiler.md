@@ -59,8 +59,16 @@ first executable prefill / extend batch is selected.
 | Talker request build start / end | `scheduler_request_build_start` / `_end` (stage = talker) | `OmniScheduler.process_input_requests` |
 | Talker prefill start | `scheduler_prefill_start` (stage = talker) | same |
 | First code chunk | `stage_first_stream_chunk_sent` (stage = talker) | `Stage._send_stream_to_target` |
+| Code2Wav stream decode start | `code2wav_stream_decode_start` | `Code2WavScheduler._decode_and_emit` before the per-window decode call |
+| Code2Wav stream decode end | `code2wav_stream_decode_end` | `Code2WavScheduler._decode_and_emit` after the per-window decode call |
 | Code2Wav first audio | `code2wav_first_audio` | `Code2WavScheduler._decode_and_emit` |
 | Terminal response | `terminal_response` | `Coordinator._handle_completion` |
+
+For streaming TTFA investigations, compare the first talker
+`stage_first_stream_chunk_sent` event with `code2wav_stream_decode_start`,
+`code2wav_stream_decode_end`, and `code2wav_first_audio`. If code chunks arrive
+quickly but `code2wav_first_audio` is late, the bottleneck is likely inside the
+streaming vocoder/Code2Wav stage rather than HTTP streaming.
 
 Supporting events used for finer-grained breakdown:
 
