@@ -197,6 +197,98 @@ def build_results_report(
         "coverage_failures": coverage_failures,
         "coverage_matrix": coverage_matrix,
         "planned_coverage_matrix": planned_coverage_matrix,
+        "streaming_ttfa_analysis": _streaming_ttfa_analysis(spec, results),
+    }
+
+
+def _p95(values: list[float]) -> float | None:
+    summary = _summary(values)
+    return summary.get("p95") if summary else None
+
+
+def _streaming_ttfa_analysis(
+    spec: BenchmarkSpec,
+    results: list[ScenarioResult],
+) -> dict[str, Any]:
+    max_ratio = float(spec.params.streaming_ttfa_max_ratio)
+    target_ratio = float(spec.params.streaming_ttfa_target_ratio)
+    min_high_concurrency = int(spec.params.streaming_ttfa_min_high_concurrency)
+    rows: list[dict[str, Any]] = []
+
+    stage_ids = sorted({result.stage_id for result in results if result.stage_id})
+    for stage_id in stage_ids:
+        stage_results = [result for result in results if result.stage_id == stage_id]
+        stage_concurrency = max(
+            (
+                result.configured_max_concurrency
+                for result in stage_results
+                if result.configured_max_concurrency is not None
+            ),
+            default=None,
+        )
+        if stage_concurrency is None or stage_concurrency < min_high_concurrency:
+            continue
+
+        nonstream_latencies = [
+            result.latency_s
+            for result in stage_results
+            if result.endpoint == "speech"
+            and result.success
+            and result.latency_s > 0
+            and result.ttfa_s is None
+        ]
+        nonstream_p95 = _p95(nonstream_latencies)
+        if nonstream_p95 is None or nonstream_p95 <= 0:
+            continue
+
+        for stream_endpoint in ("speech_sse", "speech_stream_audio"):
+            stream_ttfas = [
+                result.ttfa_s
+                for result in stage_results
+                if result.endpoint == stream_endpoint
+                and result.success
+                and result.ttfa_s is not None
+            ]
+            stream_p95 = _p95(stream_ttfas)
+            if stream_p95 is None:
+                continue
+            ratio = stream_p95 / nonstream_p95
+            if ratio > max_ratio:
+                status = "fail"
+            elif ratio > target_ratio:
+                status = "warn"
+            else:
+                status = "pass"
+            rows.append(
+                {
+                    "stage_id": stage_id,
+                    "configured_max_concurrency": stage_concurrency,
+                    "stream_endpoint": stream_endpoint,
+                    "stream_ttfa_p95_s": round(float(stream_p95), 6),
+                    "nonstream_latency_p95_s": round(float(nonstream_p95), 6),
+                    "ratio": round(float(ratio), 6),
+                    "status": status,
+                }
+            )
+
+    status = "not_applicable"
+    if rows:
+        if any(row["status"] == "fail" for row in rows):
+            status = "fail"
+        elif any(row["status"] == "warn" for row in rows):
+            status = "warn"
+        else:
+            status = "pass"
+    worst_ratio = max((row["ratio"] for row in rows), default=None)
+    return {
+        "status": status,
+        "worst_ratio": worst_ratio,
+        "thresholds": {
+            "max_ratio": max_ratio,
+            "target_ratio": target_ratio,
+            "min_high_concurrency": min_high_concurrency,
+        },
+        "rows": rows,
     }
 
 
