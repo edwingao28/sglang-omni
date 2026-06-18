@@ -264,6 +264,43 @@ hits, misses, delete invalidation, and eviction behavior when the cache reaches
 capacity. Missing counters or counters that do not match the generated traffic
 fail the serving contract.
 
+## Streaming TTFA Phase 0 profile
+
+Use `examples/streaming_ttfa_phase0.json` to compare non-streaming speech latency
+with SSE and raw PCM streaming TTFA at `c=1` and high-concurrency burst load.
+
+Start request-level profiling before the run:
+
+```bash
+RUN=streaming-ttfa-phase0
+EVENT_DIR=/tmp/sglang-omni-profiles/$RUN/events
+curl -X POST http://localhost:8000/start_request_profile \
+  -H 'Content-Type: application/json' \
+  -d "{\"run_id\":\"$RUN\",\"event_dir\":\"$EVENT_DIR\"}"
+```
+
+Run the benchmark:
+
+```bash
+python -m benchmarks.eval.benchmark_tts_serving \
+  --spec benchmarks/tts_serving/examples/streaming_ttfa_phase0.json \
+  --out results/tts_serving/streaming_ttfa_phase0
+```
+
+Stop profiling and render the profiler table:
+
+```bash
+curl -X POST http://localhost:8000/stop_request_profile \
+  -H 'Content-Type: application/json' \
+  -d "{}"
+python -m sglang_omni.profiler "$EVENT_DIR" --format table
+```
+
+Inspect `results/tts_serving/streaming_ttfa_phase0/results.json` and its
+`streaming_ttfa_analysis` section. A high-concurrency `status: fail` means
+streaming TTFA p95 exceeded the configured non-streaming p95 ratio and should be
+treated as the baseline pain point for the batching PR.
+
 ## Results
 
 The output directory contains:

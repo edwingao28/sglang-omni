@@ -1,0 +1,30 @@
+{
+  "base_url": "http://localhost:8000",
+  "model_name": "default",
+  "test_type": "external",
+  "run_id": "streaming-ttfa-phase0",
+  "params": {
+    "profile": "stress",
+    "timeout_s": 600,
+    "streaming_ttfa_max_ratio": 1.0,
+    "streaming_ttfa_target_ratio": 0.8,
+    "streaming_ttfa_min_high_concurrency": 32,
+    "enabled_endpoints": ["speech", "speech_sse", "speech_stream_audio"],
+    "load_stages": [
+      {
+        "id": "c1-closed-loop",
+        "mode": "closed_loop",
+        "request_count": 12,
+        "max_concurrency": 1,
+        "enabled_endpoints": ["speech", "speech_sse", "speech_stream_audio"]
+      },
+      {
+        "id": "c64-burst",
+        "mode": "burst",
+        "request_count": 192,
+        "max_concurrency": 64,
+        "enabled_endpoints": ["speech", "speech_sse", "speech_stream_audio"]
+      }
+    ]
+  }
+}
