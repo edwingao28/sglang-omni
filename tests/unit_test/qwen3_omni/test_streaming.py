@@ -580,6 +580,43 @@ def test_code2wav_streaming_emits_per_window_and_slim_final():
     assert "audio_waveform" not in fdata, "streaming final must be slim"
 
 
+def test_code2wav_stream_decode_profiler_events(tmp_path):
+    from sglang_omni.profiler.event_recorder import (
+        get_recorder,
+        reset_active_stage,
+        set_active_stage,
+    )
+
+    recorder = get_recorder()
+    recorder.start(run_id="code2wav-test", event_dir=str(tmp_path), stage="code2wav")
+    token = set_active_stage("code2wav")
+    try:
+        sched = Code2WavScheduler(
+            model=_FakeCode2Wav(),
+            device="cpu",
+            stream_chunk_size=2,
+            left_context_size=0,
+        )
+        payload = StagePayload(
+            request_id="req-prof",
+            request=OmniRequest(inputs=[], params={"stream": True}),
+            data={},
+        )
+        sched._payloads["req-prof"] = payload
+
+        # Two chunks → triggers _decode_and_emit (stream_chunk_size=2).
+        sched._on_chunk("req-prof", _make_code_chunk(metadata={"stream": True}))
+        sched._on_chunk("req-prof", _make_code_chunk(metadata={"stream": True}))
+    finally:
+        reset_active_stage(token)
+        recorder.stop(run_id="code2wav-test")
+
+    event_text = "\n".join(path.read_text() for path in tmp_path.glob("*.jsonl"))
+    assert "code2wav_stream_decode_start" in event_text
+    assert "code2wav_stream_decode_end" in event_text
+    assert "code2wav_first_audio" in event_text
+
+
 def test_code2wav_non_streaming_returns_full_pcm():
     sched = Code2WavScheduler(
         model=_FakeCode2Wav(),

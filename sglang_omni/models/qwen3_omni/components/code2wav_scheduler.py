@@ -207,7 +207,29 @@ class Code2WavScheduler(StreamingSimpleScheduler):
         chunks = self._code_chunks[request_id]
         start = self._emitted[request_id]
         end = len(chunks)
+        _emit_event(
+            request_id=request_id,
+            stage=None,
+            event_name="code2wav_stream_decode_start",
+            metadata={
+                "start": int(start),
+                "end": int(end),
+                "ready_chunks": int(end - start),
+                "left_context_size": int(self._left_context_size),
+                "stream_chunk_size": int(self._stream_chunk_size),
+            },
+        )
         audio = self._decode_incremental(request_id, chunks, start, end)
+        _emit_event(
+            request_id=request_id,
+            stage=None,
+            event_name="code2wav_stream_decode_end",
+            metadata={
+                "start": int(start),
+                "end": int(end),
+                "audio_samples": int(audio.shape[0]),
+            },
+        )
         self._emitted[request_id] = end
         messages: list[OutgoingMessage] = []
         if audio.size > 0:
