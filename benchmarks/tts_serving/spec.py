@@ -16,6 +16,7 @@ VALID_PROFILES = {DEFAULT_PROFILE}
 VALID_LOAD_MODES = {"closed_loop", "open_loop", "ramp", "burst", "soak"}
 VALID_ARRIVAL_DISTRIBUTIONS = {"deterministic", "poisson"}
 DEFAULT_ENDPOINTS = ("speech", "speech_sse", "voices", "batch", "websocket")
+KNOWN_ENDPOINTS = DEFAULT_ENDPOINTS + ("speech_stream_audio",)
 DEFAULT_SPEAKER_MAX_UPLOADED = 1000
 DEFAULT_SEED = 0
 SAFE_STAGE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
@@ -567,7 +568,7 @@ def _enabled_endpoints(value: Any, key: str) -> tuple[str, ...]:
         raise SpecError(f"{key} must be a list of strings")
     if not value:
         raise SpecError(f"{key} must not be empty")
-    unknown = sorted(set(value) - set(DEFAULT_ENDPOINTS))
+    unknown = sorted(set(value) - set(KNOWN_ENDPOINTS))
     if unknown:
         raise SpecError(f"unknown {key}: {unknown}")
     deduped = list(dict.fromkeys(value))

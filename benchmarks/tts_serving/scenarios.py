@@ -287,6 +287,9 @@ def _required_stage_scenarios(
             ]
         )
         next_index += 2
+    if "speech_stream_audio" in endpoint_set:
+        groups.append([_speech_stream_audio(next_index, spec, stage)])
+        next_index += 1
     if "batch" in endpoint_set:
         batch_scenarios = [
             _batch_request(
@@ -380,7 +383,9 @@ def _weighted_scenario(
             response_format=rng.choice(SDK_RESPONSE_FORMATS),
         )
     if scenario_type == "speech_sse":
-        return _speech_sse(index, spec, stage)
+        if "speech_sse" in endpoint_set:
+            return _speech_sse(index, spec, stage)
+        return _speech_stream_audio(index, spec, stage)
     if scenario_type == "speech_malformed":
         return _speech_malformed(index, spec, stage)
     if scenario_type == "batch":
@@ -435,7 +440,7 @@ def _choose_scenario_type(
 
 def _scenario_type_enabled(scenario_type: str, endpoint_set: set[str]) -> bool:
     if scenario_type == "speech_sse":
-        return "speech_sse" in endpoint_set
+        return "speech_sse" in endpoint_set or "speech_stream_audio" in endpoint_set
     if scenario_type == "speech_sdk":
         return "speech" in endpoint_set
     if scenario_type == "batch":
@@ -853,6 +858,35 @@ def _speech_sse(index: int, spec: BenchmarkSpec, stage: LoadStage) -> Scenario:
         capability_key="speech.sse",
         payload=payload,
         description="REST SSE streaming speech",
+    )
+
+
+def _speech_stream_audio(
+    index: int, spec: BenchmarkSpec, stage: LoadStage
+) -> Scenario:
+    payload = _base_payload(spec, BASE_TEXTS[index % len(BASE_TEXTS)])
+    payload.update(
+        {
+            "stream": True,
+            "stream_format": "audio",
+            "response_format": "pcm",
+            "initial_codec_chunk_frames": 1,
+            "seed": spec.seed + index,
+        }
+    )
+    return Scenario(
+        id=_scenario_id(stage, "speech_stream_audio", index),
+        endpoint="speech_stream_audio",
+        category="speech_stream_audio",
+        stage_id=stage.id,
+        capability_key="speech.stream_audio",
+        payload=payload,
+        description="REST raw PCM streaming speech",
+        planned_metadata={
+            "streaming_mode": "stream_audio",
+            "response_format": "pcm",
+            "initial_codec_chunk_frames": 1,
+        },
     )
 
 
