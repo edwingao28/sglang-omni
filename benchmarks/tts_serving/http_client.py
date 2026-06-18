@@ -120,6 +120,8 @@ async def run_http_scenario(
                         start,
                         scenario,
                     )
+                elif scenario.endpoint == "speech_stream_audio":
+                    await _handle_speech_raw_pcm_stream(response, result, start)
                 else:
                     await _handle_binary_response(response, result, start, scenario)
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
@@ -361,6 +363,69 @@ async def _handle_sse_response(
     result.audio_duration_s = audio_state.duration_s
     _mark_success(result)
     result.response_bytes = result.audio_bytes
+
+
+def _parse_raw_pcm_stream_headers(headers: dict[str, str]) -> tuple[int, int, int]:
+    sample_rate = int(headers.get("x-sample-rate", PCM_SAMPLE_RATE))
+    channels = int(headers.get("x-channels", 1))
+    bit_depth = int(headers.get("x-bit-depth", 16))
+    sample_width = max(1, bit_depth // 8)
+    return sample_rate, channels, sample_width
+
+
+async def _iter_http_body_chunks(response: aiohttp.ClientResponse):
+    pending = bytearray()
+    pending_start_s: float | None = None
+    async for data, end_of_http_chunk in response.content.iter_chunks():
+        now = time.perf_counter()
+        if data:
+            if not pending:
+                pending_start_s = now
+            pending.extend(data)
+        if end_of_http_chunk and pending:
+            yield bytes(pending), pending_start_s or now
+            pending.clear()
+            pending_start_s = None
+    if pending:
+        yield bytes(pending), pending_start_s or time.perf_counter()
+
+
+async def _handle_speech_raw_pcm_stream(
+    response: aiohttp.ClientResponse,
+    result: ScenarioResult,
+    start: float,
+) -> None:
+    result.http_status = response.status
+    result.http_status_class = classify_http_status(response.status)
+    result.response_headers = dict(response.headers)
+    sample_rate, channels, sample_width = _parse_raw_pcm_stream_headers(
+        {k.lower(): v for k, v in response.headers.items()}
+    )
+    chunks: list[bytes] = []
+    chunk_times: list[float] = []
+    async for chunk, chunk_time in _iter_http_body_chunks(response):
+        if not chunk:
+            continue
+        if result.ttfa_s is None:
+            result.ttfa_s = chunk_time - start
+        elif chunk_times:
+            result.inter_chunk_s.append(chunk_time - chunk_times[-1])
+        chunk_times.append(chunk_time)
+        chunks.append(chunk)
+        result.audio_bytes += len(chunk)
+        result.response_bytes += len(chunk)
+    bytes_per_second = sample_rate * channels * sample_width
+    if not chunks or bytes_per_second <= 0:
+        _mark_protocol_error(
+            result,
+            status="invalid_raw_pcm_stream",
+            error="raw PCM stream produced no audio chunks",
+        )
+        return
+    result.audio_duration_s = sum(len(chunk) for chunk in chunks) / float(
+        bytes_per_second
+    )
+    _mark_success(result)
 
 
 async def _response_body_and_text(
