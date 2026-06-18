@@ -59,6 +59,9 @@ PARAM_KEYS = {
     "speaker_max_uploaded",
     "provider_label",
     "implementation_label",
+    "streaming_ttfa_max_ratio",
+    "streaming_ttfa_target_ratio",
+    "streaming_ttfa_min_high_concurrency",
 }
 LOAD_STAGE_KEYS = {
     "id",
@@ -248,6 +251,9 @@ class BenchmarkParams:
     speaker_max_uploaded: int = DEFAULT_SPEAKER_MAX_UPLOADED
     provider_label: str | None = None
     implementation_label: str | None = None
+    streaming_ttfa_max_ratio: float = 1.0
+    streaming_ttfa_target_ratio: float = 0.8
+    streaming_ttfa_min_high_concurrency: int = 32
 
     @classmethod
     def from_obj(cls, obj: Any) -> BenchmarkParams:
@@ -292,6 +298,21 @@ class BenchmarkParams:
             "speaker_max_uploaded",
             cls.speaker_max_uploaded,
         )
+        streaming_ttfa_max_ratio = _positive_float(
+            obj,
+            "streaming_ttfa_max_ratio",
+            cls.streaming_ttfa_max_ratio,
+        )
+        streaming_ttfa_target_ratio = _positive_float(
+            obj,
+            "streaming_ttfa_target_ratio",
+            cls.streaming_ttfa_target_ratio,
+        )
+        streaming_ttfa_min_high_concurrency = _positive_int(
+            obj,
+            "streaming_ttfa_min_high_concurrency",
+            cls.streaming_ttfa_min_high_concurrency,
+        )
         _validate_voice_speaker_cap_stages(
             load_stages,
             default_enabled_endpoints=enabled,
@@ -320,6 +341,9 @@ class BenchmarkParams:
             speaker_max_uploaded=speaker_max_uploaded,
             provider_label=_optional_str(obj, "provider_label"),
             implementation_label=_optional_str(obj, "implementation_label"),
+            streaming_ttfa_max_ratio=streaming_ttfa_max_ratio,
+            streaming_ttfa_target_ratio=streaming_ttfa_target_ratio,
+            streaming_ttfa_min_high_concurrency=streaming_ttfa_min_high_concurrency,
         )
 
 
@@ -462,6 +486,19 @@ def _positive_int(
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise SpecError(f"{path}.{key} must be a positive integer")
     return value
+
+
+def _positive_float(
+    obj: dict[str, Any],
+    key: str,
+    default: float,
+    *,
+    path: str = "params",
+) -> float:
+    value = obj.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise SpecError(f"{path}.{key} must be a positive number")
+    return float(value)
 
 
 def _nonnegative_int(obj: dict[str, Any], key: str, default: int) -> int:
