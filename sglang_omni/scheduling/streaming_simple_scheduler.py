@@ -39,6 +39,9 @@ class StreamingSimpleScheduler:
     streaming requests are kept out of the non-streaming batch path.
     """
 
+    _batch_stream_chunks: bool = False
+    _stream_chunk_batch_max: int | None = None
+
     def __init__(
         self,
         compute_fn: Callable[[Any], Any] | None,
@@ -72,6 +75,7 @@ class StreamingSimpleScheduler:
         self._completed_non_streaming_request_ids: set[str] = set()
         self._state_lock = threading.RLock()
         self._abort_lock = threading.Lock()
+        self._stream_chunk_batch_hist: collections.Counter = collections.Counter()
 
     # ------------------------------------------------------------------
     # Hooks for subclasses
@@ -90,6 +94,20 @@ class StreamingSimpleScheduler:
         self, request_id: str, item: StreamItem
     ) -> list[OutgoingMessage]:
         del request_id, item
+        return []
+
+    def on_stream_chunk_batch(
+        self, items: list[tuple[str, StreamItem]]
+    ) -> list[OutgoingMessage]:
+        """Process a drained batch of chunks; the hook owns its own locking (the caller does NOT
+        hold ``_state_lock``). Default = independent per-chunk dispatch; override for coalescing.
+        """
+        for request_id, item in items:
+            try:
+                self._handle_stream_chunk(request_id, item)
+            except Exception as exc:
+                self._emit_error(request_id, exc)
+                self.abort(request_id)
         return []
 
     def on_stream_done(self, request_id: str) -> list[OutgoingMessage]:
@@ -141,7 +159,10 @@ class StreamingSimpleScheduler:
             self._handle_new_request_batch(self._collect_new_request_batch(msg), loop)
             return
         if msg.type == "stream_chunk":
-            self._on_chunk(msg.request_id, msg.data)
+            if self._batch_stream_chunks:
+                self._handle_stream_chunk_batch(self._collect_stream_chunk_batch(msg))
+            else:
+                self._on_chunk(msg.request_id, msg.data)
             return
         if msg.type == "stream_done":
             self._on_done(msg.request_id)
@@ -272,6 +293,30 @@ class StreamingSimpleScheduler:
                     self._pending_messages.appendleft(msg)
                     break
                 batch_cost += msg_cost
+            batch.append(msg)
+        return batch
+
+    def _collect_stream_chunk_batch(
+        self, first_msg: IncomingMessage
+    ) -> list[IncomingMessage]:
+        """Drain consecutive queued ``stream_chunk`` messages into one batch (bounded by the cap,
+        aborted ids dropped). The first non-``stream_chunk`` message is pushed to the FRONT of
+        ``_pending_messages`` to preserve its arrival order. No blocking wait: only already-queued
+        chunks coalesce, so an empty inbox yields a size-1 batch."""
+        batch = [first_msg]
+        cap = self._stream_chunk_batch_max or max(self._max_batch_size, 1)
+        if cap <= 1:
+            return batch
+        while len(batch) < cap:
+            try:
+                msg = self.inbox.get_nowait()
+            except _queue_mod.Empty:
+                break
+            if msg.type != "stream_chunk":
+                self._pending_messages.appendleft(msg)
+                break
+            if self._is_aborted(msg.request_id):
+                continue
             batch.append(msg)
         return batch
 
@@ -416,6 +461,16 @@ class StreamingSimpleScheduler:
             for out in self.on_stream_chunk(request_id, item):
                 if not self._is_aborted(request_id):
                     self.outbox.put(out)
+
+    def _handle_stream_chunk_batch(self, batch: list[IncomingMessage]) -> None:
+        items = [
+            (msg.request_id, msg.data)
+            for msg in batch
+            if not self._is_aborted(msg.request_id)
+        ]
+        if items:
+            self._stream_chunk_batch_hist[len(items)] += 1
+            self.on_stream_chunk_batch(items)
 
     def _handle_stream_done(self, request_id: str) -> None:
         with self._state_lock:
