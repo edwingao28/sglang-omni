@@ -298,6 +298,8 @@ class _LocalStreamState:
 class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
     """Decode MOSS-TTS Local codec rows incrementally on the v2 codec."""
 
+    _batch_stream_chunks = True
+
     def __init__(
         self,
         processor: Any,
@@ -411,6 +413,26 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
     def on_stream_chunk(
         self, request_id: str, item: StreamItem
     ) -> list[OutgoingMessage]:
+        self._ingest_chunk(request_id, item)
+        self._pump_streams()
+        return []
+
+    def on_stream_chunk_batch(
+        self, items: list[tuple[str, StreamItem]]
+    ) -> list[OutgoingMessage]:
+        with self._state_lock:
+            for request_id, item in items:
+                if self._is_aborted(request_id):
+                    continue
+                try:
+                    self._ingest_chunk(request_id, item)
+                except Exception as exc:
+                    self._emit_error(request_id, exc)
+                    self.abort(request_id)
+            self._pump_streams()
+        return []
+
+    def _ingest_chunk(self, request_id: str, item: StreamItem) -> None:
         state = self._stream_states.setdefault(request_id, _LocalStreamState())
         self._latch_stream_metadata(request_id, state, item.metadata)
 
@@ -430,8 +452,6 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
         # Row layout matches output_rows: [text_token, code_0, ..., code_{n_vq-1}].
         state.pending.append(row[1 : 1 + n_vq])
         self._ensure_slot(state)
-        self._pump_streams()
-        return []
 
     def on_stream_done(self, request_id: str) -> list[OutgoingMessage]:
         payload = self._stream_payloads[request_id]
@@ -686,6 +706,8 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
                 min(len(state.pending) for _, state in participants),
                 self._max_step_frames,
             )
+            if self._session is not None:
+                step_t = self._snap_step_t(step_t, self._session.captured_frames())
             plan: dict[int, torch.Tensor] = {}
             for _, state in participants:
                 plan[state.slot] = torch.stack(state.pending[:step_t], dim=1)
@@ -717,6 +739,14 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
         if not state.emitted_any:
             return False
         return len(state.pending) >= floor
+
+    @staticmethod
+    def _snap_step_t(step_t: int, captured: list[int]) -> int:
+        """Snap a step length down to the largest captured CUDA-graph T <= step_t (keeps the step
+        graphed); a no-op when none is <= step_t, and never raises step_t above the input.
+        """
+        usable = [t for t in captured if t <= step_t]
+        return max(usable) if usable else step_t
 
     def _chunk_message(self, request_id: str, audio: torch.Tensor) -> OutgoingMessage:
         data = audio_waveform_payload(

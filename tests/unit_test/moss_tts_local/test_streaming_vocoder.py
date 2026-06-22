@@ -1047,3 +1047,124 @@ def test_low_vram_capture_attempted_once_no_reprobe(monkeypatch) -> None:
     np.testing.assert_array_equal(
         _concat_stream_audio(messages, "s"), reference_waveform(rows[:, 1:]).numpy()
     )
+
+
+def test_on_stream_chunk_batch_coalesces_two_lanes_into_one_step(monkeypatch) -> None:
+    processor = FakeProcessor()
+    codec = processor.audio_tokenizer
+    scheduler = _make_scheduler(
+        monkeypatch, processor, stream_chunk_frames=6, initial_chunk_frames=3
+    )
+    metadata = _metadata()
+    rows_a = _rows(6, seed=200)
+    rows_b = _rows(6, seed=201)
+    batch: list[tuple[str, StreamItem]] = []
+    cid = 0
+    for i in range(6):
+        batch.append(("a", _stream_item(rows_a[i], metadata, cid)))
+        cid += 1
+        batch.append(("b", _stream_item(rows_b[i], metadata, cid)))
+        cid += 1
+
+    calls_before = codec.frame_calls
+    scheduler.on_stream_chunk_batch(batch)
+    assert codec.frame_calls - calls_before == 1
+
+    out = _drain(scheduler)
+    sizes = {
+        m.request_id: _decode_audio(m.data).shape[1] for m in out if m.type == "stream"
+    }
+    assert sizes == {"a": 6 * SAMPLES_PER_FRAME, "b": 6 * SAMPLES_PER_FRAME}
+    assert scheduler._stream_states["a"].slot is not None
+    assert scheduler._stream_states["b"].slot is not None
+
+    scheduler._on_done("a")
+    scheduler._on_streaming_new_request("a", _terminal_payload(rows_a, request_id="a"))
+    scheduler._on_done("b")
+    scheduler._on_streaming_new_request("b", _terminal_payload(rows_b, request_id="b"))
+    out += _drain(scheduler)
+    np.testing.assert_array_equal(
+        _concat_stream_audio(out, "a"), reference_waveform(rows_a[:, 1:]).numpy()
+    )
+    np.testing.assert_array_equal(
+        _concat_stream_audio(out, "b"), reference_waveform(rows_b[:, 1:]).numpy()
+    )
+
+
+def test_snap_coalesced_batch_step_to_captured_graph_t(monkeypatch) -> None:
+    calls: list = []
+    _install_fake_capture(monkeypatch, calls, seal=True)
+    processor = FakeProcessor()
+    codec = processor.audio_tokenizer
+    scheduler = _make_scheduler(
+        monkeypatch,
+        processor,
+        stream_slots=1,
+        stream_chunk_frames=5,
+        initial_chunk_frames=5,
+    )
+    assert scheduler._session is not None
+    scheduler._session._cg_runner = _FakeCudaGraphRunner([5])
+    assert scheduler._session.captured_frames() == [5]
+
+    rows = _rows(7, seed=321)
+    metadata = _metadata()
+    batch = [("r", _stream_item(rows[i], metadata, i)) for i in range(7)]
+    calls_before = codec.frame_calls
+    scheduler.on_stream_chunk_batch(batch)
+    assert codec.frame_calls - calls_before == 1
+
+    first = _drain(scheduler)
+    first_frames = sum(
+        _decode_audio(m.data).shape[1] // SAMPLES_PER_FRAME
+        for m in first
+        if m.type == "stream" and m.request_id == "r"
+    )
+    assert first_frames == 5
+    assert len(scheduler._stream_states["r"].pending) == 2
+
+    scheduler._on_done("r")
+    scheduler._on_streaming_new_request("r", _terminal_payload(rows, request_id="r"))
+    out = first + _drain(scheduler)
+    np.testing.assert_array_equal(
+        _concat_stream_audio(out, "r"), reference_waveform(rows[:, 1:]).numpy()
+    )
+
+
+def test_on_stream_chunk_batch_isolates_a_malformed_row(monkeypatch) -> None:
+    processor = FakeProcessor()
+    scheduler = _make_scheduler(
+        monkeypatch,
+        processor,
+        stream_slots=2,
+        stream_chunk_frames=3,
+        initial_chunk_frames=3,
+    )
+    metadata = _metadata()
+    good = _rows(3, seed=400)
+    batch: list[tuple[str, StreamItem]] = [
+        ("good", _stream_item(good[i], metadata, i)) for i in range(3)
+    ]
+    batch.append(("bad", _stream_item(torch.tensor([1, 2]), metadata, 99)))
+
+    scheduler.on_stream_chunk_batch(batch)
+
+    out = _drain(scheduler)
+    assert any(m.request_id == "bad" and m.type == "error" for m in out)
+    assert scheduler._is_aborted("bad")
+    assert "bad" not in scheduler._stream_states
+    good_frames = sum(
+        _decode_audio(m.data).shape[1] // SAMPLES_PER_FRAME
+        for m in out
+        if m.type == "stream" and m.request_id == "good"
+    )
+    assert good_frames == 3
+
+    scheduler._on_done("good")
+    scheduler._on_streaming_new_request(
+        "good", _terminal_payload(good, request_id="good")
+    )
+    out += _drain(scheduler)
+    np.testing.assert_array_equal(
+        _concat_stream_audio(out, "good"), reference_waveform(good[:, 1:]).numpy()
+    )
