@@ -735,12 +735,13 @@ def test_try_condition_from_hidden_states_slices_2d_and_string_dict() -> None:
     condition_embeds, negative_embeds = executor._try_condition_from_hidden_states(data)
 
     expected_query = higher[[1, 3]]
-    torch.testing.assert_close(conditioner.project_calls[0], expected_query.unsqueeze(0))
+    torch.testing.assert_close(
+        conditioner.project_calls[0], expected_query.unsqueeze(0)
+    )
     assert len(condition_embeds) == 1
     assert len(negative_embeds) == 1
     torch.testing.assert_close(condition_embeds[0], expected_query + 100)
     torch.testing.assert_close(negative_embeds[0], torch.zeros_like(expected_query))
-
 
 
 def test_try_condition_from_hidden_states_integer_dict_selects_highest_key() -> None:
@@ -769,7 +770,9 @@ def test_try_condition_from_hidden_states_integer_dict_selects_highest_key() -> 
     )
 
     expected_query = higher[[0, 2]]
-    torch.testing.assert_close(conditioner.project_calls[0], expected_query.unsqueeze(0))
+    torch.testing.assert_close(
+        conditioner.project_calls[0], expected_query.unsqueeze(0)
+    )
     torch.testing.assert_close(condition_embeds[0], expected_query + 100)
 
 
@@ -1144,10 +1147,11 @@ def test_try_condition_tail_aligns_mask_when_hidden_states_are_suffix() -> None:
 
     # Tail of the mask is [0, 1, 0, 1] -> rows 1 and 3 of the captured suffix.
     expected_query = hidden[[1, 3]]
-    torch.testing.assert_close(conditioner.project_calls[0], expected_query.unsqueeze(0))
+    torch.testing.assert_close(
+        conditioner.project_calls[0], expected_query.unsqueeze(0)
+    )
     torch.testing.assert_close(condition_embeds[0], expected_query + 100)
     torch.testing.assert_close(negative_embeds[0], torch.zeros_like(expected_query))
-
 
 
 def test_try_condition_drops_conditioning_when_tail_misses_query_positions(
@@ -1184,6 +1188,7 @@ def test_try_condition_drops_conditioning_when_tail_misses_query_positions(
 
 def test_try_condition_accepts_3d_batched_hidden_states() -> None:
     import torch
+
     from sglang_omni.models.ming_omni.components.image_gen_executor import (
         MingImageGenExecutor,
     )

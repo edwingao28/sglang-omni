@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 
-
 _QUERY_INFO_PATH = (
     Path(__file__).resolve().parents[3]
     / "sglang_omni"

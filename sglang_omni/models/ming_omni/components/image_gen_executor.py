@@ -331,9 +331,7 @@ class MingImageGenExecutor:
         return list(condition_embeds.unbind(dim=0)), list(negative_embeds.unbind(dim=0))
 
     @staticmethod
-    def _align_gen_mask(
-        gen_mask: torch.Tensor, seq_len: int
-    ) -> torch.Tensor | None:
+    def _align_gen_mask(gen_mask: torch.Tensor, seq_len: int) -> torch.Tensor | None:
         """Align gen_mask to captured hidden states.
 
         Radix prefix-cache hits and chunked prefill leave only the trailing

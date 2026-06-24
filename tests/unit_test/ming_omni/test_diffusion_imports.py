@@ -7,9 +7,7 @@ import importlib
 
 
 def test_ming_diffusion_backend_contract_imports() -> None:
-    module = importlib.import_module(
-        "sglang_omni.models.ming_omni.diffusion.backend"
-    )
+    module = importlib.import_module("sglang_omni.models.ming_omni.diffusion.backend")
 
     assert hasattr(module, "DiffusionBackend")
     assert hasattr(module, "ImageGenParams")

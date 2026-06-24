@@ -6,8 +6,8 @@ from __future__ import annotations
 import importlib
 import sys
 from dataclasses import dataclass, field
-from typing import Any
 from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -107,9 +107,7 @@ def _build_image_gen_payload(*, params=None, capture_keys=("hidden_states",)):
 
 
 def _request_builder():
-    from sglang_omni.models.ming_omni.bootstrap import (
-        make_thinker_scheduler_adapters,
-    )
+    from sglang_omni.models.ming_omni.bootstrap import make_thinker_scheduler_adapters
 
     tokenizer = SimpleNamespace(
         vocab_size=32000,
@@ -271,8 +269,8 @@ def test_forward_with_omni_embeds_attaches_hidden_states_when_requested(
 
 
 def test_result_adapter_hides_fallback_token_for_prefill_only_request() -> None:
-    from sglang_omni.models.ming_omni.io import MingOmniPipelineState
     from sglang_omni.models.ming_omni.bootstrap import make_thinker_scheduler_adapters
+    from sglang_omni.models.ming_omni.io import MingOmniPipelineState
     from sglang_omni.proto import OmniRequest, StagePayload
 
     tokenizer = SimpleNamespace(eos_token_id=2)
@@ -401,9 +399,14 @@ def test_request_builder_gen_pad_only_covers_gen_mask_positions(monkeypatch) -> 
         request=OmniRequest(inputs={}, params={}),
         data=state.to_dict(),
     )
-    builder, _ = make_thinker_scheduler_adapters(tokenizer=SimpleNamespace(
-        vocab_size=32000, eos_token_id=2, unk_token_id=0,
-    ), vocab_size=32000)
+    builder, _ = make_thinker_scheduler_adapters(
+        tokenizer=SimpleNamespace(
+            vocab_size=32000,
+            eos_token_id=2,
+            unk_token_id=0,
+        ),
+        vocab_size=32000,
+    )
 
     req_data = builder(payload)
     ids = list(req_data.req.origin_input_ids)

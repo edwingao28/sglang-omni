@@ -210,7 +210,9 @@ def test_default_stream_builder_sets_images_for_dict_chunk() -> None:
     assert chunk.images == [_image_payload()]
 
 
-def test_default_stream_builder_sets_multimodal_for_audio_and_image_dict_chunk() -> None:
+def test_default_stream_builder_sets_multimodal_for_audio_and_image_dict_chunk() -> (
+    None
+):
     from sglang_omni.client.client import Client
 
     waveform = np.array([0.5, -0.25], dtype=np.float32)
@@ -559,9 +561,7 @@ def test_chat_completion_streaming_returns_images() -> None:
     assert response.status_code == 200
     payloads = _sse_payloads(response.text)
     image_chunk = next(
-        payload
-        for payload in payloads
-        if payload["choices"][0]["delta"].get("images")
+        payload for payload in payloads if payload["choices"][0]["delta"].get("images")
     )
     assert image_chunk["choices"][0]["delta"]["images"] == [
         {

@@ -149,9 +149,7 @@ def make_thinker_scheduler_adapters(
             else None
         )
         prefill_only = (
-            bool(image_gen.get("prefill_only"))
-            if hasattr(image_gen, "get")
-            else False
+            bool(image_gen.get("prefill_only")) if hasattr(image_gen, "get") else False
         )
 
         # Substitute generated-query patch tokens with a per-request pad so the

@@ -544,12 +544,12 @@ class Client:
                     image_finish_reason = image_result.get("finish_reason")
                     if image_finish_reason is not None:
                         chunk.finish_reason = image_finish_reason
-                chunk.usage = Client._build_usage_info(
-                    decode_result
-                ) or Client._build_usage_info(
-                    audio_result or {}
-                ) or Client._build_usage_info(
-                    image_result if isinstance(image_result, dict) else {}
+                chunk.usage = (
+                    Client._build_usage_info(decode_result)
+                    or Client._build_usage_info(audio_result or {})
+                    or Client._build_usage_info(
+                        image_result if isinstance(image_result, dict) else {}
+                    )
                 )
                 return chunk
             text = result.get("text")

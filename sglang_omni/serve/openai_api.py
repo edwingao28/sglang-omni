@@ -787,13 +787,13 @@ async def _chat_stream(
                     total_tokens=chunk.usage.total_tokens or 0,
                 )
             has_payload = (
-                chunk.modality == "text"
-                and bool(chunk.text)
-                and "text" in requested_modalities
-            ) or (
-                chunk.audio_b64 is not None and "audio" in requested_modalities
-            ) or (
-                bool(chunk.images) and "image" in requested_modalities
+                (
+                    chunk.modality == "text"
+                    and bool(chunk.text)
+                    and "text" in requested_modalities
+                )
+                or (chunk.audio_b64 is not None and "audio" in requested_modalities)
+                or (bool(chunk.images) and "image" in requested_modalities)
             )
             if not has_payload:
                 continue

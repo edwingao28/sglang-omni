@@ -98,9 +98,7 @@ def _install_common_deps(monkeypatch, module, *, query_tokens=None):
         ),
     )
     if query_tokens is not None:
-        from sglang_omni.models.ming_omni.diffusion.query_info import (
-            ImageGenQueryInfo,
-        )
+        from sglang_omni.models.ming_omni.diffusion.query_info import ImageGenQueryInfo
 
         monkeypatch.setattr(
             module,

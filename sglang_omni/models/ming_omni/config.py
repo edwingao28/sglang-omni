@@ -405,9 +405,7 @@ class MingOmniSpeechPipelineConfig(_MingOmniBasePipelineConfig):
             subject_label="talker",
             owner_name=THINKER_STAGE,
             owner_label="thinker",
-            error_prefix=(
-                "Ming-Omni speech talker GPU collides with thinker TP range"
-            ),
+            error_prefix=("Ming-Omni speech talker GPU collides with thinker TP range"),
         )
 
 
