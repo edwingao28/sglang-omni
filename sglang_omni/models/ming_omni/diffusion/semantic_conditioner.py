@@ -41,30 +41,22 @@ class SemanticConditioner:
 
         conditioner = SemanticConditioner()
         conditioner.load(model_path, device)
-
-        # hidden_states: already extracted by gen_mask in the thinker
         cond = conditioner.project(hidden_states)
-        # cond: [B, 256, 2560], L2-normalized
     """
 
     def __init__(self) -> None:
-        self._connector = None  # Qwen2ForCausalLM (non-causal)
-        self._proj_in = None  # Linear(4096, 1536)
-        self._proj_out = None  # Linear(1536, 2560)
-        self._query_tokens = None  # Tensor(num_tokens, 4096)
+        self._connector = None
+        self._proj_in = None
+        self._proj_out = None
+        self._query_tokens = None
         self._device: torch.device | None = None
         self._dtype: torch.dtype = torch.bfloat16
 
-        # Config values set during load
         self._image_patch_token: int = 0
         self._image_start_token: int = 0
         self._image_end_token: int = 0
         self._img_gen_scales: list[int] = []
         self._scale_indices: list[int] = []
-
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
 
     @property
     def query_tokens(self) -> torch.Tensor:
@@ -107,10 +99,6 @@ class SemanticConditioner:
         """Dtype used by connector/projections."""
         return self._dtype
 
-    # ------------------------------------------------------------------
-    # Loading
-    # ------------------------------------------------------------------
-
     def load(
         self,
         model_path: str,
@@ -131,7 +119,6 @@ class SemanticConditioner:
         self._device = device
         self._dtype = dtype
 
-        # 1. Read configs
         config_path = os.path.join(model_path, "config.json")
         logger.info("[SemanticConditioner] Reading config from %s", config_path)
         with open(config_path) as f:
@@ -149,7 +136,6 @@ class SemanticConditioner:
             mlp_config = json.load(f)
         self._img_gen_scales = mlp_config.get("img_gen_scales", [16])
 
-        # Pre-compute cumulative scale indices
         self._scale_indices = []
         current_idx = 0
         for scale in self._img_gen_scales:
@@ -162,10 +148,7 @@ class SemanticConditioner:
             current_idx,
         )
 
-        # 2. Load connector (Qwen2ForCausalLM with non-causal attention)
         self._load_connector(model_path, device, dtype)
-
-        # 3. Load projections and query tokens from mlp/model.safetensors
         self._load_projections(model_path, device, dtype)
 
         logger.info(
@@ -192,8 +175,8 @@ class SemanticConditioner:
             subfolder="connector",
             torch_dtype=dtype,
         )
-        # Disable causal masking (Ming uses bidirectional attention in the
-        # connector for image generation conditioning)
+        # (wenyao) Ming image conditioning uses the connector bidirectionally,
+        # so causal masking must be disabled before projection.
         for layer in self._connector.model.layers:
             layer.self_attn.is_causal = False
         self._connector.to(device)
@@ -213,7 +196,6 @@ class SemanticConditioner:
         logger.info("[SemanticConditioner] Loading projections from %s", mlp_path)
         state = load_file(mlp_path)
 
-        # proj_in: Linear(llm_hidden=4096, connector_hidden=1536)
         self._proj_in = nn.Linear(
             state["proj_in.weight"].shape[1],
             state["proj_in.weight"].shape[0],
@@ -226,7 +208,6 @@ class SemanticConditioner:
         )
         self._proj_in.to(device=device, dtype=dtype)
 
-        # proj_out: Linear(connector_hidden=1536, cap_feat_dim=2560)
         self._proj_out = nn.Linear(
             state["proj_out.weight"].shape[1],
             state["proj_out.weight"].shape[0],
@@ -239,8 +220,6 @@ class SemanticConditioner:
         )
         self._proj_out.to(device=device, dtype=dtype)
 
-        # Query tokens (learnable, one set per scale)
-        # For Ming-flash-omni-2.0: only 16x16 scale -> 256 tokens of dim 4096
         query_tokens_list = []
         for scale in self._img_gen_scales:
             key = f"query_tokens_dict.{scale}x{scale}"
@@ -271,13 +250,8 @@ class SemanticConditioner:
         if self._query_tokens is not None:
             total_params += self._query_tokens.numel()
 
-        # bf16 = 2 bytes per parameter
         bytes_per_param = 2 if self._dtype == torch.bfloat16 else 4
         return (total_params * bytes_per_param) / (1 << 30)
-
-    # ------------------------------------------------------------------
-    # Projection
-    # ------------------------------------------------------------------
 
     @torch.no_grad()
     def project(
@@ -321,10 +295,6 @@ class SemanticConditioner:
 
         return h
 
-    # ------------------------------------------------------------------
-    # Cleanup
-    # ------------------------------------------------------------------
-
     def unload(self) -> None:
         """Release GPU memory held by connector, projections, and query tokens."""
         logger.info("[SemanticConditioner] Unloading components")
@@ -340,10 +310,6 @@ class SemanticConditioner:
         self._query_tokens = None
         torch.cuda.empty_cache()
         logger.info("[SemanticConditioner] Unloaded, GPU cache cleared")
-
-    # ------------------------------------------------------------------
-    # Repr
-    # ------------------------------------------------------------------
 
     def __repr__(self) -> str:
         loaded = self._connector is not None

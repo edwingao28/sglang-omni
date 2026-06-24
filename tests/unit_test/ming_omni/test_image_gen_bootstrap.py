@@ -360,8 +360,6 @@ def test_request_builder_query_pad_is_unique_per_request_id(monkeypatch) -> None
 def test_request_builder_without_patch_token_id_keeps_input_ids(monkeypatch) -> None:
     _install_fake_sglang_request_modules(monkeypatch)
 
-    # Existing helper builds a prefill-only payload with no patch tokens and
-    # no image_patch_token_id — substitution must be a no-op.
     req_data = _request_builder()(_build_image_gen_payload())
 
     assert list(req_data.req.origin_input_ids) == [11, 12, 13]
@@ -376,7 +374,6 @@ def test_request_builder_gen_pad_only_covers_gen_mask_positions(monkeypatch) -> 
     from sglang_omni.models.ming_omni.io import MingOmniPipelineState
     from sglang_omni.proto import OmniRequest, StagePayload
 
-    # Two image-patch tokens; only the second is a generated-query position.
     state = MingOmniPipelineState(
         prompt={
             "input_ids": torch.tensor([11, 157157, 157157, 12], dtype=torch.long),
@@ -411,7 +408,7 @@ def test_request_builder_gen_pad_only_covers_gen_mask_positions(monkeypatch) -> 
     req_data = builder(payload)
     ids = list(req_data.req.origin_input_ids)
     pad = req_data.model_inputs["pad_values"]["image_gen"]
-    # Only the gen_mask position is padded; the other 157157 is untouched.
+
     assert ids == [11, 157157, pad, 12]
 
 
@@ -435,7 +432,6 @@ def test_runner_injects_image_and_image_gen_at_disjoint_positions(monkeypatch) -
 
     image_pad = 50000
     gen_pad = 60000
-    # positions: [text, image, image, gen, gen, text]
     input_ids = torch.tensor([11, image_pad, image_pad, gen_pad, gen_pad, 12])
     image_embeds = torch.ones(2, hidden)
     gen_embeds = torch.full((2, hidden), 7.0)
@@ -457,13 +453,10 @@ def test_runner_injects_image_and_image_gen_at_disjoint_positions(monkeypatch) -
 
     out = runner._inject_multimodal_embeds(forward_batch, schedule_batch)
 
-    # Input-image rows land on the image_pad positions; gen rows on the
-    # image_gen_pad positions — disjoint, no overlap.
     assert torch.equal(out[1], image_embeds[0])
     assert torch.equal(out[2], image_embeds[1])
     assert torch.equal(out[3], gen_embeds[0])
     assert torch.equal(out[4], gen_embeds[1])
-    # Text positions remain the base (zero) embedding.
     assert torch.equal(out[0], torch.zeros(hidden))
     assert torch.equal(out[5], torch.zeros(hidden))
 
@@ -496,8 +489,6 @@ def test_runner_image_static_fallback_disjoint_from_gen_positions(monkeypatch) -
     runner._embed_tokens = FakeEmbed()
 
     gen_pad = 70000
-    # positions: [text, static-image, static-image, gen, gen, text]
-    # "image" has NO explicit pad_value → falls back to static 157157
     input_ids = torch.tensor([11, 157157, 157157, gen_pad, gen_pad, 12])
     image_embeds = torch.ones(2, hidden) * 3.0
     gen_embeds = torch.full((2, hidden), 9.0)
@@ -506,7 +497,7 @@ def test_runner_image_static_fallback_disjoint_from_gen_positions(monkeypatch) -
         omni_model_inputs={
             "image_embeds": image_embeds,
             "image_gen_embeds": gen_embeds,
-            "pad_values": {"image_gen": gen_pad},  # "image" key intentionally absent
+            "pad_values": {"image_gen": gen_pad},
         },
         is_chunked=0,
         rid="r2",
@@ -519,15 +510,11 @@ def test_runner_image_static_fallback_disjoint_from_gen_positions(monkeypatch) -
 
     out = runner._inject_multimodal_embeds(forward_batch, schedule_batch)
 
-    # Static-fallback image positions (157157) get image_embeds.
     assert torch.equal(out[1], image_embeds[0])
     assert torch.equal(out[2], image_embeds[1])
-    # Gen positions get image_gen_embeds.
     assert torch.equal(out[3], gen_embeds[0])
     assert torch.equal(out[4], gen_embeds[1])
-    # No position received both: disjointness confirmed by distinct values.
     assert not torch.equal(out[1], gen_embeds[0])
     assert not torch.equal(out[3], image_embeds[0])
-    # Text positions unchanged.
     assert torch.equal(out[0], torch.zeros(hidden))
     assert torch.equal(out[5], torch.zeros(hidden))

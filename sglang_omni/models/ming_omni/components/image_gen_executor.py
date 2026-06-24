@@ -95,6 +95,7 @@ class MingImageGenExecutor:
             torch.cuda.set_device(device.index)
         load_kwargs: dict[str, Any] = {}
         if self._dit_type == "zimage":
+            load_kwargs["ming_model_path"] = self._model_path
             if self._enable_standalone_semantic_encoder:
                 load_kwargs["load_semantic_encoder"] = True
             if self._enable_byt5_text_rendering:

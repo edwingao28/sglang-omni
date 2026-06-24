@@ -370,7 +370,8 @@ class MingPreprocessor:
             video_total_pixels = raw_inputs.get("video_total_pixels")
 
         image_gen_requested = self._enable_image_gen and should_generate_image(payload)
-        # Coexistence is wired downstream (merge image_gen_embeds + bootstrap gen_mask pad split + runner injection) but gated here until end-to-end GPU-validated; lifting this requires re-checking the disjointness contract.
+        # (wenyao) Coexistence is wired downstream but gated until GPU E2E
+        # validates the image/input-image disjointness contract.
         if image_gen_requested and top_level_images:
             raise ValueError("image generation requests cannot include input images")
 
@@ -420,7 +421,8 @@ class MingPreprocessor:
                             if vid:
                                 raw_videos.append(vid)
 
-        # Inline message images follow the same contract; coexistence with image-gen is wired downstream but gated here until end-to-end GPU-validated; lifting this requires re-checking the disjointness contract.
+        # (wenyao) Inline images follow the same gated coexistence contract as
+        # top-level images.
         if image_gen_requested and raw_images:
             raise ValueError("image generation requests cannot include input images")
 

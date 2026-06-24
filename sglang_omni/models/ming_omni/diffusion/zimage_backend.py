@@ -52,6 +52,7 @@ class ZImageBackend(DiffusionBackend):
         model_path: str,
         device: torch.device,
         *,
+        ming_model_path: str | None = None,
         load_semantic_encoder: bool = False,
         load_byt5_text_encoder: bool = False,
     ) -> None:
@@ -66,18 +67,15 @@ class ZImageBackend(DiffusionBackend):
 
         logger.info("[ZImage] Loading pipeline components from %s", model_path)
 
-        # 1. Scheduler
         scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
             model_path, subfolder="scheduler"
         )
         scheduler.config["use_dynamic_shifting"] = True
 
-        # 2. VAE
         vae = AutoencoderKL.from_pretrained(
             model_path, subfolder="vae", torch_dtype=torch.bfloat16
         )
 
-        # 3. Transformer (ZImageTransformer2DModel)
         transformer = ZImageTransformer2DModel.from_pretrained(
             model_path, subfolder="transformer", torch_dtype=torch.bfloat16
         )
@@ -86,7 +84,6 @@ class ZImageBackend(DiffusionBackend):
             transformer.config.cap_feat_dim,
         )
 
-        # 4. Assemble pipeline (text encoding handled separately)
         self._pipe = ZImagePipeline(
             scheduler=scheduler,
             vae=vae,
@@ -98,16 +95,20 @@ class ZImageBackend(DiffusionBackend):
         logger.info("[ZImage] Pipeline assembled on %s", device)
 
         if load_semantic_encoder:
+            if ming_model_path is None:
+                raise ValueError("load_semantic_encoder=True requires ming_model_path")
             from sglang_omni.models.ming_omni.diffusion.semantic_encoder import (
                 MingSemanticEncoder,
             )
 
             self._semantic_encoder = MingSemanticEncoder()
-            self._semantic_encoder.load(model_path, device)
+            self._semantic_encoder.load(ming_model_path, device)
             logger.info("[ZImage] Standalone semantic encoder ready")
 
         if load_byt5_text_encoder:
-            byt5_dir = Path(model_path) / "byt5"
+            if ming_model_path is None:
+                raise ValueError("load_byt5_text_encoder=True requires ming_model_path")
+            byt5_dir = Path(ming_model_path) / "byt5"
             if not byt5_dir.exists():
                 raise RuntimeError(
                     f"ByT5 text rendering requested but {byt5_dir} does not exist"
@@ -117,7 +118,7 @@ class ZImageBackend(DiffusionBackend):
             )
 
             self._text_encoder, self._tokenizer = load_byt5_text_encoder(
-                model_path, device, dtype=torch.bfloat16
+                ming_model_path, device, dtype=torch.bfloat16
             )
             logger.info("[ZImage] ByT5 text encoder ready")
 

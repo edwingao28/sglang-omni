@@ -79,8 +79,8 @@ class MingThinkerModelRunner(ModelRunner):
         del schedule_batch, requests
         from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode
 
-        # Ming's custom omni-embed prefill path attaches full prefill hidden
-        # states itself; asking SGLang for LAST would truncate them first.
+        # (wenyao) Ming's custom omni-embed prefill path attaches full prefill
+        # hidden states itself; asking SGLang for LAST truncates them.
         return CaptureHiddenMode.NULL
 
     def requested_capture_hidden_mode_decode(

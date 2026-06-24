@@ -820,7 +820,6 @@ async def _chat_stream(
             )
             emit = True
 
-        # Image chunk
         if chunk.images and "image" in requested_modalities:
             delta.images = [
                 ChatCompletionImage(

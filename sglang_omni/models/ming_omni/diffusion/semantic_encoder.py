@@ -63,7 +63,6 @@ def _merge_consecutive_ones(lst: list[int], n: int) -> list[int]:
     return result
 
 
-# Chat template constants — must match Ming's processing_bailingmm2.py
 _SYSTEM_PROMPT = "<role>SYSTEM</role>你是一个友好的AI助手。\n\ndetailed thinking off"
 _USER_PREFIX = "<role>HUMAN</role>"
 _ASSISTANT_PREFIX = "<role>ASSISTANT</role>"
@@ -80,31 +79,24 @@ class MingSemanticEncoder:
         encoder = MingSemanticEncoder()
         encoder.load(model_path, device)
         pos, neg = encoder.encode("A cat on a windowsill")
-        # pos: list of [256, 2560] tensors
-        # neg: list of [256, 2560] tensors (zeros)
     """
 
     def __init__(self) -> None:
-        self._llm = None  # BailingMoeV2ForCausalLM
+        self._llm = None
         self._tokenizer = None
-        self._connector = None  # Qwen2ForCausalLM (non-causal)
-        self._proj_in = None  # Linear(4096, 1536)
-        self._proj_out = None  # Linear(1536, 2560)
-        self._query_tokens = None  # Parameter(num_tokens, 4096)
+        self._connector = None
+        self._proj_in = None
+        self._proj_out = None
+        self._query_tokens = None
         self._device: torch.device | None = None
-        self._aux_device: torch.device | None = None  # for connector/proj
+        self._aux_device: torch.device | None = None
         self._dtype: torch.dtype = torch.bfloat16
 
-        # Config values set during load
         self._image_patch_token: int = 0
         self._image_start_token: int = 0
         self._image_end_token: int = 0
         self._img_gen_scales: list[int] = []
         self._scale_indices: list[int] = []
-
-    # ------------------------------------------------------------------
-    # Loading
-    # ------------------------------------------------------------------
 
     def load(
         self,
@@ -124,7 +116,6 @@ class MingSemanticEncoder:
         self._device = device
         self._dtype = dtype
 
-        # 1. Read configs
         with open(os.path.join(model_path, "config.json")) as f:
             full_config = json.load(f)
         llm_config_dict = full_config["llm_config"]
@@ -139,30 +130,26 @@ class MingSemanticEncoder:
             mlp_config = json.load(f)
         self._img_gen_scales = mlp_config.get("img_gen_scales", [16])
 
-        # Pre-compute cumulative scale indices
         self._scale_indices = []
         current_idx = 0
         for scale in self._img_gen_scales:
             current_idx += scale * scale
             self._scale_indices.append(current_idx)
 
-        # 2. Load LLM (BailingMoeV2ForCausalLM)
         self._load_llm(model_path, llm_config_dict, dtype)
 
-        # Pick auxiliary device for connector/projections.  Avoid the GPU
-        # hosting word_embeddings (usually GPU 0) — it needs maximum
-        # headroom for the MoE forward pass activations.
+        # (wenyao) Keep connector/projections off the embedding GPU when
+        # possible; that GPU needs headroom for MoE activations.
         embed_gpu = self._llm_device_map.get("model.word_embeddings")
         best_gpu = device
         best_free = 0
         for i in range(torch.cuda.device_count()):
             free = torch.cuda.mem_get_info(i)[0]
             if i == embed_gpu:
-                continue  # skip the main LLM GPU
+                continue
             if free > best_free:
                 best_free = free
                 best_gpu = torch.device(f"cuda:{i}")
-        # Fallback: if all GPUs were skipped, use the embedding GPU
         if best_free == 0:
             best_free = torch.cuda.mem_get_info(embed_gpu)[0]
             best_gpu = torch.device(f"cuda:{embed_gpu}")
@@ -174,10 +161,7 @@ class MingSemanticEncoder:
             best_free / (1 << 30),
         )
 
-        # 3. Load connector (Qwen2ForCausalLM with non-causal attention)
         self._load_connector(model_path, aux_device, dtype)
-
-        # 4. Load projections and query tokens from mlp/model.safetensors
         self._load_projections(model_path, aux_device, dtype)
 
         logger.info("[SemanticEncoder] All components loaded successfully")
@@ -198,9 +182,7 @@ class MingSemanticEncoder:
 
         logger.info("[SemanticEncoder] Loading BailingMoeV2 LLM...")
 
-        # Build config
         config = BailingMoeV2Config(**llm_config_dict)
-        # Use flash_attention_2 (available on remote H200s) or fallback to eager
         try:
             from flash_attn import flash_attn_func  # noqa: F401
 
@@ -208,12 +190,10 @@ class MingSemanticEncoder:
         except ImportError:
             config._attn_implementation = "eager"
 
-        # Read weight index
         index_path = os.path.join(model_path, "model.safetensors.index.json")
         with open(index_path) as f:
             index = json.load(f)
 
-        # Build LLM key mapping: strip "model." prefix from BailingMM2 keys
         weight_map = index["weight_map"]
         llm_key_to_shard = {}
         shards_needed = set()
@@ -229,19 +209,16 @@ class MingSemanticEncoder:
             len(shards_needed),
         )
 
-        # Instantiate model on meta device (no memory allocation)
         with torch.device("meta"):
             self._llm = BailingMoeV2ForCausalLM(config)
 
-        # Build proportional device map: distribute layers across GPUs
-        # proportional to their available free memory.  Even distribution
-        # fails on shared machines where some GPUs have less free memory.
-        # Each MoE layer is ~6.5 GiB; we reserve headroom for activations.
+        # (wenyao) Use free-memory-proportional placement; an even split fails
+        # on shared machines where GPUs have uneven free memory.
         from accelerate.utils import set_module_tensor_to_device
 
-        LAYER_SIZE_GIB = 6.5  # MoE layer size in bf16 (256 experts × 3 linear)
-        HEADROOM_GIB = 15.0  # reserved for activations + framework overhead
-        MIN_FREE_GIB = 30.0  # minimum free memory to consider a GPU
+        LAYER_SIZE_GIB = 6.5
+        HEADROOM_GIB = 15.0
+        MIN_FREE_GIB = 30.0
 
         gpu_count = torch.cuda.device_count()
         gpu_free_gib: dict[int, float] = {}
@@ -263,7 +240,6 @@ class MingSemanticEncoder:
 
         n_layers = config.num_hidden_layers
 
-        # Calculate max layers each GPU can hold after reserving headroom
         gpu_max_layers: dict[int, int] = {}
         for gpu_id, free_gib in gpu_free_gib.items():
             usable = free_gib - HEADROOM_GIB
@@ -278,7 +254,6 @@ class MingSemanticEncoder:
                 f"Per-GPU: {gpu_max_layers}"
             )
 
-        # Distribute layers proportionally to each GPU's capacity
         available_gpus = sorted(gpu_max_layers.keys())
         layers_assigned: dict[int, int] = {}
         remaining = n_layers
@@ -287,7 +262,6 @@ class MingSemanticEncoder:
             share = min(share, remaining)
             layers_assigned[gpu_id] = share
             remaining -= share
-        # Distribute any remainder to GPUs with the most headroom
         while remaining > 0:
             for gpu_id in sorted(
                 available_gpus,
@@ -309,10 +283,8 @@ class MingSemanticEncoder:
         device_map["model.norm"] = available_gpus[-1]
         device_map["lm_head"] = available_gpus[-1]
 
-        # Save for aux device selection later
         self._llm_device_map = device_map
 
-        # Log distribution
         from collections import Counter
 
         gpu_layer_counts = Counter(device_map.values())
@@ -325,7 +297,6 @@ class MingSemanticEncoder:
             {g: f"{f:.0f}" for g, f in gpu_free_gib.items()},
         )
 
-        # Load weights shard by shard, placing each tensor on its mapped device
         loaded = 0
         for shard_idx, shard_file in enumerate(sorted(shards_needed)):
             shard_path = os.path.join(model_path, shard_file)
@@ -344,7 +315,6 @@ class MingSemanticEncoder:
                         continue
                     tensor = f.get_tensor(orig_key)
 
-                    # Find the device via longest-prefix match in the device map
                     target_device = self._device
                     best_len = -1
                     for module_name, dev in device_map.items():
@@ -364,10 +334,9 @@ class MingSemanticEncoder:
                     )
                     loaded += 1
 
-        # Materialize non-persistent buffers (inv_freq) that aren't in
-        # safetensors.  RotaryEmbedding computes inv_freq in __init__, but
-        # since the model was created on meta device those buffers are still
-        # meta tensors.  Recompute them on CPU before dispatch.
+        # (wenyao) Meta-device init leaves rotary inv_freq buffers as meta
+        # tensors because they are not in safetensors; materialize
+        # them before dispatch_model installs device hooks.
         from sglang_omni.models.ming_omni.diffusion.bailing_moe_model import (
             BailingMoeV2RotaryEmbedding,
             BailingMoeV2RotaryEmbedding3D,
@@ -378,20 +347,18 @@ class MingSemanticEncoder:
                 module, (BailingMoeV2RotaryEmbedding, BailingMoeV2RotaryEmbedding3D)
             ):
                 inv_freq, attn_scaling = module.rope_init_fn(module.config, "cpu")
-                # Replace the meta buffer with a real CPU tensor
                 module.inv_freq = inv_freq
                 module.original_inv_freq = inv_freq
                 module.attention_scaling = attn_scaling
 
-        # Set up model hooks for automatic input/output device transfer
         from accelerate import dispatch_model
 
         self._llm = dispatch_model(self._llm, device_map=device_map)
         self._llm.eval()
         logger.info("[SemanticEncoder] LLM loaded: %d parameters set", loaded)
 
-        # Load tokenizer (use base fast tokenizer — we only need basic
-        # text tokenization, not Ming's full BailingTokenizer features)
+        # (wenyao) Standalone semantic encoding only needs text tokenization,
+        # not Ming's full BailingTokenizer multimodal processing.
         from transformers import PreTrainedTokenizerFast
 
         self._tokenizer = PreTrainedTokenizerFast.from_pretrained(model_path)
@@ -415,7 +382,7 @@ class MingSemanticEncoder:
             subfolder="connector",
             torch_dtype=dtype,
         )
-        # Disable causal masking (Ming uses bidirectional attention)
+        # (wenyao) Ming image conditioning uses the connector bidirectionally.
         for layer in self._connector.model.layers:
             layer.self_attn.is_causal = False
         self._connector.to(device)
@@ -435,7 +402,6 @@ class MingSemanticEncoder:
         logger.info("[SemanticEncoder] Loading projections from %s", mlp_path)
         state = load_file(mlp_path)
 
-        # proj_in: Linear(llm_hidden=4096, connector_hidden=1536)
         self._proj_in = nn.Linear(
             state["proj_in.weight"].shape[1],
             state["proj_in.weight"].shape[0],
@@ -448,7 +414,6 @@ class MingSemanticEncoder:
         )
         self._proj_in.to(device=device, dtype=dtype)
 
-        # proj_out: Linear(connector_hidden=1536, cap_feat_dim=2560)
         self._proj_out = nn.Linear(
             state["proj_out.weight"].shape[1],
             state["proj_out.weight"].shape[0],
@@ -461,8 +426,6 @@ class MingSemanticEncoder:
         )
         self._proj_out.to(device=device, dtype=dtype)
 
-        # Query tokens (learnable, one per scale)
-        # For Ming-flash-omni-2.0: only 16x16 scale -> 256 tokens of dim 4096
         query_tokens_list = []
         for scale in self._img_gen_scales:
             key = f"query_tokens_dict.{scale}x{scale}"
@@ -480,10 +443,6 @@ class MingSemanticEncoder:
             list(self._query_tokens.shape),
             total_tokens,
         )
-
-    # ------------------------------------------------------------------
-    # Encoding
-    # ------------------------------------------------------------------
 
     @torch.no_grad()
     def encode(
@@ -507,14 +466,13 @@ class MingSemanticEncoder:
         if isinstance(text, str):
             text = [text]
 
-        # 0. Wrap in chat template (BailingMoeV2 expects this format)
+        # (wenyao) Match Ming's BailingMoeV2 chat template before encoding.
         eos = self._tokenizer.eos_token
         text = [
             f"{_SYSTEM_PROMPT}{eos}{_USER_PREFIX}{t}{eos}{_ASSISTANT_PREFIX}"
             for t in text
         ]
 
-        # 1. Tokenize
         inputs = self._tokenizer(
             text,
             padding=True,
@@ -525,15 +483,12 @@ class MingSemanticEncoder:
         input_ids = inputs.input_ids.to(self._device)
         attention_mask = inputs.attention_mask.to(self._device)
 
-        # 2. Append multiscale query token placeholders
         input_ids, attention_mask, gen_mask = self._append_query_token_placeholders(
             input_ids, attention_mask
         )
 
-        # 3. Build query token embeddings for vision patching
         image_grid_thw, query_embeds = self._build_query_embeds(input_ids, gen_mask)
 
-        # 4. Embed tokens and patch in query token embeddings
         words_embeddings = self._llm.get_input_embeddings()(
             input_ids.clamp(0, self._llm.get_input_embeddings().weight.shape[0] - 1)
         )
@@ -544,7 +499,6 @@ class MingSemanticEncoder:
             (input_ids == self._image_patch_token).unsqueeze(-1).to(input_ids.device)
         )
 
-        # 5. LLM forward pass
         with torch.cuda.amp.autocast(dtype=self._dtype):
             outputs = self._llm(
                 input_ids=input_ids,
@@ -560,10 +514,7 @@ class MingSemanticEncoder:
             )
         hidden_states = outputs.hidden_states[-1]
 
-        # 6. Extract generation-relevant hidden states
         condition_embeds = self._extract_and_project(hidden_states, gen_mask)
-
-        # 7. Build negative (zero) embeddings
         negative_embeds = condition_embeds * 0.0
 
         pos_list = list(condition_embeds.unbind(dim=0))
@@ -581,7 +532,6 @@ class MingSemanticEncoder:
         end_token_id = self._image_end_token
         patch_token_id = self._image_patch_token
 
-        # Build token sequence for all scales
         default_tokens = []
         default_attn = []
         default_gen = []
@@ -591,9 +541,9 @@ class MingSemanticEncoder:
             default_tokens.extend([patch_token_id] * n)
             default_tokens.append(end_token_id)
             default_attn.extend([1] * (n + 2))
-            default_gen.append(0)  # start token: not for generation
-            default_gen.extend([1] * n)  # patch tokens: for generation
-            default_gen.append(0)  # end token: not for generation
+            default_gen.append(0)
+            default_gen.extend([1] * n)
+            default_gen.append(0)
 
         text_ids_list = text_ids.cpu().tolist()
         attn_list = attention_mask.cpu().tolist()
@@ -603,7 +553,6 @@ class MingSemanticEncoder:
         new_gen = []
 
         for tid, am in zip(text_ids_list, attn_list):
-            # Find where padding starts
             pad_start = sum(1 for v in am if v != 0)
 
             new_ids.append(tid[:pad_start] + deepcopy(default_tokens) + tid[pad_start:])
@@ -678,7 +627,6 @@ class MingSemanticEncoder:
     ) -> torch.Tensor:
         """Extract gen-marked hidden states, run through connector + proj."""
         with torch.cuda.amp.autocast(dtype=self._dtype):
-            # Expand gen_mask to hidden_states dimensions
             mask = (
                 gen_mask.unsqueeze(-1)
                 .expand(gen_mask.shape[0], gen_mask.shape[1], hidden_states.shape[-1])
@@ -686,12 +634,10 @@ class MingSemanticEncoder:
                 .bool()
             )
 
-            # Extract generation-relevant hidden states
             hidden_gen = torch.masked_select(hidden_states, mask).view(
                 hidden_states.shape[0], -1, hidden_states.shape[-1]
             )
 
-            # Select highest resolution scale
             scale_starts = [0] + self._scale_indices[:-1]
             scale_ends = self._scale_indices
             _, start, end = list(zip(self._img_gen_scales, scale_starts, scale_ends))[
@@ -700,15 +646,13 @@ class MingSemanticEncoder:
 
             scale_hidden = hidden_gen[:, start:end, :]
 
-            # Move to auxiliary device (connector/proj may be on a
-            # different GPU than the last LLM layer)
+            # (wenyao) Connector/projections can live on a different GPU from
+            # the final LLM layer in standalone mode.
             scale_hidden = scale_hidden.to(self._aux_device)
 
-            # Project to connector input dim
             scale_embeds = self._proj_in(scale_hidden)
             seq_shape = scale_embeds.shape
 
-            # Run through connector (non-causal transformer)
             connector_out = self._connector(
                 inputs_embeds=scale_embeds,
                 attention_mask=torch.ones(
@@ -722,15 +666,10 @@ class MingSemanticEncoder:
             )
             scale_embeds = connector_out.hidden_states[-1]
 
-            # Project to diffusion input dim and L2 normalize
             scale_embeds = self._proj_out(scale_embeds)
             scale_embeds = torch.nn.functional.normalize(scale_embeds, dim=-1)
 
         return scale_embeds
-
-    # ------------------------------------------------------------------
-    # Cleanup
-    # ------------------------------------------------------------------
 
     def unload(self) -> None:
         """Release GPU memory."""

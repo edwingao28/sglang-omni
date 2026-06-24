@@ -136,9 +136,8 @@ def make_thinker_scheduler_adapters(
         if not hasattr(input_ids, "to"):
             raise TypeError("prompt.input_ids must be a torch.Tensor")
 
-        # Per-content pad_value substitution to defeat SGLang radix prefix-cache
-        # aliasing across multimodal requests that share the same generic
-        # image/audio/video patch token id.
+        # (wenyao) Per-content pad_value substitution prevents radix-cache
+        # aliasing when requests share generic multimodal patch ids.
         thinker_inputs_early = state.thinker_inputs or {}
         media_cache_keys = thinker_inputs_early.get("media_cache_keys") or {}
         pad_values: dict[str, int] = {}
@@ -152,12 +151,9 @@ def make_thinker_scheduler_adapters(
             bool(image_gen.get("prefill_only")) if hasattr(image_gen, "get") else False
         )
 
-        # Substitute generated-query patch tokens with a per-request pad so the
-        # radix prefix cache never serves the query region from another request
-        # — captured hidden states must always include all query positions.
-        # Done BEFORE the input-image substitution and restricted to gen_mask
-        # positions so query tokens and an input image (which share the same
-        # generic image patch token id) land on disjoint pads.
+        # (wenyao) Generated-query pads must be per-request and applied before
+        # input-image substitution, otherwise radix cache can hide the
+        # query region or alias it with normal image patch tokens.
         if prefill_only:
             patch_token_id = image_gen.get("image_patch_token_id") or image_token_id
             if patch_token_id is not None:

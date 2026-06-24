@@ -1135,8 +1135,6 @@ def test_try_condition_tail_aligns_mask_when_hidden_states_are_suffix() -> None:
         backend=StubBackend(image=_png()),
         conditioner=conditioner,
     )
-    # Full sequence had 6 positions; radix cache absorbed the first 2,
-    # so only the trailing 4 rows were computed and captured.
     hidden = torch.arange(12, dtype=torch.float32).reshape(4, 3)
     data = {
         "thinker_out": {"extra_model_outputs": {"hidden_states": hidden}},
@@ -1145,7 +1143,6 @@ def test_try_condition_tail_aligns_mask_when_hidden_states_are_suffix() -> None:
 
     condition_embeds, negative_embeds = executor._try_condition_from_hidden_states(data)
 
-    # Tail of the mask is [0, 1, 0, 1] -> rows 1 and 3 of the captured suffix.
     expected_query = hidden[[1, 3]]
     torch.testing.assert_close(
         conditioner.project_calls[0], expected_query.unsqueeze(0)
@@ -1170,8 +1167,6 @@ def test_try_condition_drops_conditioning_when_tail_misses_query_positions(
         backend=StubBackend(image=_png()),
         conditioner=conditioner,
     )
-    # Two query positions in the full mask, but the captured tail (2 rows)
-    # only covers zeros — the cache absorbed the query region itself.
     hidden = torch.arange(6, dtype=torch.float32).reshape(2, 3)
     data = {
         "thinker_out": {"extra_model_outputs": {"hidden_states": hidden}},
@@ -1219,7 +1214,6 @@ def test_conditioner_set_but_no_hidden_states_fails_loudly() -> None:
         backend=backend,
         conditioner=StubConditioner(),
     )
-    # image requested, but thinker_out carries NO hidden_states -> condition None
     payload = _payload(
         metadata={
             "output_modalities": ["image"],
@@ -1237,13 +1231,12 @@ def test_conditioner_set_but_no_hidden_states_fails_loudly() -> None:
         return await executor.get_result()
 
     result = asyncio.run(run())
-    # MUST NOT silently produce an image via the ByT5/random fallback
     assert result.data["images"] == []
     assert result.data["status"] == "failed"
     assert result.data["stage"] == "image_gen"
     assert result.data["reason"] == "semantic_conditioning_unavailable"
     assert "semantic conditioning unavailable" in result.data["error"]
-    assert backend.calls == []  # backend.generate never invoked
+    assert backend.calls == []
 
 
 def test_try_condition_returns_none_when_no_hidden_states_captured() -> None:
@@ -1258,9 +1251,6 @@ def test_try_condition_returns_none_when_no_hidden_states_captured() -> None:
         backend=StubBackend(image=_png()),
         conditioner=conditioner,
     )
-    # Captured hidden states are empty (seq_len == 0). gen_mask[-0:] would
-    # wrongly return the full mask and crash; the positive-index slice must
-    # yield an empty tail -> drop conditioning without raising.
     hidden = torch.zeros(0, 3, dtype=torch.float32)
     data = {
         "thinker_out": {"extra_model_outputs": {"hidden_states": hidden}},
@@ -1287,8 +1277,6 @@ def test_try_condition_reads_via_typed_state() -> None:
         "mm_inputs": {"image_gen": {"gen_mask": [0, 1, 0, 1]}},
     }
     cond, neg = executor._try_condition_from_hidden_states(data)
-    # gen_mask selects rows 1 and 3 of the [4,2] tensor -> query shape [2, 2]
-    # StubConditioner.project returns query_hidden + 100, so cond[0] values = selected rows + 100
     assert cond is not None and neg is not None
     assert cond[0].shape == (2, 2)
     expected_query = hs[[1, 3]]

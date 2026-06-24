@@ -73,7 +73,6 @@ class ChatCompletionRequest(BaseModel):
     # Audio output configuration
     audio: dict[str, Any] | None = None  # {"voice": "...", "format": "wav"}
 
-    # Image output configuration
     image_generation: dict[str, Any] | None = None
 
     # Audio input (sglang-omni extension)

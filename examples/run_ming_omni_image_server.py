@@ -9,12 +9,10 @@ Usage::
     python examples/run_ming_omni_image_server.py \
         --dit-model-path /path/to/zimage
 
-    # Custom GPU placement:
     python examples/run_ming_omni_image_server.py \
         --dit-model-path /path/to/zimage \
         --gpu-thinker 0 --tp-size 2 --gpu-img-gen 2
 
-    # Then test the thinker-fused source:
     curl http://localhost:8000/v1/chat/completions \
         -H "Content-Type: application/json" \
         -d '{
@@ -27,9 +25,6 @@ Usage::
             },
             "stream": false
         }'
-
-    # To compare the standalone semantic encoder, launch with
-    # --enable-standalone-semantic-encoder and send semantic_source=standalone.
 """
 
 from __future__ import annotations
@@ -85,7 +80,6 @@ def parse_args() -> argparse.Namespace:
         help="Load optional ByT5 text-rendering support for image requests.",
     )
 
-    # GPU placement
     parser.add_argument("--gpu-thinker", type=int, default=0)
     parser.add_argument("--gpu-img-gen", type=int, default=1)
     parser.add_argument(
@@ -98,7 +92,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
-    # Pipeline
     parser.add_argument(
         "--relay-backend",
         type=str,
@@ -116,7 +109,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
-    # Server
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--model-name", type=str, default="ming-omni")

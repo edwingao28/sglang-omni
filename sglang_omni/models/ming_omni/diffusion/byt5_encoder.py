@@ -24,11 +24,6 @@ from transformers.models.t5.modeling_t5 import (
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Mapper layers (reimplemented from Ming's T5EncoderBlockByT5Mapper)
-# ---------------------------------------------------------------------------
-
-
 class _T5EncoderBlock(nn.Module):
     """Single T5 encoder block: self-attention + feed-forward."""
 
@@ -99,7 +94,6 @@ class ByT5Mapper(nn.Module):
     def forward(
         self, inputs_embeds: torch.Tensor, attention_mask: torch.Tensor
     ) -> torch.Tensor:
-        # Expand attention mask: [B, S] → [B, 1, 1, S]
         if attention_mask.dim() == 2:
             ext_mask = attention_mask[:, None, None, :]
         else:
@@ -122,11 +116,6 @@ class ByT5Mapper(nn.Module):
             hidden_states = self.channel_mapper(hidden_states)
             hidden_states = self.final_layer_norm(hidden_states)
         return hidden_states
-
-
-# ---------------------------------------------------------------------------
-# ByT5TextEncoder: composite ByT5 + Mapper
-# ---------------------------------------------------------------------------
 
 
 class ByT5TextEncoder(nn.Module):
@@ -182,13 +171,8 @@ class ByT5TextEncoder(nn.Module):
         if isinstance(text, str):
             text = [text]
 
-        # Format text for ByT5 (production: Text "...". )
         formatted = [self.format_render_text(t) for t in text]
-
-        # Encode positive prompt
         prompt_embeds = self._encode_batch(formatted, tokenizer, device, max_length)
-
-        # Negative = zeros with same shape (production: byt5_prompt_embeds * 0.0)
         neg_embeds = [torch.zeros_like(e) for e in prompt_embeds]
 
         return prompt_embeds, neg_embeds
@@ -211,22 +195,15 @@ class ByT5TextEncoder(nn.Module):
         input_ids = inputs.input_ids.to(device)
         attn_mask = inputs.attention_mask.to(device)
 
-        # ByT5 encoder forward
         byt5_out = self.byt5_encoder(input_ids=input_ids, attention_mask=attn_mask)
         base_hidden = byt5_out.last_hidden_state
 
-        # Mapper: d_model → cap_feat_dim
         mapped = self.mapper(base_hidden, attn_mask)
 
-        # Zero out padding positions (production: byt5_prompt_embeds *= attn_mask)
-        # Keep full padded tensor shape [max_length, cap_feat_dim] per item.
+        # (wenyao) Keep padded rows zero while preserving the full tensor shape
+        # expected by the ZImage cap_embedder.
         mapped = mapped * attn_mask.unsqueeze(-1)
         return [mapped[b] for b in range(mapped.shape[0])]
-
-
-# ---------------------------------------------------------------------------
-# Loading utility
-# ---------------------------------------------------------------------------
 
 
 def load_byt5_text_encoder(
@@ -254,7 +231,6 @@ def load_byt5_text_encoder(
     byt5_cfg = byt5_json["byt5_config"]
     mapper_cfg = byt5_json["byt5_mapper_config"]
 
-    # 1. Load base ByT5 model + tokenizer
     byt5_ckpt_path = str(byt5_dir / byt5_cfg["byt5_ckpt_path"])
     logger.info("[ByT5] Loading base model from %s", byt5_ckpt_path)
     tokenizer = AutoTokenizer.from_pretrained(byt5_ckpt_path)
@@ -262,10 +238,8 @@ def load_byt5_text_encoder(
     byt5_encoder = byt5_model.get_encoder()
     logger.info("[ByT5] Base encoder loaded (d_model=%d)", byt5_encoder.config.d_model)
 
-    # 2. Add special tokens (font / color)
     _add_special_tokens(tokenizer, byt5_encoder, byt5_cfg, byt5_dir)
 
-    # 3. Load fine-tuned ByT5 weights
     finetuned_path = byt5_dir / "byt5_model" / "byt5_model.pt"
     if finetuned_path.exists():
         logger.info("[ByT5] Loading fine-tuned weights from %s", finetuned_path)
@@ -280,7 +254,6 @@ def load_byt5_text_encoder(
                 "[ByT5] Unexpected keys (%d): %s ...", len(unexpected), unexpected[:3]
             )
 
-    # 4. Load mapper
     logger.info(
         "[ByT5] Loading mapper (layers=%d, channels=%s)",
         mapper_cfg["num_layers"],
@@ -300,7 +273,6 @@ def load_byt5_text_encoder(
         logger.warning("[ByT5] Mapper unexpected keys: %s", unexpected)
     logger.info("[ByT5] Mapper loaded")
 
-    # 5. Compose and move to device
     text_encoder = ByT5TextEncoder(byt5_encoder, mapper)
     text_encoder = text_encoder.to(device=device, dtype=dtype)
     text_encoder.eval()
