@@ -235,6 +235,25 @@ def test_default_stream_builder_sets_multimodal_for_audio_and_image_dict_chunk()
     assert chunk.modality == "multimodal"
 
 
+def test_default_stream_builder_carries_text_with_images_in_one_chunk() -> None:
+    # Streaming text+image: a single delta carries both text and images so a
+    # client can render a multimodal stream chunk without a second message.
+    from sglang_omni.client.client import Client
+
+    msg = StreamMessage(
+        request_id="req-stream-ti",
+        from_stage="image_gen",
+        stage_name="image_gen",
+        chunk={"text": "rendering", "images": [_image_payload()]},
+    )
+
+    chunk = Client._default_stream_builder("req-stream-ti", msg)
+
+    assert chunk.text == "rendering"
+    assert chunk.images == [_image_payload()]
+    assert chunk.stage_name == "image_gen"
+
+
 def test_generate_chunk_to_dict_includes_images() -> None:
     chunk = GenerateChunk(
         request_id="req-dict",

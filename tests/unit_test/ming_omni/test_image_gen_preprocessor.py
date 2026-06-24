@@ -149,6 +149,56 @@ def test_image_gen_preprocessor_appends_query_tokens(monkeypatch) -> None:
     assert image_gen["image_gen_params"] == {"size": "512x512"}
 
 
+def test_image_gen_preprocessor_gen_mask_alignment_contract(monkeypatch) -> None:
+    module = _import_preprocessor(monkeypatch)
+
+    _install_common_deps(
+        monkeypatch,
+        module,
+        query_tokens=torch.arange(12, dtype=torch.float32).reshape(3, 4),
+    )
+    processor = module.MingPreprocessor("fake-model", enable_image_gen=True)
+    payload = StagePayload(
+        request_id="req-img",
+        request=OmniRequest(
+            inputs={"messages": [{"role": "user", "content": "draw a cat"}]},
+            metadata={
+                "output_modalities": ["image"],
+                "image_generation": {"size": "512x512"},
+            },
+        ),
+        data={},
+    )
+
+    result = _run_preprocessor(processor, payload)
+    state = MingOmniPipelineState.from_dict(result.data)
+    image_gen = state.mm_inputs["image_gen"]
+    input_ids = state.prompt["input_ids"].flatten().tolist()
+    gen_mask = image_gen["gen_mask"]
+
+    # 1) Mask length matches the token count exactly.
+    assert len(gen_mask) == len(input_ids)
+    assert len(gen_mask) == state.prompt["input_ids"].shape[-1]
+
+    # 2) The "1"s form a single CONTIGUOUS span (the query patch), not scattered.
+    one_positions = [i for i, v in enumerate(gen_mask) if v == 1]
+    assert one_positions == list(range(one_positions[0], one_positions[-1] + 1))
+    # Span length equals the query-token count.
+    assert len(one_positions) == 3
+
+    # 3) The query span maps onto the image_patch_token ids, and the
+    #    surrounding <image>/</image> markers are NOT inside the mask.
+    patch_id = image_gen["image_patch_token_id"]
+    assert all(input_ids[i] == patch_id for i in one_positions)
+    start_idx = one_positions[0] - 1
+    end_idx = one_positions[-1] + 1
+    assert gen_mask[start_idx] == 0  # <image> start marker excluded
+    assert gen_mask[end_idx] == 0  # </image> end marker excluded
+    # FakeTokenizer encodes <image>->[20], </image>->[21].
+    assert input_ids[start_idx] == 20
+    assert input_ids[end_idx] == 21
+
+
 def test_image_gen_preprocessor_disabled_by_default(monkeypatch) -> None:
     module = _import_preprocessor(monkeypatch)
 

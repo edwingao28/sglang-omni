@@ -51,3 +51,21 @@ def test_extract_image_generation_params_falls_back_to_inputs() -> None:
     payload = _payload(inputs={"image_generation": {"size": "768x768"}})
 
     assert extract_image_generation_params(payload) == {"size": "768x768"}
+
+
+def test_extract_image_generation_params_passes_semantic_source_through() -> None:
+    # The request helper is a pure pass-through: it must NOT inject a
+    # semantic_source default (that belongs to the executor's _extract_params).
+    # A request that omits semantic_source stays omitted here; an explicit
+    # value is preserved verbatim.
+    from sglang_omni.models.ming_omni.components.image_gen_request import (
+        extract_image_generation_params,
+    )
+
+    omitted = _payload(metadata={"image_generation": {"size": "512x512"}})
+    assert "semantic_source" not in extract_image_generation_params(omitted)
+
+    explicit = _payload(
+        metadata={"image_generation": {"semantic_source": "standalone"}}
+    )
+    assert extract_image_generation_params(explicit)["semantic_source"] == "standalone"

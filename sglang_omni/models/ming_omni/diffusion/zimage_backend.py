@@ -58,6 +58,18 @@ class ZImageBackend(DiffusionBackend):
     ) -> None:
         self._device = device
 
+        # Fail fast on misconfiguration before loading the DiT (~22GB).
+        if load_semantic_encoder and ming_model_path is None:
+            raise ValueError("load_semantic_encoder=True requires ming_model_path")
+        if load_byt5_text_encoder:
+            if ming_model_path is None:
+                raise ValueError("load_byt5_text_encoder=True requires ming_model_path")
+            byt5_dir = Path(ming_model_path) / "byt5"
+            if not byt5_dir.exists():
+                raise RuntimeError(
+                    f"ByT5 text rendering requested but {byt5_dir} does not exist"
+                )
+
         from diffusers import (
             AutoencoderKL,
             FlowMatchEulerDiscreteScheduler,
@@ -95,8 +107,6 @@ class ZImageBackend(DiffusionBackend):
         logger.info("[ZImage] Pipeline assembled on %s", device)
 
         if load_semantic_encoder:
-            if ming_model_path is None:
-                raise ValueError("load_semantic_encoder=True requires ming_model_path")
             from sglang_omni.models.ming_omni.diffusion.semantic_encoder import (
                 MingSemanticEncoder,
             )
@@ -106,13 +116,6 @@ class ZImageBackend(DiffusionBackend):
             logger.info("[ZImage] Standalone semantic encoder ready")
 
         if load_byt5_text_encoder:
-            if ming_model_path is None:
-                raise ValueError("load_byt5_text_encoder=True requires ming_model_path")
-            byt5_dir = Path(ming_model_path) / "byt5"
-            if not byt5_dir.exists():
-                raise RuntimeError(
-                    f"ByT5 text rendering requested but {byt5_dir} does not exist"
-                )
             from sglang_omni.models.ming_omni.diffusion.byt5_encoder import (
                 load_byt5_text_encoder,
             )

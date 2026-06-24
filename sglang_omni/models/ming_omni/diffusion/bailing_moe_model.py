@@ -55,7 +55,16 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
-from transformers.utils.import_utils import is_torch_fx_available
+
+# is_torch_fx_available was removed in transformers >=5.x; fx tracing is not
+# needed for inference, so fall back to a stub when the symbol is missing.
+try:
+    from transformers.utils.import_utils import is_torch_fx_available
+except ImportError:
+
+    def is_torch_fx_available() -> bool:
+        return False
+
 
 from sglang_omni.models.ming_omni.diffusion.bailing_moe_config import BailingMoeV2Config
 

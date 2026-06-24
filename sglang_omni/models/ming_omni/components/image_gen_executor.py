@@ -429,7 +429,7 @@ class MingImageGenExecutor:
                 img_params.get("negative_prompt", defaults.negative_prompt)
             ),
             semantic_source=self._normalize_semantic_source(
-                img_params.get("semantic_source", defaults.semantic_source)
+                img_params.get("semantic_source", "thinker")
             ),
             enable_text_rendering=self._coerce_bool(
                 img_params.get(

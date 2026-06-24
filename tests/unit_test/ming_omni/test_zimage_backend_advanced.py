@@ -128,3 +128,58 @@ def test_generate_fails_when_text_rendering_requested_but_byt5_unloaded() -> Non
             ImageGenParams(enable_text_rendering=True),
             condition_embeds=[sem],
         )
+
+
+def test_load_models_semantic_encoder_without_ming_model_path_raises() -> None:
+    torch = pytest.importorskip("torch")
+    from sglang_omni.models.ming_omni.diffusion.zimage_backend import ZImageBackend
+
+    with pytest.raises(
+        ValueError, match="load_semantic_encoder=True requires ming_model_path"
+    ):
+        ZImageBackend().load_models(
+            "/fake/dit",
+            torch.device("cpu"),
+            load_semantic_encoder=True,
+        )
+
+
+def test_load_models_byt5_without_ming_model_path_raises() -> None:
+    torch = pytest.importorskip("torch")
+    from sglang_omni.models.ming_omni.diffusion.zimage_backend import ZImageBackend
+
+    with pytest.raises(
+        ValueError, match="load_byt5_text_encoder=True requires ming_model_path"
+    ):
+        ZImageBackend().load_models(
+            "/fake/dit",
+            torch.device("cpu"),
+            load_byt5_text_encoder=True,
+        )
+
+
+def test_load_models_byt5_missing_dir_raises(tmp_path) -> None:
+    torch = pytest.importorskip("torch")
+    from sglang_omni.models.ming_omni.diffusion.zimage_backend import ZImageBackend
+
+    with pytest.raises(RuntimeError, match="ByT5 text rendering requested but"):
+        ZImageBackend().load_models(
+            "/fake/dit",
+            torch.device("cpu"),
+            ming_model_path=str(tmp_path),
+            load_byt5_text_encoder=True,
+        )
+
+
+def test_image_gen_params_production_defaults() -> None:
+    """Lock the production-facing defaults a request inherits when fields are omitted."""
+    params = ImageGenParams()
+    assert params.width == 1024
+    assert params.height == 1024
+    assert params.num_inference_steps == 28
+    # Z-Image-Turbo is distilled/low-CFG; SD's 7.0 default washes images out.
+    assert params.guidance_scale == 2.0
+    assert params.seed is None
+    assert params.negative_prompt == ""
+    assert params.semantic_source is None
+    assert params.enable_text_rendering is False

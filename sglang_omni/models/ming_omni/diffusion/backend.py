@@ -17,7 +17,8 @@ class ImageGenParams:
     width: int = 1024
     height: int = 1024
     num_inference_steps: int = 28
-    guidance_scale: float = 7.0
+    # Tuned for the Z-Image-Turbo DiT (distilled, low-CFG); high CFG washes out.
+    guidance_scale: float = 2.0
     seed: int | None = None
     negative_prompt: str = ""
     semantic_source: str | None = None

@@ -48,6 +48,15 @@ tests/
     │   ├── test_talker.py
     │   └── test_text_template.py
     ├── ming_omni/
+    │   ├── test_diffusion_imports.py
+    │   ├── test_image_gen_bootstrap.py
+    │   ├── test_image_gen_client_api.py
+    │   ├── test_image_gen_config.py
+    │   ├── test_image_gen_executor.py
+    │   ├── test_image_gen_merge.py
+    │   ├── test_image_gen_preprocessor.py
+    │   ├── test_image_gen_query_info.py
+    │   ├── test_image_gen_request.py
     │   ├── test_omni_serve.py
     │   ├── test_pipeline.py
     │   ├── test_streaming_decode.py
@@ -58,7 +67,8 @@ tests/
     │   ├── test_thinker.py
     │   ├── test_tokenizer.py
     │   ├── test_tp.py
-    │   └── test_vision_patch_embed_linear.py
+    │   ├── test_vision_patch_embed_linear.py
+    │   └── test_zimage_backend_advanced.py
     ├── qwen3_asr/
     │   ├── test_pipeline.py
     │   └── test_request_builders.py
@@ -320,6 +330,13 @@ that happened to contain an older version of the test.
     `MingOmniStreamingSpeechPipelineConfig` wiring (segmenter between thinker and
     talker, terminal talker-stream stage, thinker/talker GPU-range collision
     rejection, streaming variant exposure).
+  - image generation (thinker-fused diffusion): semantic-source routing and
+    `image_generation` request param parsing, ZImage backend load contract
+    (DiT components from the DiT path vs. Ming semantic/ByT5 assets from
+    `ming_model_path`, with fail-fast guards when `ming_model_path` is missing
+    or the `byt5/` dir is absent), executor load/generate wiring, preprocessor
+    query-token injection, query-info construction, bootstrap, client API, and
+    merge behavior, plus a diffusion-import smoke test.
 
 - `unit_test/qwen3_tts/`: Qwen3-TTS unit tests:
   - pipeline config and registry contracts

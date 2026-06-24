@@ -232,7 +232,7 @@ def test_load_models_uses_fake_backend_and_tokenizer_modules(monkeypatch) -> Non
     assert executor._backend is loaded_backends[0]
     assert loaded_backends[0].load_calls[0][0][0] == "/fake/dit"
     assert str(loaded_backends[0].load_calls[0][0][1]) == "cpu"
-    assert loaded_backends[0].load_calls[0][1] == {}
+    assert loaded_backends[0].load_calls[0][1] == {"ming_model_path": "/fake/model"}
     assert executor._thinker_tokenizer == ("/fake/model", tokenizer)
 
 
@@ -270,7 +270,7 @@ def test_load_models_uses_zimage_backend_without_standalone_encoder_args(
         device="cpu",
     )._load_models()
 
-    assert zimage_calls[0][1] == {}
+    assert zimage_calls[0][1] == {"ming_model_path": "/fake/model"}
 
 
 def test_load_models_passes_explicit_advanced_zimage_flags(monkeypatch) -> None:
@@ -308,6 +308,7 @@ def test_load_models_passes_explicit_advanced_zimage_flags(monkeypatch) -> None:
     )._load_models()
 
     assert zimage_calls[0][1] == {
+        "ming_model_path": "/fake/model",
         "load_semantic_encoder": True,
         "load_byt5_text_encoder": True,
     }
@@ -1017,7 +1018,7 @@ def test_add_request_invalid_semantic_source_returns_image_error() -> None:
     assert "semantic_source" in result.data["error"]
 
 
-def test_add_request_requires_explicit_semantic_source() -> None:
+def test_add_request_missing_semantic_source_defaults_to_thinker() -> None:
     from sglang_omni.models.ming_omni.components.image_gen_executor import (
         MingImageGenExecutor,
     )
@@ -1039,39 +1040,9 @@ def test_add_request_requires_explicit_semantic_source() -> None:
 
     result = asyncio.run(run_request())
 
-    assert backend.calls == []
-    assert result.data["reason"] == "invalid_image_generation_params"
-    assert "semantic_source" in result.data["error"]
-
-
-def test_add_request_missing_thinker_conditioning_fails_without_text_fallback() -> None:
-    from sglang_omni.models.ming_omni.components.image_gen_executor import (
-        MingImageGenExecutor,
-    )
-
-    backend = StubBackend(image=_png())
-    executor = MingImageGenExecutor(
-        model_path="/fake/model",
-        backend=backend,
-        conditioner=StubConditioner(),
-    )
-    payload = _payload(
-        metadata={
-            "output_modalities": ["image"],
-            "image_generation": {"semantic_source": "thinker"},
-        },
-        data={
-            "thinker_out": {"output_ids": [4, 5, 6]},
-            "prompt": {"prompt_text": "draw"},
-        },
-    )
-
-    async def run_request():
-        await executor.add_request(payload)
-        return await executor.get_result()
-
-    result = asyncio.run(run_request())
-
+    # Missing semantic_source defaults to "thinker", so the request is NOT
+    # rejected as invalid; it reaches the thinker path and fails only because
+    # no thinker hidden states / gen_mask were captured.
     assert backend.calls == []
     assert result.data["reason"] == "semantic_conditioning_unavailable"
 
@@ -1118,9 +1089,35 @@ def test_extract_params_prefers_raw_then_mm_then_request_helper() -> None:
     assert raw_params.semantic_source == "standalone"
     assert raw_params.enable_text_rendering is True
     assert (mm_params.width, mm_params.height) == (640, 672)
-    assert mm_params.semantic_source is None
+    assert mm_params.semantic_source == "thinker"
     assert (request_params.width, request_params.height) == (800, 801)
-    assert request_params.semantic_source is None
+    assert request_params.semantic_source == "thinker"
+
+
+def test_extract_params_semantic_source_default_explicit_and_invalid() -> None:
+    from sglang_omni.models.ming_omni.components.image_gen_executor import (
+        MingImageGenExecutor,
+    )
+
+    executor = MingImageGenExecutor(model_path="/fake/model", backend=StubBackend())
+
+    # Omitted -> defaults to "thinker" (the only working path).
+    omitted = executor._extract_params(
+        {"raw_inputs": {"image_generation": {"size": "64x64"}}}, None
+    )
+    assert omitted.semantic_source == "thinker"
+
+    # Explicit "standalone" is preserved verbatim.
+    standalone = executor._extract_params(
+        {"raw_inputs": {"image_generation": {"semantic_source": "standalone"}}}, None
+    )
+    assert standalone.semantic_source == "standalone"
+
+    # Genuinely-invalid values are preserved (so add_request can reject them).
+    bogus = executor._extract_params(
+        {"raw_inputs": {"image_generation": {"semantic_source": "bogus"}}}, None
+    )
+    assert bogus.semantic_source == "bogus"
 
 
 def test_try_condition_tail_aligns_mask_when_hidden_states_are_suffix() -> None:
