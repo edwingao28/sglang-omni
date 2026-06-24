@@ -63,6 +63,10 @@ class MingImageGenExecutor:
 
     async def start(self) -> None:
         """Load diffusion backend and thinker tokenizer."""
+        if torch.cuda.is_available():
+            _dev = torch.device(self._device)
+            if _dev.type == "cuda" and _dev.index is None:
+                self._device = f"cuda:{torch.cuda.current_device()}"
         logger.info(
             "[IMG_GEN] Loading %s backend from %s (device=%s)",
             self._dit_type,
@@ -79,6 +83,8 @@ class MingImageGenExecutor:
             self._backend = _create_backend(self._dit_type)
 
         device = torch.device(self._device)
+        if device.type == "cuda" and device.index is not None:
+            torch.cuda.set_device(device.index)
         self._backend.load_models(self._dit_model_path, device)
         logger.info("[IMG_GEN] Diffusion backend loaded in %.1fs", time.time() - t0)
 
