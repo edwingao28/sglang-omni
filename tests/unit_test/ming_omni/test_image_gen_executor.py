@@ -262,6 +262,46 @@ def test_load_models_uses_zimage_backend_without_standalone_encoder_args(
     assert zimage_calls[0][1] == {}
 
 
+def test_load_models_passes_explicit_advanced_zimage_flags(monkeypatch) -> None:
+    from sglang_omni.models.ming_omni.components.image_gen_executor import (
+        MingImageGenExecutor,
+    )
+
+    zimage_calls = []
+
+    class FakeZImageBackend:
+        def load_models(self, *args, **kwargs):
+            zimage_calls.append((args, kwargs))
+
+    zimage_module = ModuleType("sglang_omni.models.ming_omni.diffusion.zimage_backend")
+    zimage_module.ZImageBackend = FakeZImageBackend
+    common_module = ModuleType("sglang_omni.models.ming_omni.components.common")
+    common_module.load_ming_tokenizer = lambda _model_path: FakeTokenizer()
+    _install_fake_module(
+        monkeypatch,
+        "sglang_omni.models.ming_omni.diffusion.zimage_backend",
+        zimage_module,
+    )
+    _install_fake_module(
+        monkeypatch,
+        "sglang_omni.models.ming_omni.components.common",
+        common_module,
+    )
+
+    MingImageGenExecutor(
+        model_path="/fake/model",
+        dit_type="zimage",
+        device="cpu",
+        enable_standalone_semantic_encoder=True,
+        enable_byt5_text_rendering=True,
+    )._load_models()
+
+    assert zimage_calls[0][1] == {
+        "load_semantic_encoder": True,
+        "load_byt5_text_encoder": True,
+    }
+
+
 def test_abort_prevents_generation_and_get_result_skips_aborted_result() -> None:
     from sglang_omni.models.ming_omni.components.image_gen_executor import (
         MingImageGenExecutor,
@@ -381,6 +421,88 @@ def test_create_image_gen_executor_wires_zimage_conditioner(
         "dit_model_path": "/dit",
         "device": "cpu",
         "conditioner": conditioners[0],
+    }
+
+
+def test_create_image_gen_executor_passes_explicit_advanced_flags(
+    monkeypatch,
+) -> None:
+    from sglang_omni.models.ming_omni import stages
+
+    constructed = []
+    conditioners = []
+
+    class FakeImageGenExecutor:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            constructed.append(self)
+
+        def should_generate_image(self, _payload):
+            return False
+
+        def build_empty_image_result(self, payload):
+            return StagePayload(request_id=payload.request_id, request=payload.request)
+
+    class FakeSemanticConditioner:
+        def __init__(self):
+            conditioners.append(self)
+
+    class FakeSimpleScheduler:
+        def __init__(self, fn):
+            self.fn = fn
+
+    image_executor_module = ModuleType(
+        "sglang_omni.models.ming_omni.components.image_gen_executor"
+    )
+    image_executor_module.MingImageGenExecutor = FakeImageGenExecutor
+    semantic_conditioner_module = ModuleType(
+        "sglang_omni.models.ming_omni.diffusion.semantic_conditioner"
+    )
+    semantic_conditioner_module.SemanticConditioner = FakeSemanticConditioner
+    weight_loader_module = ModuleType("sglang_omni.models.weight_loader")
+    weight_loader_module.resolve_model_path = lambda model_path: (
+        f"/resolved/{model_path}"
+    )
+    scheduler_module = ModuleType("sglang_omni.scheduling.simple_scheduler")
+    scheduler_module.SimpleScheduler = FakeSimpleScheduler
+    _install_fake_module(
+        monkeypatch,
+        "sglang_omni.models.ming_omni.components.image_gen_executor",
+        image_executor_module,
+    )
+    _install_fake_module(
+        monkeypatch,
+        "sglang_omni.models.ming_omni.diffusion.semantic_conditioner",
+        semantic_conditioner_module,
+    )
+    _install_fake_module(
+        monkeypatch,
+        "sglang_omni.models.weight_loader",
+        weight_loader_module,
+    )
+    _install_fake_module(
+        monkeypatch,
+        "sglang_omni.scheduling.simple_scheduler",
+        scheduler_module,
+    )
+
+    stages.create_image_gen_executor(
+        "repo",
+        dit_type="zimage",
+        dit_model_path="/dit",
+        device="cpu",
+        enable_standalone_semantic_encoder=True,
+        enable_byt5_text_rendering=True,
+    )
+
+    assert constructed[0].kwargs == {
+        "model_path": "/resolved/repo",
+        "dit_type": "zimage",
+        "dit_model_path": "/dit",
+        "device": "cpu",
+        "conditioner": conditioners[0],
+        "enable_standalone_semantic_encoder": True,
+        "enable_byt5_text_rendering": True,
     }
 
 
@@ -775,115 +897,23 @@ def test_add_request_hidden_state_generation_error_returns_image_error_payload()
     }
 
 
-def test_add_request_text_fallback_decodes_output_ids_and_returns_png() -> None:
-    from sglang_omni.models.ming_omni.components.image_gen_executor import (
-        MingImageGenExecutor,
-    )
-
-    backend = StubBackend(image=_png(width=7, height=6))
-    tokenizer = FakeTokenizer()
-    executor = MingImageGenExecutor(model_path="/fake/model", backend=backend)
-    executor._thinker_tokenizer = tokenizer
-    payload = _payload(
-        metadata={"output_modalities": ["image"]},
-        data={"thinker_out": {"output_ids": [4, 5, 6]}},
-    )
-
-    async def run_request():
-        await executor.add_request(payload)
-        return await executor.get_result()
-
-    result = asyncio.run(run_request())
-
-    assert tokenizer.calls == [([4, 5, 6], True)]
-    assert backend.calls[0][0] == "decoded prompt"
-    image = _image_record(result)
-    assert image["width"] == 7
-    assert image["height"] == 6
-    assert image["format"] == "png"
-    assert _decode_png_size(image["b64_json"]) == (7, 6)
-
-
-def test_add_request_uses_generated_text_when_decode_unavailable() -> None:
+def test_add_request_standalone_source_requires_explicit_enable() -> None:
     from sglang_omni.models.ming_omni.components.image_gen_executor import (
         MingImageGenExecutor,
     )
 
     backend = StubBackend(image=_png())
-    executor = MingImageGenExecutor(model_path="/fake/model", backend=backend)
-    payload = _payload(
-        metadata={"output_modalities": ["image"]},
-        data={"thinker_out": {"output_ids": [1, 2]}, "generated_text": "from text"},
+    executor = MingImageGenExecutor(
+        model_path="/fake/model",
+        backend=backend,
+        conditioner=StubConditioner(),
     )
-
-    async def run_request():
-        await executor.add_request(payload)
-        return await executor.get_result()
-
-    asyncio.run(run_request())
-
-    assert backend.calls[0][0] == "from text"
-
-
-def test_add_request_uses_stream_state_text_before_accumulated_text_fallback() -> None:
-    from sglang_omni.models.ming_omni.components.image_gen_executor import (
-        MingImageGenExecutor,
-    )
-
-    backend = StubBackend(image=_png())
-    executor = MingImageGenExecutor(model_path="/fake/model", backend=backend)
     payload = _payload(
-        metadata={"output_modalities": ["image"]},
-        data={
-            "stream_state": {
-                "text": "from stream text",
-                "accumulated_text": "from accumulated",
-            }
+        metadata={
+            "output_modalities": ["image"],
+            "image_generation": {"semantic_source": "standalone"},
         },
-    )
-
-    async def run_request():
-        await executor.add_request(payload)
-        return await executor.get_result()
-
-    asyncio.run(run_request())
-
-    assert backend.calls[0][0] == "from stream text"
-
-
-def test_add_request_uses_stream_state_accumulated_text_compat_fallback() -> None:
-    from sglang_omni.models.ming_omni.components.image_gen_executor import (
-        MingImageGenExecutor,
-    )
-
-    backend = StubBackend(image=_png())
-    executor = MingImageGenExecutor(model_path="/fake/model", backend=backend)
-    payload = _payload(
-        metadata={"output_modalities": ["image"]},
-        data={"stream_state": {"accumulated_text": "from accumulated"}},
-    )
-
-    async def run_request():
-        await executor.add_request(payload)
-        return await executor.get_result()
-
-    asyncio.run(run_request())
-
-    assert backend.calls[0][0] == "from accumulated"
-
-
-def test_add_request_image_modality_with_no_text_returns_non_error_empty_payload() -> (
-    None
-):
-    from sglang_omni.models.ming_omni.components.image_gen_executor import (
-        MingImageGenExecutor,
-    )
-
-    backend = StubBackend(image=_png())
-    executor = MingImageGenExecutor(model_path="/fake/model", backend=backend)
-    payload = _payload(
-        metadata={"output_modalities": ["image"]},
-        data={"thinker_out": {"output_ids": []}},
+        data={"prompt": {"prompt_text": "draw"}},
     )
 
     async def run_request():
@@ -893,26 +923,29 @@ def test_add_request_image_modality_with_no_text_returns_non_error_empty_payload
     result = asyncio.run(run_request())
 
     assert backend.calls == []
-    assert result.data == {
-        "modality": "image",
-        "images": [],
-        "finish_reason": "stop",
-    }
+    assert result.data["reason"] == "semantic_conditioning_unavailable"
+    assert "standalone semantic encoder" in result.data["error"]
 
 
-def test_add_request_error_path_returns_image_error_payload() -> None:
+def test_add_request_standalone_source_uses_backend_without_condition_embeds() -> None:
     from sglang_omni.models.ming_omni.components.image_gen_executor import (
         MingImageGenExecutor,
     )
 
+    backend = StubBackend(image=_png(width=9, height=8))
+    conditioner = StubConditioner()
     executor = MingImageGenExecutor(
         model_path="/fake/model",
-        backend=StubBackend(error=RuntimeError("diffusion failed")),
+        backend=backend,
+        conditioner=conditioner,
+        enable_standalone_semantic_encoder=True,
     )
-    executor._thinker_tokenizer = FakeTokenizer()
     payload = _payload(
-        metadata={"output_modalities": ["image"]},
-        data={"thinker_out": {"output_ids": [8]}},
+        metadata={
+            "output_modalities": ["image"],
+            "image_generation": {"semantic_source": "standalone"},
+        },
+        data={"prompt": {"prompt_text": "draw with reference encoder"}},
     )
 
     async def run_request():
@@ -921,15 +954,73 @@ def test_add_request_error_path_returns_image_error_payload() -> None:
 
     result = asyncio.run(run_request())
 
-    assert result.data == {
-        "modality": "image",
-        "images": [],
-        "status": "failed",
-        "stage": "image_gen",
-        "reason": "image_generation_failed",
-        "error": "diffusion failed",
-        "finish_reason": "error",
-    }
+    prompt, params, kwargs = backend.calls[0]
+    assert prompt == "draw with reference encoder"
+    assert params.semantic_source == "standalone"
+    assert kwargs == {}
+    assert conditioner.project_calls == []
+    image = _image_record(result)
+    assert image["width"] == 9
+    assert image["height"] == 8
+
+
+def test_add_request_invalid_semantic_source_returns_image_error() -> None:
+    from sglang_omni.models.ming_omni.components.image_gen_executor import (
+        MingImageGenExecutor,
+    )
+
+    backend = StubBackend(image=_png())
+    executor = MingImageGenExecutor(
+        model_path="/fake/model",
+        backend=backend,
+        conditioner=StubConditioner(),
+    )
+    payload = _payload(
+        metadata={
+            "output_modalities": ["image"],
+            "image_generation": {"semantic_source": "random"},
+        },
+        data={"prompt": {"prompt_text": "draw"}},
+    )
+
+    async def run_request():
+        await executor.add_request(payload)
+        return await executor.get_result()
+
+    result = asyncio.run(run_request())
+
+    assert backend.calls == []
+    assert result.data["reason"] == "invalid_image_generation_params"
+    assert "semantic_source" in result.data["error"]
+
+
+def test_add_request_missing_thinker_conditioning_fails_without_text_fallback() -> None:
+    from sglang_omni.models.ming_omni.components.image_gen_executor import (
+        MingImageGenExecutor,
+    )
+
+    backend = StubBackend(image=_png())
+    executor = MingImageGenExecutor(
+        model_path="/fake/model",
+        backend=backend,
+        conditioner=StubConditioner(),
+    )
+    payload = _payload(
+        metadata={"output_modalities": ["image"]},
+        data={
+            "thinker_out": {"output_ids": [4, 5, 6]},
+            "prompt": {"prompt_text": "draw"},
+        },
+    )
+
+    async def run_request():
+        await executor.add_request(payload)
+        return await executor.get_result()
+
+    result = asyncio.run(run_request())
+
+    assert backend.calls == []
+    assert result.data["reason"] == "semantic_conditioning_unavailable"
 
 
 def test_extract_params_prefers_raw_then_mm_then_request_helper() -> None:
@@ -952,6 +1043,8 @@ def test_extract_params_prefers_raw_then_mm_then_request_helper() -> None:
                     "guidance_scale": 4.5,
                     "seed": 9,
                     "negative_prompt": "blur",
+                    "semantic_source": "standalone",
+                    "enable_text_rendering": True,
                 }
             },
             "mm_inputs": {"image_gen": {"image_gen_params": {"size": "640x640"}}},
@@ -969,7 +1062,10 @@ def test_extract_params_prefers_raw_then_mm_then_request_helper() -> None:
     assert raw_params.guidance_scale == 4.5
     assert raw_params.seed == 9
     assert raw_params.negative_prompt == "blur"
+    assert raw_params.semantic_source == "standalone"
+    assert raw_params.enable_text_rendering is True
     assert (mm_params.width, mm_params.height) == (640, 672)
+    assert mm_params.semantic_source == "thinker"
     assert (request_params.width, request_params.height) == (800, 801)
 
 

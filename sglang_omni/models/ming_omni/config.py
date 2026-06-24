@@ -204,10 +204,16 @@ def _image_gen_stage(
     process: str,
     dit_type: str = "zimage",
     dit_model_path: str | None = None,
+    enable_standalone_semantic_encoder: bool = False,
+    enable_byt5_text_rendering: bool = False,
 ) -> StageConfig:
     factory_args = {"device": "cuda", "dit_type": dit_type}
     if dit_model_path is not None:
         factory_args["dit_model_path"] = dit_model_path
+    if enable_standalone_semantic_encoder:
+        factory_args["enable_standalone_semantic_encoder"] = True
+    if enable_byt5_text_rendering:
+        factory_args["enable_byt5_text_rendering"] = True
     return StageConfig(
         name=IMAGE_GEN_STAGE,
         process=process,
@@ -258,6 +264,8 @@ def _ming_image_stages(
     *,
     dit_type: str = "zimage",
     dit_model_path: str | None = None,
+    enable_standalone_semantic_encoder: bool = False,
+    enable_byt5_text_rendering: bool = False,
 ) -> list[StageConfig]:
     return [
         _preprocessing_stage(process="preprocessing", enable_image_gen=True),
@@ -276,6 +284,8 @@ def _ming_image_stages(
             process="image_gen",
             dit_type=dit_type,
             dit_model_path=dit_model_path,
+            enable_standalone_semantic_encoder=enable_standalone_semantic_encoder,
+            enable_byt5_text_rendering=enable_byt5_text_rendering,
         ),
     ]
 
@@ -285,6 +295,8 @@ def _apply_image_gen_factory_args(
     *,
     dit_type: str,
     dit_model_path: str | None,
+    enable_standalone_semantic_encoder: bool = False,
+    enable_byt5_text_rendering: bool = False,
 ) -> None:
     image_gen = _stage_by_name(stages, IMAGE_GEN_STAGE)
     if image_gen is None:
@@ -297,6 +309,14 @@ def _apply_image_gen_factory_args(
         factory_args["dit_model_path"] = dit_model_path
     else:
         factory_args.pop("dit_model_path", None)
+    if enable_standalone_semantic_encoder:
+        factory_args["enable_standalone_semantic_encoder"] = True
+    else:
+        factory_args.pop("enable_standalone_semantic_encoder", None)
+    if enable_byt5_text_rendering:
+        factory_args["enable_byt5_text_rendering"] = True
+    else:
+        factory_args.pop("enable_byt5_text_rendering", None)
     image_gen.factory_args = factory_args
 
 
@@ -399,6 +419,8 @@ class MingOmniImagePipelineConfig(_MingOmniBasePipelineConfig):
     model_path: str
     dit_type: str = "zimage"
     dit_model_path: str | None = None
+    enable_standalone_semantic_encoder: bool = False
+    enable_byt5_text_rendering: bool = False
     entry_stage: str = PREPROCESSING_STAGE
     placement: PlacementConfig = Field(
         default_factory=lambda: PlacementConfig(
@@ -414,6 +436,10 @@ class MingOmniImagePipelineConfig(_MingOmniBasePipelineConfig):
             self.stages,
             dit_type=self.dit_type,
             dit_model_path=self.dit_model_path,
+            enable_standalone_semantic_encoder=(
+                self.enable_standalone_semantic_encoder
+            ),
+            enable_byt5_text_rendering=self.enable_byt5_text_rendering,
         )
         self._validate_image_gen_gpu_not_in_thinker_tp_range()
 

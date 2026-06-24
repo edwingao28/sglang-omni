@@ -327,6 +327,8 @@ def create_image_gen_executor(
     dit_type: str = "zimage",
     dit_model_path: str | None = None,
     device: str = "cuda",
+    enable_standalone_semantic_encoder: bool = False,
+    enable_byt5_text_rendering: bool = False,
 ):
     from sglang_omni.models.ming_omni.components.image_gen_executor import (
         MingImageGenExecutor,
@@ -348,6 +350,10 @@ def create_image_gen_executor(
         "device": device,
         "conditioner": conditioner,
     }
+    if enable_standalone_semantic_encoder:
+        executor_kwargs["enable_standalone_semantic_encoder"] = True
+    if enable_byt5_text_rendering:
+        executor_kwargs["enable_byt5_text_rendering"] = True
 
     executor = MingImageGenExecutor(**executor_kwargs)
     started = False

@@ -48,6 +48,8 @@ class MingImageGenExecutor:
         dit_model_path: str | None = None,
         device: str = "cuda",
         conditioner: Any | None = None,
+        enable_standalone_semantic_encoder: bool = False,
+        enable_byt5_text_rendering: bool = False,
         backend: DiffusionBackend | None = None,
     ):
         self._model_path = model_path
@@ -55,6 +57,8 @@ class MingImageGenExecutor:
         self._dit_model_path = dit_model_path or model_path
         self._device = device
         self._conditioner = conditioner
+        self._enable_standalone_semantic_encoder = enable_standalone_semantic_encoder
+        self._enable_byt5_text_rendering = enable_byt5_text_rendering
 
         self._backend = backend
         self._thinker_tokenizer = None
@@ -85,7 +89,13 @@ class MingImageGenExecutor:
         device = torch.device(self._device)
         if device.type == "cuda" and device.index is not None:
             torch.cuda.set_device(device.index)
-        self._backend.load_models(self._dit_model_path, device)
+        load_kwargs: dict[str, Any] = {}
+        if self._dit_type == "zimage":
+            if self._enable_standalone_semantic_encoder:
+                load_kwargs["load_semantic_encoder"] = True
+            if self._enable_byt5_text_rendering:
+                load_kwargs["load_byt5_text_encoder"] = True
+        self._backend.load_models(self._dit_model_path, device, **load_kwargs)
         logger.info("[IMG_GEN] Diffusion backend loaded in %.1fs", time.time() - t0)
 
         conditioner_load = getattr(self._conditioner, "load", None)
@@ -120,8 +130,57 @@ class MingImageGenExecutor:
             return
 
         data = payload.data if isinstance(payload.data, dict) else {}
-        condition_embeds = None
-        negative_embeds = None
+        params = self._extract_params(data, payload.request)
+        prompt = self._extract_prompt_text(data)
+
+        if params.semantic_source not in {"thinker", "standalone"}:
+            await self._results.put(
+                self._build_error_image_result(
+                    payload,
+                    ValueError(
+                        "invalid image_generation.semantic_source: "
+                        f"{params.semantic_source!r}; expected 'thinker' or "
+                        "'standalone'"
+                    ),
+                )
+            )
+            return
+
+        if params.semantic_source == "standalone":
+            if not self._enable_standalone_semantic_encoder:
+                await self._results.put(
+                    self._build_error_image_result(
+                        payload,
+                        RuntimeError(
+                            "standalone semantic encoder unavailable: "
+                            "enable_standalone_semantic_encoder must be true"
+                        ),
+                    )
+                )
+                return
+            if not prompt:
+                await self._results.put(
+                    self._build_error_image_result(
+                        payload,
+                        RuntimeError(
+                            "standalone semantic encoder unavailable: prompt text "
+                            "is required"
+                        ),
+                    )
+                )
+                return
+            try:
+                image = await asyncio.to_thread(
+                    self._generate_with_standalone_semantics,
+                    prompt,
+                    params,
+                )
+            except Exception as exc:
+                await self._results.put(self._build_error_image_result(payload, exc))
+                return
+
+            await self._results.put(self._build_image_result(payload, image))
+            return
 
         if self._conditioner is None:
             await self._results.put(
@@ -154,8 +213,6 @@ class MingImageGenExecutor:
             )
             return
 
-        params = self._extract_params(data, payload.request)
-        prompt = self._extract_prompt_text(data)
         try:
             image = await asyncio.to_thread(
                 self._generate_with_condition_embeds,
@@ -356,7 +413,24 @@ class MingImageGenExecutor:
             negative_prompt=str(
                 img_params.get("negative_prompt", defaults.negative_prompt)
             ),
+            semantic_source=str(
+                img_params.get("semantic_source", defaults.semantic_source)
+            ),
+            enable_text_rendering=self._coerce_bool(
+                img_params.get(
+                    "enable_text_rendering",
+                    defaults.enable_text_rendering,
+                )
+            ),
         )
+
+    @staticmethod
+    def _coerce_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
 
     @staticmethod
     def _extract_prompt_text(data: dict[str, Any]) -> str:
@@ -393,6 +467,10 @@ class MingImageGenExecutor:
     def _image_error_reason(exc: Exception) -> str:
         if "semantic conditioning unavailable" in str(exc):
             return "semantic_conditioning_unavailable"
+        if "standalone semantic encoder unavailable" in str(exc):
+            return "semantic_conditioning_unavailable"
+        if "invalid image_generation" in str(exc):
+            return "invalid_image_generation_params"
         return "image_generation_failed"
 
     @classmethod
@@ -442,3 +520,13 @@ class MingImageGenExecutor:
             condition_embeds=condition_embeds,
             negative_condition_embeds=negative_embeds,
         )
+
+    @torch.no_grad()
+    def _generate_with_standalone_semantics(
+        self,
+        prompt_text: str,
+        params: ImageGenParams,
+    ):
+        if self._backend is None:
+            raise RuntimeError("Diffusion backend not loaded")
+        return self._backend.generate(prompt_text or "", params)

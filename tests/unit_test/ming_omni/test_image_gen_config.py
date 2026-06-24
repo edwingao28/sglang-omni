@@ -87,6 +87,26 @@ def test_ming_image_config_enables_image_gen_stage_wiring() -> None:
     assert config.terminal_stages == [DECODE_STAGE, IMAGE_GEN_STAGE]
 
 
+def test_ming_image_config_advanced_flags_are_explicit() -> None:
+    from sglang_omni.models.ming_omni.config import MingOmniImagePipelineConfig
+
+    default_config = MingOmniImagePipelineConfig(model_path="dummy")
+    default_image_gen = _stages_by_name(default_config)[IMAGE_GEN_STAGE]
+
+    assert "enable_standalone_semantic_encoder" not in default_image_gen.factory_args
+    assert "enable_byt5_text_rendering" not in default_image_gen.factory_args
+
+    advanced_config = MingOmniImagePipelineConfig(
+        model_path="dummy",
+        enable_standalone_semantic_encoder=True,
+        enable_byt5_text_rendering=True,
+    )
+    advanced_image_gen = _stages_by_name(advanced_config)[IMAGE_GEN_STAGE]
+
+    assert advanced_image_gen.factory_args["enable_standalone_semantic_encoder"] is True
+    assert advanced_image_gen.factory_args["enable_byt5_text_rendering"] is True
+
+
 def test_ming_variants_include_image_generation_configs() -> None:
     from sglang_omni.models.ming_omni.config import Variants
 

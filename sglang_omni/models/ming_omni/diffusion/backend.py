@@ -20,6 +20,8 @@ class ImageGenParams:
     guidance_scale: float = 7.0
     seed: int | None = None
     negative_prompt: str = ""
+    semantic_source: str = "thinker"
+    enable_text_rendering: bool = False
 
 
 class DiffusionBackend(ABC):
