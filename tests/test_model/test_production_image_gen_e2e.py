@@ -36,7 +36,7 @@ run inside the thinker / image_gen stage processes.
 Run on the H100 box (all 5 GPUs free first)::
 
     CUDA_VISIBLE_DEVICES=0,1,2,3,4 PYTHONPATH=. python -u \
-        tests/test_production_image_gen_e2e.py \
+        tests/test_model/test_production_image_gen_e2e.py \
         --model-path inclusionAI/Ming-flash-omni-2.0 \
         --dit-model-path /root/.cache/huggingface/hub/models--Tongyi-MAI--Z-Image-Turbo/snapshots/<snap> \
         --tp-size 4 --thinker-gpu 0 --diffusion-gpu cuda:4
