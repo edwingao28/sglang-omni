@@ -21,11 +21,15 @@ def create_thinker_scheduler(
     tp_size: int = 1,
     nccl_port: int | None = None,
     enable_streaming_tts: bool = False,
+    capture_hidden: bool = False,
 ):
     if tp_size < 1:
         raise ValueError(f"tp_size must be >= 1, got {tp_size}")
     if getattr(server_args, "tp_size", None) != tp_size:
         server_args.tp_size = tp_size
+    if capture_hidden:
+        server_args.enable_return_hidden_states = True
+        server_args.disable_cuda_graph = True
 
     from sglang_omni.model_runner.ming_thinker_model_runner import (
         MingThinkerModelRunner,
@@ -62,7 +66,7 @@ def create_thinker_scheduler(
     )
 
     output_proc = SGLangOutputProcessor(
-        capture_hidden=False,
+        capture_hidden=capture_hidden,
         capture_hidden_layers=None,
         model=model_worker.model_runner.model,
     )
@@ -138,6 +142,44 @@ def make_thinker_scheduler_adapters(
         thinker_inputs_early = state.thinker_inputs or {}
         media_cache_keys = thinker_inputs_early.get("media_cache_keys") or {}
         pad_values: dict[str, int] = {}
+
+        image_gen = (
+            state.mm_inputs.get("image_gen")
+            if hasattr(state.mm_inputs, "get")
+            else None
+        )
+        prefill_only = (
+            bool(image_gen.get("prefill_only"))
+            if hasattr(image_gen, "get")
+            else False
+        )
+
+        # Substitute generated-query patch tokens with a per-request pad so the
+        # radix prefix cache never serves the query region from another request
+        # — captured hidden states must always include all query positions.
+        # Done BEFORE the input-image substitution and restricted to gen_mask
+        # positions so query tokens and an input image (which share the same
+        # generic image patch token id) land on disjoint pads.
+        if prefill_only:
+            patch_token_id = image_gen.get("image_patch_token_id") or image_token_id
+            if patch_token_id is not None:
+                import xxhash
+
+                _h = xxhash.xxh3_64(payload.request_id.encode()).intdigest()
+                _pad = vocab_size + _h % (1 << 62)
+                input_ids = input_ids.clone()
+                gen_mask = image_gen.get("gen_mask")
+                is_patch = input_ids == int(patch_token_id)
+                if gen_mask is not None:
+                    import torch
+
+                    gen_mask_t = torch.as_tensor(
+                        gen_mask, dtype=torch.bool, device=input_ids.device
+                    ).reshape(input_ids.shape)
+                    is_patch = is_patch & gen_mask_t
+                input_ids[is_patch] = _pad
+                pad_values["image_gen"] = _pad
+
         if media_cache_keys:
             import xxhash
 
@@ -164,11 +206,22 @@ def make_thinker_scheduler_adapters(
         input_ids_list = input_ids.to(dtype=_torch_long()).flatten().tolist()
 
         params = payload.request.params or {}
-        sampling_params, max_new_tokens, temperature = build_ming_sampling_params(
-            params,
-            tokenizer=tokenizer,
-            vocab_size=vocab_size,
-        )
+        if prefill_only and "max_new_tokens" not in params:
+            params = {**params, "max_new_tokens": 0}
+        try:
+            sampling_params, max_new_tokens, temperature = build_ming_sampling_params(
+                params,
+                tokenizer=tokenizer,
+                vocab_size=vocab_size,
+            )
+        except ValueError:
+            if not (prefill_only and params.get("max_new_tokens") == 0):
+                raise
+            sampling_params, max_new_tokens, temperature = build_ming_sampling_params(
+                {**params, "max_new_tokens": 1},
+                tokenizer=tokenizer,
+                vocab_size=vocab_size,
+            )
 
         eos_token_ids = _collect_eos_token_ids(tokenizer)
         req = Req(
@@ -197,6 +250,10 @@ def make_thinker_scheduler_adapters(
         req.omni_model_inputs = model_inputs if model_inputs else None
         req._omni_consumed = None
         req._codec_suppress_tokens = None
+        req._omni_capture_hidden = prefill_only and "hidden_states" in tuple(
+            capture_keys
+        )
+        req._omni_prefill_only = prefill_only
 
         attention_mask = prompt.get("attention_mask")
         req_data = SGLangARRequestData(
@@ -218,7 +275,11 @@ def make_thinker_scheduler_adapters(
 
         payload = data.stage_payload
         state = MingOmniPipelineState.from_dict(payload.data)
-        output_ids = list(data.output_ids)
+        prefill_only = bool(
+            getattr(data, "_omni_prefill_only", False)
+            or getattr(getattr(data, "req", None), "_omni_prefill_only", False)
+        )
+        output_ids = [] if prefill_only else list(data.output_ids)
         if data.finish_reason is not None or not output_ids:
             logger.info(
                 "Ming thinker result request_id=%s finish=%s output_len=%d "
