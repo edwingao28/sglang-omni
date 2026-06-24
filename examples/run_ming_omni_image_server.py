@@ -62,8 +62,21 @@ def parse_args() -> argparse.Namespace:
         "--dit-type",
         type=str,
         default="zimage",
-        choices=["zimage"],
+        choices=["zimage", "sd3"],
         help="Image generation DiT backend",
+    )
+    parser.add_argument(
+        "--enable-standalone-semantic-encoder",
+        action="store_true",
+        help=(
+            "Load the standalone Ming semantic encoder for explicit "
+            "semantic_source=standalone reference/debug requests."
+        ),
+    )
+    parser.add_argument(
+        "--enable-byt5-text-rendering",
+        action="store_true",
+        help="Load optional ByT5 text-rendering support for image requests.",
     )
 
     # GPU placement
@@ -172,6 +185,8 @@ def _launch_image_server(args: argparse.Namespace) -> None:
         dit_type=args.dit_type,
         dit_model_path=args.dit_model_path,
         relay_backend=args.relay_backend,
+        enable_standalone_semantic_encoder=args.enable_standalone_semantic_encoder,
+        enable_byt5_text_rendering=args.enable_byt5_text_rendering,
     )
 
     _set_thinker_tp(
