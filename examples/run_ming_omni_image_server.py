@@ -14,16 +14,22 @@ Usage::
         --dit-model-path /path/to/zimage \
         --gpu-thinker 0 --tp-size 2 --gpu-img-gen 2
 
-    # Then test:
+    # Then test the thinker-fused source:
     curl http://localhost:8000/v1/chat/completions \
         -H "Content-Type: application/json" \
         -d '{
             "model": "ming-omni",
             "messages": [{"role": "user", "content": "Draw a red cup"}],
             "modalities": ["image"],
-            "image_generation": {"size": "1024x1024"},
+            "image_generation": {
+                "size": "1024x1024",
+                "semantic_source": "thinker"
+            },
             "stream": false
         }'
+
+    # To compare the standalone semantic encoder, launch with
+    # --enable-standalone-semantic-encoder and send semantic_source=standalone.
 """
 
 from __future__ import annotations
@@ -70,7 +76,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Load the standalone Ming semantic encoder for explicit "
-            "semantic_source=standalone reference/debug requests."
+            "semantic_source=standalone requests."
         ),
     )
     parser.add_argument(

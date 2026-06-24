@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Z-Image diffusion backend for explicit semantic conditioning.
 
-The default image-generation path projects Ming thinker hidden states before
-calling this backend.  Standalone semantic encoding and ByT5 text rendering are
-available only when the stage is explicitly configured to load them.
+Callers can pass thinker-fused semantic embeddings or explicitly configure the
+backend to run the standalone Ming semantic encoder. ByT5 text rendering is also
+available only when the stage is explicitly configured to load it.
 """
 
 from __future__ import annotations

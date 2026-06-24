@@ -137,6 +137,18 @@ class MingImageGenExecutor:
         params = self._extract_params(data, payload.request)
         prompt = self._extract_prompt_text(data)
 
+        if params.semantic_source is None:
+            await self._results.put(
+                self._build_error_image_result(
+                    payload,
+                    ValueError(
+                        "invalid image_generation.semantic_source: required; "
+                        "expected 'thinker' or 'standalone'"
+                    ),
+                )
+            )
+            return
+
         if params.semantic_source not in {"thinker", "standalone"}:
             await self._results.put(
                 self._build_error_image_result(
@@ -417,7 +429,7 @@ class MingImageGenExecutor:
             negative_prompt=str(
                 img_params.get("negative_prompt", defaults.negative_prompt)
             ),
-            semantic_source=str(
+            semantic_source=self._normalize_semantic_source(
                 img_params.get("semantic_source", defaults.semantic_source)
             ),
             enable_text_rendering=self._coerce_bool(
@@ -427,6 +439,13 @@ class MingImageGenExecutor:
                 )
             ),
         )
+
+    @staticmethod
+    def _normalize_semantic_source(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
 
     @staticmethod
     def _coerce_bool(value: Any) -> bool:

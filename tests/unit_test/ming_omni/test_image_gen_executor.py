@@ -322,7 +322,10 @@ def test_abort_prevents_generation_and_get_result_skips_aborted_result() -> None
     executor = MingImageGenExecutor(model_path="/fake/model", backend=backend)
     payload = _payload(
         request_id="aborted-before-add",
-        metadata={"output_modalities": ["image"]},
+        metadata={
+            "output_modalities": ["image"],
+            "image_generation": {"semantic_source": "thinker"},
+        },
         data={"generated_text": "draw"},
     )
     later_payload = _payload(request_id="later")
@@ -833,7 +836,10 @@ def test_add_request_hidden_state_path_returns_png_and_passes_condition_embeds()
     )
     hidden = torch.arange(15, dtype=torch.float32).reshape(5, 3)
     payload = _payload(
-        metadata={"output_modalities": ["image"]},
+        metadata={
+            "output_modalities": ["image"],
+            "image_generation": {"semantic_source": "thinker"},
+        },
         data={
             "thinker_out": {
                 "extra_model_outputs": {"hidden_states": hidden},
@@ -880,7 +886,10 @@ def test_add_request_hidden_state_generation_error_returns_image_error_payload()
         conditioner=StubConditioner(),
     )
     payload = _payload(
-        metadata={"output_modalities": ["image"]},
+        metadata={
+            "output_modalities": ["image"],
+            "image_generation": {"semantic_source": "thinker"},
+        },
         data={
             "thinker_out": {
                 "extra_model_outputs": {
@@ -1005,6 +1014,33 @@ def test_add_request_invalid_semantic_source_returns_image_error() -> None:
     assert "semantic_source" in result.data["error"]
 
 
+def test_add_request_requires_explicit_semantic_source() -> None:
+    from sglang_omni.models.ming_omni.components.image_gen_executor import (
+        MingImageGenExecutor,
+    )
+
+    backend = StubBackend(image=_png())
+    executor = MingImageGenExecutor(
+        model_path="/fake/model",
+        backend=backend,
+        conditioner=StubConditioner(),
+    )
+    payload = _payload(
+        metadata={"output_modalities": ["image"], "image_generation": {"width": 8}},
+        data={"prompt": {"prompt_text": "draw"}},
+    )
+
+    async def run_request():
+        await executor.add_request(payload)
+        return await executor.get_result()
+
+    result = asyncio.run(run_request())
+
+    assert backend.calls == []
+    assert result.data["reason"] == "invalid_image_generation_params"
+    assert "semantic_source" in result.data["error"]
+
+
 def test_add_request_missing_thinker_conditioning_fails_without_text_fallback() -> None:
     from sglang_omni.models.ming_omni.components.image_gen_executor import (
         MingImageGenExecutor,
@@ -1017,7 +1053,10 @@ def test_add_request_missing_thinker_conditioning_fails_without_text_fallback() 
         conditioner=StubConditioner(),
     )
     payload = _payload(
-        metadata={"output_modalities": ["image"]},
+        metadata={
+            "output_modalities": ["image"],
+            "image_generation": {"semantic_source": "thinker"},
+        },
         data={
             "thinker_out": {"output_ids": [4, 5, 6]},
             "prompt": {"prompt_text": "draw"},
@@ -1076,8 +1115,9 @@ def test_extract_params_prefers_raw_then_mm_then_request_helper() -> None:
     assert raw_params.semantic_source == "standalone"
     assert raw_params.enable_text_rendering is True
     assert (mm_params.width, mm_params.height) == (640, 672)
-    assert mm_params.semantic_source == "thinker"
+    assert mm_params.semantic_source is None
     assert (request_params.width, request_params.height) == (800, 801)
+    assert request_params.semantic_source is None
 
 
 def test_try_condition_tail_aligns_mask_when_hidden_states_are_suffix() -> None:
@@ -1176,7 +1216,14 @@ def test_conditioner_set_but_no_hidden_states_fails_loudly() -> None:
     )
     # image requested, but thinker_out carries NO hidden_states -> condition None
     payload = _payload(
-        metadata={"output_modalities": ["image"], "image_generation": {"width": 8, "height": 8}},
+        metadata={
+            "output_modalities": ["image"],
+            "image_generation": {
+                "width": 8,
+                "height": 8,
+                "semantic_source": "thinker",
+            },
+        },
         data={"thinker_out": {"output_ids": [1, 2, 3]}},
     )
 

@@ -20,7 +20,7 @@ class ImageGenParams:
     guidance_scale: float = 7.0
     seed: int | None = None
     negative_prompt: str = ""
-    semantic_source: str = "thinker"
+    semantic_source: str | None = None
     enable_text_rendering: bool = False
 
 
@@ -44,9 +44,9 @@ class DiffusionBackend(ABC):
     ) -> Image.Image:
         """Denoise and decode an image.
 
-        The initial production path passes thinker-derived semantic condition
-        embeddings. Text-only backend fallback is intentionally outside this
-        interface.
+        Callers either pass precomputed semantic condition embeddings or select
+        an explicitly loaded backend-owned semantic encoder. Text-only backend
+        fallback is intentionally outside this interface.
         """
         ...
 
