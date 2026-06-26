@@ -514,18 +514,6 @@ class MingImageGenExecutor:
             },
         )
 
-    @staticmethod
-    def _build_empty_requested_image_result(payload: StagePayload) -> StagePayload:
-        return StagePayload(
-            request_id=payload.request_id,
-            request=payload.request,
-            data={
-                "modality": "image",
-                "images": [],
-                "finish_reason": "stop",
-            },
-        )
-
     @torch.no_grad()
     def _generate_with_condition_embeds(
         self,

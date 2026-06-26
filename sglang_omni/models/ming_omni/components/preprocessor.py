@@ -62,6 +62,8 @@ WHISPER_N_MELS = 128
 WHISPER_HOP_LENGTH = 160
 WHISPER_SAMPLE_RATE = 16000
 
+_NO_INPUT_IMAGES_MSG = "image generation requests cannot include input images"
+
 
 def compute_mel_spectrogram(
     waveform: np.ndarray,
@@ -373,7 +375,7 @@ class MingPreprocessor:
         # (wenyao) Coexistence is wired downstream but gated until GPU E2E
         # validates the image/input-image disjointness contract.
         if image_gen_requested and top_level_images:
-            raise ValueError("image generation requests cannot include input images")
+            raise ValueError(_NO_INPUT_IMAGES_MSG)
 
         # If top-level images are provided (e.g. {"images": ["url1", ...]}),
         # inject them as inline content items in the first user message so that
@@ -424,7 +426,7 @@ class MingPreprocessor:
         # (wenyao) Inline images follow the same gated coexistence contract as
         # top-level images.
         if image_gen_requested and raw_images:
-            raise ValueError("image generation requests cannot include input images")
+            raise ValueError(_NO_INPUT_IMAGES_MSG)
 
         # Compute cache keys BEFORE async loading; same content -> same key so
         # SGLang's radix prefix cache can correctly reuse KVs across requests, and

@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+import xxhash
+
 from sglang_omni.models.ming_omni.pipeline.sampling import build_ming_sampling_params
 
 logger = logging.getLogger(__name__)
@@ -157,8 +159,6 @@ def make_thinker_scheduler_adapters(
         if prefill_only:
             patch_token_id = image_gen.get("image_patch_token_id") or image_token_id
             if patch_token_id is not None:
-                import xxhash
-
                 _h = xxhash.xxh3_64(payload.request_id.encode()).intdigest()
                 _pad = vocab_size + _h % (1 << 62)
                 input_ids = input_ids.clone()
@@ -175,8 +175,6 @@ def make_thinker_scheduler_adapters(
                 pad_values["image_gen"] = _pad
 
         if media_cache_keys:
-            import xxhash
-
             token_id_map: dict[int, int] = {}
             for _modality, _orig in [
                 ("image", image_token_id),

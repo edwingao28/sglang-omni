@@ -287,13 +287,9 @@ def test_decode_and_write_first_image_rejects_truncated_png(tmp_path) -> None:
     buf = io.BytesIO()
     image.save(buf, format="PNG")
     truncated = buf.getvalue()[:-12]
-    payload = {
-        "images": [{"b64_json": base64.b64encode(truncated).decode("ascii")}]
-    }
+    payload = {"images": [{"b64_json": base64.b64encode(truncated).decode("ascii")}]}
 
-    with pytest.raises(
-        AssertionError, match=r"request\[2\].*(invalid|corrupt) PNG"
-    ):
+    with pytest.raises(AssertionError, match=r"request\[2\].*(invalid|corrupt) PNG"):
         _decode_and_write_first_image(
             request_index=2,
             image_gen=payload,
@@ -315,18 +311,18 @@ def _decode_and_write_first_image(
     assert images, f"request[{request_index}] produced no images"
 
     first = images[0]
-    assert isinstance(first, dict), (
-        f"request[{request_index}] image payload is not a dict"
-    )
+    assert isinstance(
+        first, dict
+    ), f"request[{request_index}] image payload is not a dict"
     b64 = first.get("b64_json")
-    assert isinstance(b64, str) and b64, (
-        f"request[{request_index}] image payload missing non-empty b64_json"
-    )
+    assert (
+        isinstance(b64, str) and b64
+    ), f"request[{request_index}] image payload missing non-empty b64_json"
 
     raw = base64.b64decode(b64)
-    assert raw.startswith(b"\x89PNG\r\n\x1a\n"), (
-        f"request[{request_index}] decoded image is not a PNG"
-    )
+    assert raw.startswith(
+        b"\x89PNG\r\n\x1a\n"
+    ), f"request[{request_index}] decoded image is not a PNG"
 
     os.makedirs(output_dir, exist_ok=True)
     out_path = os.path.join(output_dir, f"prod_{request_index}.png")
@@ -335,9 +331,9 @@ def _decode_and_write_first_image(
 
     try:
         with Image.open(out_path) as image:
-            assert image.format == "PNG", (
-                f"request[{request_index}] saved image is not PNG"
-            )
+            assert (
+                image.format == "PNG"
+            ), f"request[{request_index}] saved image is not PNG"
             assert image.size == (expected_width, expected_height), (
                 f"request[{request_index}] image size {image.size} != "
                 f"{expected_width}x{expected_height}"
@@ -346,9 +342,9 @@ def _decode_and_write_first_image(
 
         with Image.open(out_path) as image:
             image.load()
-            assert image.format == "PNG", (
-                f"request[{request_index}] decoded image is not PNG"
-            )
+            assert (
+                image.format == "PNG"
+            ), f"request[{request_index}] decoded image is not PNG"
             assert image.size == (expected_width, expected_height), (
                 f"request[{request_index}] image size {image.size} != "
                 f"{expected_width}x{expected_height}"

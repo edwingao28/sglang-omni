@@ -183,6 +183,12 @@ class SemanticConditioner:
         self._connector.eval()
         logger.info("[SemanticConditioner] Connector loaded on %s", device)
 
+    def _load_linear(self, state, prefix: str, device, dtype: torch.dtype) -> nn.Linear:
+        weight = state[f"{prefix}.weight"]
+        linear = nn.Linear(weight.shape[1], weight.shape[0])
+        linear.load_state_dict({"weight": weight, "bias": state[f"{prefix}.bias"]})
+        return linear.to(device=device, dtype=dtype)
+
     def _load_projections(
         self,
         model_path: str,
@@ -196,29 +202,8 @@ class SemanticConditioner:
         logger.info("[SemanticConditioner] Loading projections from %s", mlp_path)
         state = load_file(mlp_path)
 
-        self._proj_in = nn.Linear(
-            state["proj_in.weight"].shape[1],
-            state["proj_in.weight"].shape[0],
-        )
-        self._proj_in.load_state_dict(
-            {
-                "weight": state["proj_in.weight"],
-                "bias": state["proj_in.bias"],
-            }
-        )
-        self._proj_in.to(device=device, dtype=dtype)
-
-        self._proj_out = nn.Linear(
-            state["proj_out.weight"].shape[1],
-            state["proj_out.weight"].shape[0],
-        )
-        self._proj_out.load_state_dict(
-            {
-                "weight": state["proj_out.weight"],
-                "bias": state["proj_out.bias"],
-            }
-        )
-        self._proj_out.to(device=device, dtype=dtype)
+        self._proj_in = self._load_linear(state, "proj_in", device, dtype)
+        self._proj_out = self._load_linear(state, "proj_out", device, dtype)
 
         query_tokens_list = []
         for scale in self._img_gen_scales:

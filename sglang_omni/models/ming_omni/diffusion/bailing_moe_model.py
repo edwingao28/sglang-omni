@@ -30,7 +30,7 @@ from torch.nn import CrossEntropyLoss
 
 # import transformer_engine.pytorch as te
 from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, DynamicCache
+from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.generation.utils import GenerationMixin
 from transformers.modeling_attn_mask_utils import (
     AttentionMaskConverter,
