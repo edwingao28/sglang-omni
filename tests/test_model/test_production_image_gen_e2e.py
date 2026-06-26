@@ -47,10 +47,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import io
 import logging
 import os
 import time
 from typing import Any
+
+import pytest
+from PIL import Image, UnidentifiedImageError
 
 logging.basicConfig(
     level=os.environ.get("LOGLEVEL", "INFO").upper(),
@@ -219,39 +223,142 @@ async def _run_pipeline_phase() -> None:
             # so submit() returns a dict keyed by stage name with merged
             # partials.  The image payload lives under result["image_gen"].
             image_gen = _result_image_gen(result)
-            images = image_gen.get("images") if isinstance(image_gen, dict) else None
-            ok = bool(images)
-            out_path = ""
-            if ok:
-                b64 = images[0].get("b64_json")
-                if b64:
-                    out_path = os.path.join(OUTPUT_DIR, f"prod_{i}.png")
-                    with open(out_path, "wb") as f:
-                        f.write(base64.b64decode(b64))
+            out_path = _decode_and_write_first_image(
+                request_index=i,
+                image_gen=image_gen,
+                output_dir=OUTPUT_DIR,
+                expected_width=int(IMAGE_GEN_PARAMS["width"]),
+                expected_height=int(IMAGE_GEN_PARAMS["height"]),
+            )
             tag = "cold" if i == 0 else "warm"
             logger.info(
-                "[E2E_TIMING] request[%d] %s e2e %.2fs  ok=%s reason=%s -> %s",
+                "[E2E_TIMING] request[%d] %s e2e %.2fs  ok=True reason=%s -> %s",
                 i,
                 tag,
                 e2e_s,
-                ok,
                 (
                     image_gen.get("finish_reason")
                     if isinstance(image_gen, dict)
                     else None
                 ),
-                out_path or "(no image)",
+                out_path,
             )
-            if not ok:
-                logger.error(
-                    "[E2E_TIMING] request[%d] FAILED image_gen=%s",
-                    i,
-                    {k: v for k, v in (image_gen or {}).items() if k != "images"},
-                )
     finally:
         logger.info("Stopping pipeline …")
         await runner.stop()
         logger.info("Pipeline stopped.")
+
+
+def test_decode_and_write_first_image_validates_png_dimensions(tmp_path) -> None:
+    image = Image.new("RGB", (1024, 1024), color=(12, 34, 56))
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    payload = {
+        "images": [{"b64_json": base64.b64encode(buf.getvalue()).decode("ascii")}]
+    }
+
+    out_path = _decode_and_write_first_image(
+        request_index=0,
+        image_gen=payload,
+        output_dir=str(tmp_path),
+        expected_width=1024,
+        expected_height=1024,
+    )
+
+    assert out_path.endswith("prod_0.png")
+    with Image.open(out_path) as saved:
+        assert saved.size == (1024, 1024)
+        assert saved.format == "PNG"
+
+
+def test_decode_and_write_first_image_rejects_empty_payload(tmp_path) -> None:
+    with pytest.raises(AssertionError, match=r"request\[1\] produced no images"):
+        _decode_and_write_first_image(
+            request_index=1,
+            image_gen={"images": []},
+            output_dir=str(tmp_path),
+            expected_width=1024,
+            expected_height=1024,
+        )
+
+
+def test_decode_and_write_first_image_rejects_truncated_png(tmp_path) -> None:
+    image = Image.new("RGB", (1024, 1024), color=(12, 34, 56))
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    truncated = buf.getvalue()[:-12]
+    payload = {
+        "images": [{"b64_json": base64.b64encode(truncated).decode("ascii")}]
+    }
+
+    with pytest.raises(
+        AssertionError, match=r"request\[2\].*(invalid|corrupt) PNG"
+    ):
+        _decode_and_write_first_image(
+            request_index=2,
+            image_gen=payload,
+            output_dir=str(tmp_path),
+            expected_width=1024,
+            expected_height=1024,
+        )
+
+
+def _decode_and_write_first_image(
+    *,
+    request_index: int,
+    image_gen: dict[str, Any],
+    output_dir: str,
+    expected_width: int,
+    expected_height: int,
+) -> str:
+    images = image_gen.get("images") if isinstance(image_gen, dict) else None
+    assert images, f"request[{request_index}] produced no images"
+
+    first = images[0]
+    assert isinstance(first, dict), (
+        f"request[{request_index}] image payload is not a dict"
+    )
+    b64 = first.get("b64_json")
+    assert isinstance(b64, str) and b64, (
+        f"request[{request_index}] image payload missing non-empty b64_json"
+    )
+
+    raw = base64.b64decode(b64)
+    assert raw.startswith(b"\x89PNG\r\n\x1a\n"), (
+        f"request[{request_index}] decoded image is not a PNG"
+    )
+
+    os.makedirs(output_dir, exist_ok=True)
+    out_path = os.path.join(output_dir, f"prod_{request_index}.png")
+    with open(out_path, "wb") as f:
+        f.write(raw)
+
+    try:
+        with Image.open(out_path) as image:
+            assert image.format == "PNG", (
+                f"request[{request_index}] saved image is not PNG"
+            )
+            assert image.size == (expected_width, expected_height), (
+                f"request[{request_index}] image size {image.size} != "
+                f"{expected_width}x{expected_height}"
+            )
+            image.verify()
+
+        with Image.open(out_path) as image:
+            image.load()
+            assert image.format == "PNG", (
+                f"request[{request_index}] decoded image is not PNG"
+            )
+            assert image.size == (expected_width, expected_height), (
+                f"request[{request_index}] image size {image.size} != "
+                f"{expected_width}x{expected_height}"
+            )
+    except (UnidentifiedImageError, OSError, SyntaxError) as exc:
+        raise AssertionError(
+            f"request[{request_index}] invalid or corrupt PNG: {exc}"
+        ) from exc
+
+    return out_path
 
 
 def _result_image_gen(result: Any) -> dict[str, Any]:
@@ -310,6 +417,16 @@ async def _main_async(skip_pipeline: bool) -> None:
         logger.info("--skip-pipeline set: stopping after preprocessor smoke phase")
         return
     await _run_pipeline_phase()
+
+
+@pytest.mark.benchmark
+def test_production_image_gen_e2e_benchmark() -> None:
+    if os.environ.get("RUN_MING_IMAGE_E2E") != "1":
+        pytest.skip("set RUN_MING_IMAGE_E2E=1 to run the Ming image full-model E2E")
+    if not DIT_MODEL_PATH:
+        pytest.skip("set DIT_MODEL_PATH to the local Z-Image-Turbo snapshot")
+
+    asyncio.run(_main_async(skip_pipeline=False))
 
 
 def main() -> None:
