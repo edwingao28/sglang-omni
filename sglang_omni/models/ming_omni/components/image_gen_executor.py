@@ -31,15 +31,11 @@ logger = logging.getLogger(__name__)
 
 def _create_backend(dit_type: str) -> DiffusionBackend:
     """Instantiate a diffusion backend without importing backend modules eagerly."""
-    if dit_type == "sd3":
-        from sglang_omni.models.ming_omni.diffusion.sd3_backend import SD3Backend
-
-        return SD3Backend()
     if dit_type == "zimage":
         from sglang_omni.models.ming_omni.diffusion.zimage_backend import ZImageBackend
 
         return ZImageBackend()
-    raise ValueError(f"Unknown dit_type: {dit_type!r}. Must be 'sd3' or 'zimage'.")
+    raise ValueError(f"Unknown dit_type: {dit_type!r}. Must be 'zimage'.")
 
 
 class MingImageGenExecutor:

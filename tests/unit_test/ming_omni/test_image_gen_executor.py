@@ -155,37 +155,28 @@ def test_start_and_stop_loads_and_unloads_conditioner(monkeypatch) -> None:
     assert conditioner.unloaded is True
 
 
-def test_create_backend_lazy_imports_sd3_zimage_and_rejects_unknown(
+def test_create_backend_lazy_imports_zimage_and_rejects_unknown(
     monkeypatch,
 ) -> None:
     from sglang_omni.models.ming_omni.components.image_gen_executor import (
         _create_backend,
     )
 
-    class FakeSD3Backend:
-        pass
-
     class FakeZImageBackend:
         pass
 
-    sd3_module = ModuleType("sglang_omni.models.ming_omni.diffusion.sd3_backend")
-    sd3_module.SD3Backend = FakeSD3Backend
     zimage_module = ModuleType("sglang_omni.models.ming_omni.diffusion.zimage_backend")
     zimage_module.ZImageBackend = FakeZImageBackend
-    _install_fake_module(
-        monkeypatch,
-        "sglang_omni.models.ming_omni.diffusion.sd3_backend",
-        sd3_module,
-    )
     _install_fake_module(
         monkeypatch,
         "sglang_omni.models.ming_omni.diffusion.zimage_backend",
         zimage_module,
     )
 
-    assert isinstance(_create_backend("sd3"), FakeSD3Backend)
     assert isinstance(_create_backend("zimage"), FakeZImageBackend)
-    with pytest.raises(ValueError, match="Unknown dit_type: 'other'.*sd3.*zimage"):
+    with pytest.raises(ValueError, match="Unknown dit_type: 'sd3'.*zimage"):
+        _create_backend("sd3")
+    with pytest.raises(ValueError, match="Unknown dit_type: 'other'.*zimage"):
         _create_backend("other")
 
 
