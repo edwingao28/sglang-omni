@@ -201,31 +201,30 @@ def test_generate_fails_when_text_rendering_requested_but_byt5_unloaded() -> Non
         )
 
 
-def test_load_models_semantic_encoder_without_ming_model_path_raises() -> None:
+@pytest.mark.parametrize(
+    ("load_kwargs", "message"),
+    [
+        (
+            {"load_semantic_encoder": True},
+            "load_semantic_encoder=True requires ming_model_path",
+        ),
+        (
+            {"load_byt5_text_encoder": True},
+            "load_byt5_text_encoder=True requires ming_model_path",
+        ),
+    ],
+)
+def test_load_models_optional_assets_without_ming_model_path_raises(
+    load_kwargs, message
+) -> None:
     torch = pytest.importorskip("torch")
     from sglang_omni.models.ming_omni.diffusion.zimage_backend import ZImageBackend
 
-    with pytest.raises(
-        ValueError, match="load_semantic_encoder=True requires ming_model_path"
-    ):
+    with pytest.raises(ValueError, match=message):
         ZImageBackend().load_models(
             "/fake/dit",
             torch.device("cpu"),
-            load_semantic_encoder=True,
-        )
-
-
-def test_load_models_byt5_without_ming_model_path_raises() -> None:
-    torch = pytest.importorskip("torch")
-    from sglang_omni.models.ming_omni.diffusion.zimage_backend import ZImageBackend
-
-    with pytest.raises(
-        ValueError, match="load_byt5_text_encoder=True requires ming_model_path"
-    ):
-        ZImageBackend().load_models(
-            "/fake/dit",
-            torch.device("cpu"),
-            load_byt5_text_encoder=True,
+            **load_kwargs,
         )
 
 

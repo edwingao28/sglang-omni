@@ -227,16 +227,6 @@ def test_project_multi_scale_slices_last_scale() -> None:
     assert out.shape == (3, 1024, 2560)
     # The connector received exactly the last scale's slice.
     assert connector.calls[0]["n"] == 1024
-
-
-def test_project_last_scale_slice_matches_manual_slice() -> None:
-    # Lock the exact h[:, start:end] selection for the final scale.
-    cond, _ = _make_conditioner(scales=[16, 32], scale_indices=[256, 1280])
-    hidden = torch.randn(1, 1280, 4096)
-
-    out = cond.project(hidden)
-
-    # Recompute the expected projection chain on the sliced rows only.
     sliced = hidden[:, 256:1280, :]
     expected = cond._proj_in(sliced)
     expected = cond._proj_out(expected)
