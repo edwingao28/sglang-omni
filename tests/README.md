@@ -7,6 +7,8 @@ tests/
 ├── data/
 ├── test_model/
 │   ├── conftest.py
+│   ├── test_ming_tp_parity_ci.py
+│   ├── test_production_image_gen_e2e.py
 │   ├── test_rl_distributed_weight_update.py
 │   ├── test_qwen3_omni_*_ci.py
 │   ├── test_qwen3_omni_videoamme_talker_tp2_ci.py
@@ -48,6 +50,7 @@ tests/
     │   ├── test_talker.py
     │   └── test_text_template.py
     ├── ming_omni/
+    │   ├── test_byt5_encoder.py
     │   ├── test_diffusion_imports.py
     │   ├── test_image_gen_bootstrap.py
     │   ├── test_image_gen_client_api.py
@@ -59,16 +62,25 @@ tests/
     │   ├── test_image_gen_request.py
     │   ├── test_omni_serve.py
     │   ├── test_pipeline.py
+    │   ├── test_sampling_params.py
+    │   ├── test_semantic_conditioner.py
     │   ├── test_streaming_decode.py
     │   ├── test_streaming_e2e_glue.py
+    │   ├── test_streaming_segmenter.py
     │   ├── test_streaming_speech_config.py
+    │   ├── test_streaming_talker.py
+    │   ├── test_streaming_text.py
     │   ├── test_talker.py
+    │   ├── test_talker_cuda_graph.py
     │   ├── test_talker_voice_validation.py
     │   ├── test_thinker.py
+    │   ├── test_thinker_tp_pattern.py
     │   ├── test_tokenizer.py
     │   ├── test_tp.py
+    │   ├── test_tp_utils.py
+    │   ├── test_usage.py
     │   ├── test_vision_patch_embed_linear.py
-    │   └── test_zimage_backend_advanced.py
+    │   └── test_zimage_backend.py
     ├── qwen3_asr/
     │   ├── test_pipeline.py
     │   └── test_request_builders.py
@@ -227,6 +239,11 @@ MING_OMNI_MODEL_NAME=ming-omni \
 python3 -m pytest tests/test_model/test_ming_tp_parity_ci.py -q -s
 ```
 
+- `test_production_image_gen_e2e.py`: gated Ming image-generation production
+  E2E. The GPU path is skipped unless `RUN_MING_IMAGE_E2E=1` and
+  `DIT_MODEL_PATH` are set; its default CI-visible helper tests validate that
+  generated artifacts are complete PNG files with expected dimensions, including
+  rejection of empty and truncated image payloads.
 - `test_tts_ci.py`: default TTS CI gate. It starts the TTS managed router
   with two one-GPU workers using the default model config, runs the
   full SeedTTS EN set (1088 samples) in non-streaming / streaming stages at
@@ -331,12 +348,14 @@ that happened to contain an older version of the test.
     talker, terminal talker-stream stage, thinker/talker GPU-range collision
     rejection, streaming variant exposure).
   - image generation (thinker-fused diffusion): semantic-source routing and
-    `image_generation` request param parsing, ZImage backend load contract
-    (DiT components from the DiT path vs. Ming semantic/ByT5 assets from
-    `ming_model_path`, with fail-fast guards when `ming_model_path` is missing
-    or the `byt5/` dir is absent), executor load/generate wiring, preprocessor
-    query-token injection, query-info construction, bootstrap, client API, and
-    merge behavior, plus a diffusion-import smoke test.
+    `image_generation` request param parsing, ZImage backend load/generate
+    contract (fake diffusers component assembly, optional Ming semantic/ByT5
+    assets from `ming_model_path`, fail-fast asset guards, text-rendering
+    routing), `SemanticConditioner.load()` config / connector / projection /
+    query-token contract, ByT5 render-text formatting and padding-zeroing,
+    executor load/generate wiring, preprocessor query-token injection,
+    query-info construction, bootstrap, client API, and merge behavior, plus a
+    diffusion-import smoke test.
 
 - `unit_test/qwen3_tts/`: Qwen3-TTS unit tests:
   - pipeline config and registry contracts
