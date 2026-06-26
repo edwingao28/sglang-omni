@@ -287,6 +287,8 @@ class _LocalStreamState:
 class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
     """Decode MOSS-TTS Local codec rows incrementally on the v2 codec."""
 
+    _batch_stream_chunks = True
+
     def __init__(
         self,
         codec: Any,
@@ -407,6 +409,26 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
     def on_stream_chunk(
         self, request_id: str, item: StreamItem
     ) -> list[OutgoingMessage]:
+        self._ingest_chunk(request_id, item)
+        self._pump_streams()
+        return []
+
+    def on_stream_chunk_batch(
+        self, items: list[tuple[str, StreamItem]]
+    ) -> list[OutgoingMessage]:
+        with self._state_lock:
+            for request_id, item in items:
+                if self._is_aborted(request_id):
+                    continue
+                try:
+                    self._ingest_chunk(request_id, item)
+                except Exception as exc:
+                    self._emit_error(request_id, exc)
+                    self.abort(request_id)
+            self._pump_streams()
+        return []
+
+    def _ingest_chunk(self, request_id: str, item: StreamItem) -> None:
         state = self._stream_states.setdefault(request_id, _LocalStreamState())
         self._latch_stream_metadata(request_id, state, item.metadata)
 
@@ -426,8 +448,6 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
         # Row layout matches output_rows: [text_token, code_0, ..., code_{n_vq-1}].
         state.pending.append(row[1 : 1 + n_vq])
         self._ensure_slot(state)
-        self._pump_streams()
-        return []
 
     def on_stream_done(self, request_id: str) -> list[OutgoingMessage]:
         payload = self._stream_payloads[request_id]
