@@ -96,17 +96,14 @@ class StreamingSimpleScheduler:
         del request_id, item
         return []
 
-    def on_stream_chunk_batch(
-        self, items: list[tuple[str, StreamItem]]
-    ) -> list[OutgoingMessage]:
-        """(wenyao) The caller does NOT hold ``_state_lock``; an override owns its own locking."""
+    def on_stream_chunk_batch(self, items: list[tuple[str, StreamItem]]) -> None:
+        """Caller holds no lock and ignores any return; overrides lock and emit via outbox internally."""
         for request_id, item in items:
             try:
                 self._handle_stream_chunk(request_id, item)
             except Exception as exc:
                 self._emit_error(request_id, exc)
                 self.abort(request_id)
-        return []
 
     def on_stream_done(self, request_id: str) -> list[OutgoingMessage]:
         del request_id
