@@ -35,6 +35,7 @@ from sglang_omni.models.moss_tts_local.streaming_vocoder import (
 from sglang_omni.models.tts_streaming import INITIAL_CODEC_CHUNK_FRAMES_PARAM
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.proto import OmniRequest, StagePayload
+from sglang_omni.scheduling.messages import IncomingMessage
 
 N_VQ = 4
 SAMPLES_PER_FRAME = 4
@@ -382,6 +383,95 @@ def test_stream_concatenates_to_offline_decode(monkeypatch) -> None:
         "total_tokens": 26,
         "engine_time_s": 0.5,
     }
+
+
+def _run_stream_batched(
+    scheduler,
+    rows: torch.Tensor,
+    *,
+    request_id: str = "req",
+    metadata: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
+) -> list:
+    """Drive chunks through the real batched seam: enqueue stream_chunk messages and
+    pump the serving loop so _collect_stream_chunk_batch coalesces already-queued chunks.
+    """
+    metadata = metadata if metadata is not None else _metadata()
+    for index, row in enumerate(rows):
+        scheduler.inbox.put(
+            IncomingMessage(
+                request_id, "stream_chunk", _stream_item(row, metadata, index)
+            )
+        )
+    while True:
+        msg = scheduler._next_message()
+        if msg is None:
+            break
+        scheduler._handle_message(msg, None)
+    scheduler._on_done(request_id)
+    scheduler._on_streaming_new_request(
+        request_id, _terminal_payload(rows, request_id=request_id, params=params)
+    )
+    return _drain(scheduler)
+
+
+def test_batched_coalescing_matches_offline_decode(monkeypatch) -> None:
+    processor = FakeProcessor()
+    scheduler = _make_scheduler(
+        monkeypatch,
+        processor,
+        stream_chunk_frames=10,
+        initial_chunk_frames=5,
+    )
+    assert scheduler._batch_stream_chunks is True
+    assert (
+        scheduler._stream_chunk_batch_max == 8
+    )  # follows stream_slots, not max_batch_size
+    rows = _rows(23, seed=1)
+    messages = _run_stream_batched(scheduler, rows)
+
+    sizes = [
+        _decode_audio(m.data).shape[1] // SAMPLES_PER_FRAME
+        for m in messages
+        if m.type == "stream"
+    ]
+    # Coalescing 8 queued chunks before the first pump widens the first chunk past
+    # initial=5 (to 8); the per-chunk path emits [5, 10, 8]. Total frames + PCM identical.
+    assert sizes == [8, 10, 5]
+    assert sum(sizes) == 23
+    assert dict(scheduler._stream_chunk_batch_hist) == {8: 2, 7: 1}
+
+    audio = _concat_stream_audio(messages, "req")
+    np.testing.assert_array_equal(audio, reference_waveform(rows[:, 1:]).numpy())
+
+
+def test_batched_step_capped_at_chunk_frames(monkeypatch) -> None:
+    processor = FakeProcessor()
+    scheduler = _make_scheduler(
+        monkeypatch,
+        processor,
+        stream_slots=16,
+        max_batch_size=4,  # offline knob < stream_slots; drain cap must track stream_slots
+        stream_chunk_frames=10,
+        initial_chunk_frames=5,
+    )
+    assert scheduler._stream_chunk_batch_max == 16
+    rows = _rows(16, seed=3)
+    messages = _run_stream_batched(scheduler, rows)
+
+    # 16 same-request chunks coalesce into one drain (cap follows stream_slots=16, not 4).
+    assert dict(scheduler._stream_chunk_batch_hist) == {16: 1}
+    sizes = [
+        _decode_audio(m.data).shape[1] // SAMPLES_PER_FRAME
+        for m in messages
+        if m.type == "stream"
+    ]
+    # pending=16 at the single pump, but each streaming step is capped at stream_chunk_frames=10
+    # (the CUDA-graph capture ceiling) — never the 16-frame off-graph overshoot.
+    assert max(sizes) <= 10
+    assert sizes == [10, 6]
+    audio = _concat_stream_audio(messages, "req")
+    np.testing.assert_array_equal(audio, reference_waveform(rows[:, 1:]).numpy())
 
 
 def test_initial_chunk_frames_request_override(monkeypatch) -> None:
