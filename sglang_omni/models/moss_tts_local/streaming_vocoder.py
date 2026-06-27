@@ -678,9 +678,11 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
                 for entry in slotted
                 if self._can_join_coalesced_step(entry[1], floor)
             ]
+            # Cap at the steady chunk size (= CUDA-graph capture ceiling) so coalesced backlogs
+            # stay on the graphed fast path; the while-loop re-pumps any remainder.
             step_t = min(
                 min(len(state.pending) for _, state in participants),
-                self._max_step_frames,
+                self._stream_chunk_frames,
             )
             plan: dict[int, torch.Tensor] = {}
             for _, state in participants:
