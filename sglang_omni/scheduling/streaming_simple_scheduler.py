@@ -141,6 +141,7 @@ class StreamingSimpleScheduler:
 
     def stop(self) -> None:
         self._running = False
+        self._log_stream_chunk_batch_stats()
 
     def abort(self, request_id: str) -> None:
         self._record_aborted_request_id(request_id)
@@ -464,6 +465,17 @@ class StreamingSimpleScheduler:
         if items:
             self._stream_chunk_batch_hist[len(items)] += 1
             self.on_stream_chunk_batch(items)
+
+    def _log_stream_chunk_batch_stats(self) -> None:
+        if not self._stream_chunk_batch_hist:
+            return
+        total = sum(self._stream_chunk_batch_hist.values())
+        logger.info(
+            "%s stream-chunk batch stats: %d dispatches, sizes=%s",
+            self.__class__.__name__,
+            total,
+            dict(sorted(self._stream_chunk_batch_hist.items())),
+        )
 
     def _handle_stream_done(self, request_id: str) -> None:
         with self._state_lock:
