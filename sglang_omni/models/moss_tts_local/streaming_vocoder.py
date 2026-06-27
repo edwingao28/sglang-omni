@@ -415,9 +415,8 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
         self._pump_streams()
         return []
 
-    def on_stream_chunk_batch(
-        self, items: list[tuple[str, StreamItem]]
-    ) -> list[OutgoingMessage]:
+    def on_stream_chunk_batch(self, items: list[tuple[str, StreamItem]]) -> None:
+        failed: list[str] = []
         with self._state_lock:
             for request_id, item in items:
                 if self._is_aborted(request_id):
@@ -426,9 +425,13 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
                     self._ingest_chunk(request_id, item)
                 except Exception as exc:
                     self._emit_error(request_id, exc)
-                    self.abort(request_id)
+                    self._record_aborted_request_id(request_id)
+                    self._clear_request_state(request_id, keep_aborted=True)
+                    failed.append(request_id)
             self._pump_streams()
-        return []
+        # Run the external abort callback off the GPU-serializing lock, matching the serving loop.
+        for request_id in failed:
+            self._cleanup_aborted_request(request_id)
 
     def _ingest_chunk(self, request_id: str, item: StreamItem) -> None:
         state = self._stream_states.setdefault(request_id, _LocalStreamState())
