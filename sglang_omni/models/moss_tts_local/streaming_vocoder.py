@@ -335,6 +335,8 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
         self._codec = codec
         self._nonstream_decoder = nonstream_decoder
         self._stream_slots = int(stream_slots)
+        # Coalesce up to one full set of streaming lanes per pump, not the offline batch width.
+        self._stream_chunk_batch_max = self._stream_slots
         self._stream_chunk_frames = int(stream_chunk_frames)
         self._default_initial_chunk_frames = max(
             0, min(int(initial_chunk_frames), int(stream_chunk_frames))
