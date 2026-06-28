@@ -102,12 +102,13 @@ jobs:
     name: setup - omni venv
     needs: preflight
     if: needs.preflight.result == 'success'
-    runs-on: [self-hosted]
+    runs-on: [self-hosted, h100]
     timeout-minutes: 30
     container:
       image: crpi-n6adu6llixz83q37.cn-hangzhou.personal.cr.aliyuncs.com/hongccc/sglang-omni:dev
       options: >-
-        --gpus all --rm
+        --rm
+        -e NVIDIA_VISIBLE_DEVICES=6,7
         -v /dev/shm:/dev/shm
         -v /data/cache/huggingface:/github/home/.cache/huggingface
         -v /data/cache/huggingface:/root/.cache/huggingface
@@ -127,7 +128,7 @@ jobs:
       - name: Ensure CI model weights
         shell: bash
         env:
-          HF_ENDPOINT: https://hf-mirror.com
+          HF_ENDPOINT: https://huggingface.co
           HF_TOKEN: ${{ secrets.BOSON_HF_TOKEN }}
         run: |
           bash .github/scripts/ensure_hf_models.sh omni \
@@ -221,12 +222,13 @@ jobs:
     if: >-
       always() && !cancelled() &&
       needs.setup.result == 'success'
-    runs-on: [self-hosted]
+    runs-on: [self-hosted, h100]
     timeout-minutes: 5
     container:
       image: crpi-n6adu6llixz83q37.cn-hangzhou.personal.cr.aliyuncs.com/hongccc/sglang-omni:dev
       options: >-
-        --gpus all --rm
+        --rm
+        -e NVIDIA_VISIBLE_DEVICES=6,7
         -v /dev/shm:/dev/shm
         -v /data/cache/huggingface:/github/home/.cache/huggingface
         -v /data/cache/huggingface:/root/.cache/huggingface
