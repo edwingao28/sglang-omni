@@ -70,11 +70,24 @@ def _validate_image_gen_cli_request(
     image_gen: bool,
     text_only: bool,
     colocate: bool,
+    config: str | None,
     diffusion_model_path: str | None,
+    image_gen_gpu: int | None,
+    enable_standalone_semantic_encoder: bool,
+    enable_byt5_text_rendering: bool,
     thinker_cuda_graph: str,
 ) -> None:
-    
+    _image_companion_flags = (
+        (diffusion_model_path is not None, "--diffusion-model-path"),
+        (image_gen_gpu is not None, "--image-gen-gpu"),
+        (enable_standalone_semantic_encoder, "--enable-standalone-semantic-encoder"),
+        (enable_byt5_text_rendering, "--enable-byt5-text-rendering"),
+    )
     if not image_gen:
+        if config is None:
+            for is_set, flag in _image_companion_flags:
+                if is_set:
+                    raise typer.BadParameter(f"{flag} requires --image-gen")
         return
     if text_only:
         raise typer.BadParameter("--image-gen cannot be combined with --text-only")
@@ -82,7 +95,7 @@ def _validate_image_gen_cli_request(
         raise typer.BadParameter("--image-gen cannot be combined with --colocate")
     if diffusion_model_path is None:
         raise typer.BadParameter("--image-gen requires --diffusion-model-path")
-    if thinker_cuda_graph == "on":
+    if thinker_cuda_graph.strip().lower() == "on":
         raise typer.BadParameter(
             "--image-gen captures thinker hidden states, which is incompatible "
             "with --thinker-cuda-graph on"
@@ -695,11 +708,17 @@ def apply_image_gen_cli_overrides(
     _apply_stage_gpu_override(
         pipeline_config, stage_name="image_gen", gpu=image_gen_gpu
     )
-    field_overrides = {
-        "dit_model_path": diffusion_model_path,
-        "enable_standalone_semantic_encoder": enable_standalone_semantic_encoder,
-        "enable_byt5_text_rendering": enable_byt5_text_rendering,
-    }
+    field_overrides: dict[str, object] = {}
+    if diffusion_model_path is not None:
+        field_overrides["dit_model_path"] = diffusion_model_path
+    if enable_standalone_semantic_encoder:
+        field_overrides["enable_standalone_semantic_encoder"] = True
+    if enable_byt5_text_rendering:
+        field_overrides["enable_byt5_text_rendering"] = True
+
+    if not field_overrides and image_gen_gpu is None:
+        return pipeline_config
+
     try:
         return type(pipeline_config)(
             **{**pipeline_config.model_dump(), **field_overrides}
@@ -945,6 +964,7 @@ def serve(
         bool,
         typer.Option(
             "--image-gen",
+            "--image_gen",
             help=(
                 "Use the image-generation pipeline (thinker + diffusion DiT). "
                 "Requires --diffusion-model-path. Mutually exclusive with "
@@ -956,6 +976,7 @@ def serve(
         str | None,
         typer.Option(
             "--diffusion-model-path",
+            "--diffusion_model_path",
             help=(
                 "Path or HF id of the diffusion model bundle (scheduler + VAE + "
                 "transformer), e.g. a Z-Image directory. Required with --image-gen."
@@ -966,6 +987,7 @@ def serve(
         int | None,
         typer.Option(
             "--image-gen-gpu",
+            "--image_gen_gpu",
             help=(
                 "GPU id for the diffusion (image-gen) stage. Must not overlap the "
                 "thinker TP range. Defaults to the pipeline's configured GPU."
@@ -976,6 +998,7 @@ def serve(
         bool,
         typer.Option(
             "--enable-standalone-semantic-encoder",
+            "--enable_standalone_semantic_encoder",
             help=(
                 "Load the standalone Ming semantic encoder so image requests can "
                 "use semantic_source=standalone (text-to-image without thinker "
@@ -987,6 +1010,7 @@ def serve(
         bool,
         typer.Option(
             "--enable-byt5-text-rendering",
+            "--enable_byt5_text_rendering",
             help=(
                 "Load the ByT5 text encoder for rendering quoted text inside "
                 "generated images. Only valid with --image-gen."
@@ -1273,7 +1297,11 @@ def serve(
         image_gen=image_gen,
         text_only=text_only,
         colocate=colocate,
+        config=config,
         diffusion_model_path=diffusion_model_path,
+        image_gen_gpu=image_gen_gpu,
+        enable_standalone_semantic_encoder=enable_standalone_semantic_encoder,
+        enable_byt5_text_rendering=enable_byt5_text_rendering,
         thinker_cuda_graph=thinker_cuda_graph,
     )
     _validate_colocate_cli_request(
@@ -1323,6 +1351,13 @@ def serve(
         cpu_offload_gb=cpu_offload_gb,
         quantization=quantization,
     )
+    merged_config = apply_image_gen_cli_overrides(
+        merged_config,
+        diffusion_model_path=diffusion_model_path,
+        image_gen_gpu=image_gen_gpu,
+        enable_standalone_semantic_encoder=enable_standalone_semantic_encoder,
+        enable_byt5_text_rendering=enable_byt5_text_rendering,
+    )
     merged_config = apply_parallelism_cli_overrides(
         merged_config,
         thinker_tp_size=thinker_tp_size,
@@ -1331,13 +1366,6 @@ def serve(
         image_encoder_gpus=image_encoder_gpus,
         talker_gpu=talker_gpu,
         code2wav_gpu=code2wav_gpu,
-    )
-    merged_config = apply_image_gen_cli_overrides(
-        merged_config,
-        diffusion_model_path=diffusion_model_path,
-        image_gen_gpu=image_gen_gpu,
-        enable_standalone_semantic_encoder=enable_standalone_semantic_encoder,
-        enable_byt5_text_rendering=enable_byt5_text_rendering,
     )
     merged_config = apply_cuda_graph_cli_overrides(
         merged_config,

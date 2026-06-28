@@ -53,6 +53,7 @@ tests/
     │   ├── test_byt5_encoder.py
     │   ├── test_diffusion_imports.py
     │   ├── test_image_gen_bootstrap.py
+    │   ├── test_image_gen_cli.py
     │   ├── test_image_gen_client_api.py
     │   ├── test_image_gen_config.py
     │   ├── test_image_gen_executor.py
@@ -324,6 +325,10 @@ that happened to contain an older version of the test.
   - omni serve CLI/config merge, default speech vs. text-only selection,
     launcher handoff, GPU placement, TP wiring, and unsupported flag capability
     boundaries
+  - image-gen serve flags (`--image-gen`, `--diffusion-model-path`,
+    `--image-gen-gpu`, `--enable-standalone-semantic-encoder`,
+    `--enable-byt5-text-rendering`): variant selection, override ordering against
+    the thinker TP range, config-file preservation, and flag-conflict guards
   - stage factory and scheduler contracts (preprocessing, encoders, thinker, talker, decode)
   - thinker bootstrap registration and Ming model runner wiring
   - multimodal embed injection (per-modality consumed state, pad-value fallback, short-embeds detection)
