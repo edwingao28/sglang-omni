@@ -47,13 +47,13 @@ Ming has four serving variants:
 | Text | `preprocessing -> audio_encoder + image_encoder -> mm_aggregate -> thinker -> decode` | Text | `sgl-omni serve --text-only` |
 | Speech | Text pipeline plus `talker` terminal stage | Text + audio | `sgl-omni serve` |
 | Streaming speech | Speech pipeline with `segmenter -> talker_stream` | Text + chunked audio over SSE | `MingOmniStreamingSpeechPipelineConfig` pipeline config |
-| Image | `preprocessing -> thinker -> semantic_conditioner -> image_gen DiT` | Image (base64 PNG) | `examples/run_ming_omni_image_server.py` |
+| Image | `preprocessing -> thinker -> semantic_conditioner -> image_gen DiT` | Image (base64 PNG) | `sgl-omni serve --image-gen --diffusion-model-path <path>` |
 
 When you pass only `--model-path`, OmniServe selects the default Ming speech pipeline. Add `--text-only` when you only need text output and want to avoid launching the talker. Streaming speech is a separate Ming pipeline variant; the benchmark section includes streaming evidence, but the ready copy-paste commands in this cookbook focus on the generic model-path text and speech paths.
 
 The router, when used, routes whole requests to complete Ming workers. It does not split one request across the thinker and talker of different workers.
 
-The image variant is a separate two-stage pipeline (`MingOmniImagePipelineConfig`) launched from `examples/run_ming_omni_image_server.py`, not the generic `sgl-omni serve --model-path` path: it disaggregates the thinker (TP) from a dedicated Z-Image DiT GPU and returns base64 PNGs through the same `/v1/chat/completions` endpoint with `modalities: ["image"]`.
+The image variant (`MingOmniImagePipelineConfig`) is launched from the generic `sgl-omni serve` path with `--image-gen`: it disaggregates the thinker (TP) from a dedicated Z-Image DiT GPU and returns base64 PNGs through the same `/v1/chat/completions` endpoint with `modalities: ["image"]`.
 
 ## Server Configuration
 
@@ -105,21 +105,32 @@ Use `--thinker-tp-size` to set thinker tensor parallelism and `--thinker-gpus` t
 
 ### Image Generation Server
 
-Image output uses a separate two-stage launcher, `examples/run_ming_omni_image_server.py`, which wires the TP thinker to a dedicated Z-Image-Turbo DiT GPU. `--dit-model-path` is required (no default); `--model-path` defaults to `inclusionAI/Ming-flash-omni-2.0`.
+Image output runs the thinker plus a dedicated Z-Image-Turbo DiT stage. Launch it from the generic `sgl-omni serve` path with `--image-gen`, which selects the `MingOmniImagePipelineConfig` pipeline and adds the terminal DiT stage. `--image-gen` requires `--diffusion-model-path` (the Z-Image bundle); it is mutually exclusive with `--text-only` and `--colocate`.
 
 ```bash
-python examples/run_ming_omni_image_server.py \
+sgl-omni serve \
   --model-path inclusionAI/Ming-flash-omni-2.0 \
-  --dit-model-path Tongyi-MAI/Z-Image-Turbo \
-  --dit-type zimage \
-  --gpu-thinker 0 --tp-size 4 --gpu-img-gen 4 \
+  --image-gen \
+  --diffusion-model-path Tongyi-MAI/Z-Image-Turbo \
+  --thinker-tp-size 4 --thinker-gpus 0,1,2,3 \
+  --image-gen-gpu 4 \
   --enable-byt5-text-rendering \
   --host 0.0.0.0 --port 8000 --model-name ming-omni
 ```
 
-Unlike the generic `sgl-omni serve` path (which takes `CUDA_VISIBLE_DEVICES`-relative logical ids), this launcher's `--gpu-thinker` and `--gpu-img-gen` are absolute GPU ids. The thinker runs TP4 on GPUs 0-3 (`--gpu-thinker` is the first rank; ranks span `[start, start+tp)`), and the DiT runs on its own GPU (`--gpu-img-gen 4`). The DiT GPU must not overlap the thinker TP range — the config validates and rejects overlap at launch (`_validate_image_gen_gpu_not_in_thinker_tp_range`). `--tp-size > 1` auto-sets `disable_custom_all_reduce=True` for the thinker stage.
+The image-generation flags:
 
-Add `--enable-byt5-text-rendering` only if you need legible rendered text; it requires a `<ming>/byt5/` dir and fails fast otherwise. Optional flags: `--relay-backend {shm,nccl,nixl}` (inter-stage transport, default `shm`) and `--mem-fraction-static <0..1>` (thinker stage). Do not add `--enable-standalone-semantic-encoder`; the standalone semantic source is dormant and the default thinker-fused source is the supported route.
+| Flag | Default | Role |
+|---|---|---|
+| `--image-gen` | off | Select the image-generation pipeline (thinker + diffusion DiT). Requires `--diffusion-model-path`; mutually exclusive with `--text-only`/`--colocate`. |
+| `--diffusion-model-path` | — (required) | Path or HF id of the Z-Image diffusion bundle (the directory holding `scheduler/`, `vae/`, and `transformer/` subdirs). |
+| `--image-gen-gpu` | pipeline default (GPU 1) | Logical GPU id for the DiT stage. Must not overlap the thinker TP range. |
+| `--enable-standalone-semantic-encoder` | off | Load the standalone Ming semantic encoder so requests can set `semantic_source=standalone`. The default thinker-fused source is the supported route; leave this off unless you specifically need the standalone path. |
+| `--enable-byt5-text-rendering` | off | Load the ByT5 text encoder so the DiT can render legible quoted text. Requires a `<ming>/byt5/` dir and fails fast otherwise. |
+
+Thinker placement reuses the same `--thinker-tp-size` / `--thinker-gpus` flags as the text and speech pipelines, with `CUDA_VISIBLE_DEVICES`-relative logical ids. Here the thinker runs TP4 on logical GPUs 0-3 and the DiT takes logical GPU 4. The DiT GPU must not overlap the thinker TP range — the launcher validates and rejects overlap before startup (`_validate_image_gen_gpu_not_in_thinker_tp_range`), re-checking after `--image-gen-gpu` is applied. Because the pipeline captures thinker hidden states to condition the DiT, it forces hidden-state capture on the thinker and is therefore incompatible with `--thinker-cuda-graph on`. `--mem-fraction-static` is forwarded to the thinker stage as usual.
+
+For disaggregated setups that need absolute GPU placement or a non-default inter-stage transport, the same pipeline can also be launched from the lower-level `examples/run_ming_omni_image_server.py` script, which additionally exposes `--relay-backend {shm,nccl,nixl}` and absolute `--gpu-thinker` / `--gpu-img-gen` ids.
 
 ## Input and Output Examples
 
@@ -639,7 +650,7 @@ DiT denoise dominates the warm cost (~9.5 s of the ~14 s total); the remainder i
 - **Text streaming is not token-by-token today.** In the current Ming path, text-only `stream=true` currently emits an aggregate text chunk. Use streaming speech when you need audio chunks.
 - **Streaming speech is optimized for low client concurrency.** It improves first-audio latency at c=1 but can be slower than non-streaming for multi-client workloads.
 - **Long-form speech can drift.** For long narration, split text into smaller turns or run a voice/drift audit for your target voice and language.
-- **Image generation is a separate launcher.** Image output uses `examples/run_ming_omni_image_server.py` (the two-stage `MingOmniImagePipelineConfig`), not generic `sgl-omni serve --model-path`. `--dit-model-path` is required, and the DiT GPU (`--gpu-img-gen`) must not overlap the thinker TP range — the config validates and rejects overlap at launch.
+- **Image generation is a `sgl-omni serve` variant.** Image output uses `sgl-omni serve --image-gen` (the two-stage `MingOmniImagePipelineConfig`). `--diffusion-model-path` is required, and the DiT GPU (`--image-gen-gpu`) must not overlap the thinker TP range — the launcher validates and rejects overlap before startup. It is mutually exclusive with `--text-only`/`--colocate` and incompatible with `--thinker-cuda-graph on`.
 - **`image_generation` requires the image modality.** Send `modalities: ["image"]` whenever the request carries an `image_generation` block, or the server returns HTTP 400.
 - **Text rendering needs both flags plus a quoted span.** Start the server with `--enable-byt5-text-rendering` AND send `enable_text_rendering: true` AND put the literal text in a quoted span in the prompt — only the **last** quoted substring is rendered. Missing the launch flag or the `<ming>/byt5/` dir fails fast; the per-request flag alone does nothing.
 - **Keep `guidance_scale` low.** The default `2.0` is tuned for the distilled, low-CFG Z-Image-Turbo DiT. High CFG washes out the image; do not raise it to SD-style 7-9 values without retuning.
