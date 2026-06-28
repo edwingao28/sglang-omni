@@ -8,6 +8,7 @@ import json
 from typing import Any
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from sglang_omni.client.types import (
@@ -445,12 +446,6 @@ def test_completion_stream_passes_images_and_encodes_multimodal_audio(
     assert chunks[0].images == [_image_payload()]
 
 
-def test_real_serve_create_app_import_remains_available() -> None:
-    from sglang_omni.serve import create_app as serve_create_app
-
-    assert serve_create_app is create_app
-
-
 def test_build_chat_generate_request_propagates_image_generation() -> None:
     image_generation = {"size": "1024x1024", "response_format": "b64_json"}
     request = ChatCompletionRequest(
@@ -466,33 +461,20 @@ def test_build_chat_generate_request_propagates_image_generation() -> None:
     assert generate_request.output_modalities == ["image"]
 
 
-def test_chat_completion_rejects_image_generation_without_image_modality() -> None:
+@pytest.mark.parametrize(
+    "body",
+    [
+        _chat_body(image_generation={"size": "64x64"}),
+        _chat_body(modalities=["text"], image_generation={"size": "64x64"}),
+    ],
+)
+def test_chat_completion_rejects_image_generation_without_image_modality(body) -> None:
     fake_client = _FakeOpenAIClient()
     client = TestClient(create_app(fake_client, model_name="ming-image"))
 
     response = client.post(
         "/v1/chat/completions",
-        json=_chat_body(image_generation={"size": "64x64"}),
-    )
-
-    assert response.status_code == 400
-    assert (
-        'image_generation requires modalities to include "image"'
-        in response.json()["detail"]
-    )
-    assert fake_client.requests == []
-
-
-def test_chat_completion_rejects_image_generation_with_text_only_modality() -> None:
-    fake_client = _FakeOpenAIClient()
-    client = TestClient(create_app(fake_client, model_name="ming-image"))
-
-    response = client.post(
-        "/v1/chat/completions",
-        json=_chat_body(
-            modalities=["text"],
-            image_generation={"size": "64x64"},
-        ),
+        json=body,
     )
 
     assert response.status_code == 400

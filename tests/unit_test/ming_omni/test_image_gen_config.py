@@ -45,7 +45,7 @@ def _set_gpu(stages, stage_name: str, gpu, *, tp_size: int | None = None):
     return copied
 
 
-def test_ming_image_config_builds_expected_default_graph() -> None:
+def test_ming_image_config_builds_expected_graph_and_image_stage_wiring() -> None:
     from sglang_omni.models.ming_omni.config import MingOmniImagePipelineConfig
 
     config = MingOmniImagePipelineConfig(
@@ -63,16 +63,6 @@ def test_ming_image_config_builds_expected_default_graph() -> None:
         DECODE_STAGE,
         IMAGE_GEN_STAGE,
     ]
-
-
-def test_ming_image_config_enables_image_gen_stage_wiring() -> None:
-    from sglang_omni.models.ming_omni.config import MingOmniImagePipelineConfig
-
-    config = MingOmniImagePipelineConfig(
-        model_path="dummy",
-        dit_type="zimage",
-        dit_model_path="/models/zimage",
-    )
     stages = _stages_by_name(config)
 
     assert stages[PREPROCESSING_STAGE].factory_args["enable_image_gen"] is True
@@ -139,8 +129,8 @@ def test_ming_image_launcher_places_thinker_tp_and_image_gen(monkeypatch) -> Non
         gpu_img_gen=2,
         dit_model_path="/models/zimage",
         dit_type="zimage",
-        enable_standalone_semantic_encoder=False,
-        enable_byt5_text_rendering=False,
+        enable_standalone_semantic_encoder=True,
+        enable_byt5_text_rendering=True,
         mem_fraction_static=0.8,
         host="127.0.0.1",
         port=8000,
@@ -161,47 +151,11 @@ def test_ming_image_launcher_places_thinker_tp_and_image_gen(monkeypatch) -> Non
     assert image_gen.gpu == 2
     assert image_gen.factory_args["dit_type"] == "zimage"
     assert image_gen.factory_args["dit_model_path"] == "/models/zimage"
+    assert image_gen.factory_args["enable_standalone_semantic_encoder"] is True
+    assert image_gen.factory_args["enable_byt5_text_rendering"] is True
     assert captured["kwargs"]["model_name"] == "ming-omni-image"
     assert overrides["mem_fraction_static"] == 0.8
     assert overrides["disable_custom_all_reduce"] is True
-
-
-def test_ming_image_launcher_can_enable_advanced_image_gen_paths(
-    monkeypatch,
-) -> None:
-    from examples.run_ming_omni_image_server import _launch_image_server
-
-    captured: dict[str, object] = {}
-    serve_module = ModuleType("sglang_omni.serve")
-
-    def fake_launch_server(config, **kwargs):
-        captured["config"] = config
-        captured["kwargs"] = kwargs
-
-    serve_module.launch_server = fake_launch_server
-    monkeypatch.setitem(sys.modules, "sglang_omni.serve", serve_module)
-
-    args = SimpleNamespace(
-        model_path="dummy",
-        relay_backend="shm",
-        tp_size=1,
-        gpu_thinker=0,
-        gpu_img_gen=1,
-        dit_model_path="/models/zimage",
-        dit_type="zimage",
-        enable_standalone_semantic_encoder=True,
-        enable_byt5_text_rendering=True,
-        mem_fraction_static=None,
-        host="127.0.0.1",
-        port=8000,
-        model_name="ming-omni-image",
-    )
-
-    _launch_image_server(args)
-
-    image_gen = _stages_by_name(captured["config"])[IMAGE_GEN_STAGE]
-    assert image_gen.factory_args["enable_standalone_semantic_encoder"] is True
-    assert image_gen.factory_args["enable_byt5_text_rendering"] is True
 
 
 def test_ming_image_rejects_image_gen_overlap_with_explicit_thinker_tp_gpus() -> None:

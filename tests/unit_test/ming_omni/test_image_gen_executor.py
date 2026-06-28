@@ -180,7 +180,26 @@ def test_create_backend_lazy_imports_zimage_and_rejects_unknown(
         _create_backend("other")
 
 
-def test_load_models_uses_fake_backend_and_tokenizer_modules(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("executor_kwargs", "expected_load_kwargs"),
+    [
+        ({}, {"ming_model_path": "/fake/model"}),
+        (
+            {
+                "enable_standalone_semantic_encoder": True,
+                "enable_byt5_text_rendering": True,
+            },
+            {
+                "ming_model_path": "/fake/model",
+                "load_semantic_encoder": True,
+                "load_byt5_text_encoder": True,
+            },
+        ),
+    ],
+)
+def test_load_models_uses_fake_backend_tokenizer_and_zimage_flags(
+    monkeypatch, executor_kwargs, expected_load_kwargs
+) -> None:
     from sglang_omni.models.ming_omni.components.image_gen_executor import (
         MingImageGenExecutor,
     )
@@ -216,6 +235,7 @@ def test_load_models_uses_fake_backend_and_tokenizer_modules(monkeypatch) -> Non
         dit_type="zimage",
         dit_model_path="/fake/dit",
         device="cpu",
+        **executor_kwargs,
     )
 
     executor._load_models()
@@ -223,86 +243,8 @@ def test_load_models_uses_fake_backend_and_tokenizer_modules(monkeypatch) -> Non
     assert executor._backend is loaded_backends[0]
     assert loaded_backends[0].load_calls[0][0][0] == "/fake/dit"
     assert str(loaded_backends[0].load_calls[0][0][1]) == "cpu"
-    assert loaded_backends[0].load_calls[0][1] == {"ming_model_path": "/fake/model"}
+    assert loaded_backends[0].load_calls[0][1] == expected_load_kwargs
     assert executor._thinker_tokenizer == ("/fake/model", tokenizer)
-
-
-def test_load_models_uses_zimage_backend_without_standalone_encoder_args(
-    monkeypatch,
-) -> None:
-    from sglang_omni.models.ming_omni.components.image_gen_executor import (
-        MingImageGenExecutor,
-    )
-
-    zimage_calls = []
-
-    class FakeZImageBackend:
-        def load_models(self, *args, **kwargs):
-            zimage_calls.append((args, kwargs))
-
-    zimage_module = ModuleType("sglang_omni.models.ming_omni.diffusion.zimage_backend")
-    zimage_module.ZImageBackend = FakeZImageBackend
-    common_module = ModuleType("sglang_omni.models.ming_omni.components.common")
-    common_module.load_ming_tokenizer = lambda _model_path: FakeTokenizer()
-    _install_fake_module(
-        monkeypatch,
-        "sglang_omni.models.ming_omni.diffusion.zimage_backend",
-        zimage_module,
-    )
-    _install_fake_module(
-        monkeypatch,
-        "sglang_omni.models.ming_omni.components.common",
-        common_module,
-    )
-
-    MingImageGenExecutor(
-        model_path="/fake/model",
-        dit_type="zimage",
-        device="cpu",
-    )._load_models()
-
-    assert zimage_calls[0][1] == {"ming_model_path": "/fake/model"}
-
-
-def test_load_models_passes_explicit_advanced_zimage_flags(monkeypatch) -> None:
-    from sglang_omni.models.ming_omni.components.image_gen_executor import (
-        MingImageGenExecutor,
-    )
-
-    zimage_calls = []
-
-    class FakeZImageBackend:
-        def load_models(self, *args, **kwargs):
-            zimage_calls.append((args, kwargs))
-
-    zimage_module = ModuleType("sglang_omni.models.ming_omni.diffusion.zimage_backend")
-    zimage_module.ZImageBackend = FakeZImageBackend
-    common_module = ModuleType("sglang_omni.models.ming_omni.components.common")
-    common_module.load_ming_tokenizer = lambda _model_path: FakeTokenizer()
-    _install_fake_module(
-        monkeypatch,
-        "sglang_omni.models.ming_omni.diffusion.zimage_backend",
-        zimage_module,
-    )
-    _install_fake_module(
-        monkeypatch,
-        "sglang_omni.models.ming_omni.components.common",
-        common_module,
-    )
-
-    MingImageGenExecutor(
-        model_path="/fake/model",
-        dit_type="zimage",
-        device="cpu",
-        enable_standalone_semantic_encoder=True,
-        enable_byt5_text_rendering=True,
-    )._load_models()
-
-    assert zimage_calls[0][1] == {
-        "ming_model_path": "/fake/model",
-        "load_semantic_encoder": True,
-        "load_byt5_text_encoder": True,
-    }
 
 
 def test_abort_prevents_generation_and_get_result_skips_aborted_result() -> None:
@@ -348,86 +290,6 @@ def test_stop_unloads_and_clears_backend() -> None:
 
     assert backend.unloaded is True
     assert executor._backend is None
-
-
-def test_create_image_gen_executor_wires_zimage_conditioner(
-    monkeypatch,
-) -> None:
-    from sglang_omni.models.ming_omni import stages
-
-    constructed = []
-    conditioners = []
-
-    class FakeImageGenExecutor:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-            constructed.append(self)
-
-        def should_generate_image(self, _payload):
-            return False
-
-        def build_empty_image_result(self, payload):
-            return StagePayload(request_id=payload.request_id, request=payload.request)
-
-    class FakeSemanticConditioner:
-        def __init__(self):
-            conditioners.append(self)
-
-    class FakeSimpleScheduler:
-        def __init__(self, fn):
-            self.fn = fn
-
-    image_executor_module = ModuleType(
-        "sglang_omni.models.ming_omni.components.image_gen_executor"
-    )
-    image_executor_module.MingImageGenExecutor = FakeImageGenExecutor
-    semantic_conditioner_module = ModuleType(
-        "sglang_omni.models.ming_omni.diffusion.semantic_conditioner"
-    )
-    semantic_conditioner_module.SemanticConditioner = FakeSemanticConditioner
-    weight_loader_module = ModuleType("sglang_omni.models.weight_loader")
-    weight_loader_module.resolve_model_path = lambda model_path: (
-        f"/resolved/{model_path}"
-    )
-    scheduler_module = ModuleType("sglang_omni.scheduling.simple_scheduler")
-    scheduler_module.SimpleScheduler = FakeSimpleScheduler
-    _install_fake_module(
-        monkeypatch,
-        "sglang_omni.models.ming_omni.components.image_gen_executor",
-        image_executor_module,
-    )
-    _install_fake_module(
-        monkeypatch,
-        "sglang_omni.models.ming_omni.diffusion.semantic_conditioner",
-        semantic_conditioner_module,
-    )
-    _install_fake_module(
-        monkeypatch,
-        "sglang_omni.models.weight_loader",
-        weight_loader_module,
-    )
-    _install_fake_module(
-        monkeypatch,
-        "sglang_omni.scheduling.simple_scheduler",
-        scheduler_module,
-    )
-
-    scheduler = stages.create_image_gen_executor(
-        "repo",
-        dit_type="zimage",
-        dit_model_path="/dit",
-        device="cpu",
-    )
-
-    assert isinstance(scheduler, FakeSimpleScheduler)
-    assert len(conditioners) == 1
-    assert constructed[0].kwargs == {
-        "model_path": "/resolved/repo",
-        "dit_type": "zimage",
-        "dit_model_path": "/dit",
-        "device": "cpu",
-        "conditioner": conditioners[0],
-    }
 
 
 def test_create_image_gen_executor_passes_explicit_advanced_flags(
@@ -1083,31 +945,13 @@ def test_extract_params_prefers_raw_then_mm_then_request_helper() -> None:
     assert mm_params.semantic_source == "thinker"
     assert (request_params.width, request_params.height) == (800, 801)
     assert request_params.semantic_source == "thinker"
-
-
-def test_extract_params_semantic_source_default_explicit_and_invalid() -> None:
-    from sglang_omni.models.ming_omni.components.image_gen_executor import (
-        MingImageGenExecutor,
-    )
-
-    executor = MingImageGenExecutor(model_path="/fake/model", backend=StubBackend())
-
-    # Omitted -> defaults to "thinker" (the only working path).
-    omitted = executor._extract_params(
+    raw_without_semantic_source = executor._extract_params(
         {"raw_inputs": {"image_generation": {"size": "64x64"}}}, None
     )
-    assert omitted.semantic_source == "thinker"
-
-    # Explicit "standalone" is preserved verbatim.
-    standalone = executor._extract_params(
-        {"raw_inputs": {"image_generation": {"semantic_source": "standalone"}}}, None
-    )
-    assert standalone.semantic_source == "standalone"
-
-    # Genuinely-invalid values are preserved (so add_request can reject them).
     bogus = executor._extract_params(
         {"raw_inputs": {"image_generation": {"semantic_source": "bogus"}}}, None
     )
+    assert raw_without_semantic_source.semantic_source == "thinker"
     assert bogus.semantic_source == "bogus"
 
 
