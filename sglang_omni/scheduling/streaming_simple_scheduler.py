@@ -39,7 +39,7 @@ class StreamingSimpleScheduler:
     streaming requests are kept out of the non-streaming batch path.
     """
 
-    _batch_stream_chunks: bool = False
+    _can_batch_stream_chunks: bool = False
     _stream_chunk_batch_max: int | None = None
 
     def __init__(
@@ -75,7 +75,6 @@ class StreamingSimpleScheduler:
         self._completed_non_streaming_request_ids: set[str] = set()
         self._state_lock = threading.RLock()
         self._abort_lock = threading.Lock()
-        self._stream_chunk_batch_hist: collections.Counter = collections.Counter()
 
     # ------------------------------------------------------------------
     # Hooks for subclasses
@@ -97,7 +96,10 @@ class StreamingSimpleScheduler:
         return []
 
     def on_stream_chunk_batch(self, items: list[tuple[str, StreamItem]]) -> None:
-        """Caller holds no lock and ignores any return; overrides lock and emit via outbox internally."""
+        """Caller holds no lock and ignores any return.
+
+        Subclasses own their locking and emit via outbox internally.
+        """
         for request_id, item in items:
             try:
                 self._handle_stream_chunk(request_id, item)
@@ -141,7 +143,6 @@ class StreamingSimpleScheduler:
 
     def stop(self) -> None:
         self._running = False
-        self._log_stream_chunk_batch_stats()
 
     def abort(self, request_id: str) -> None:
         self._record_aborted_request_id(request_id)
@@ -155,7 +156,7 @@ class StreamingSimpleScheduler:
             self._handle_new_request_batch(self._collect_new_request_batch(msg), loop)
             return
         if msg.type == "stream_chunk":
-            if self._batch_stream_chunks:
+            if self._can_batch_stream_chunks:
                 self._handle_stream_chunk_batch(self._collect_stream_chunk_batch(msg))
             else:
                 self._on_chunk(msg.request_id, msg.data)
@@ -434,6 +435,14 @@ class StreamingSimpleScheduler:
     # Streaming path
     # ------------------------------------------------------------------
 
+    def _validate_stream_chunk_item(self, request_id: str, item: Any) -> StreamItem:
+        if not isinstance(item, StreamItem):
+            raise TypeError(
+                f"{self.__class__.__name__} expected StreamItem for "
+                f"{request_id!r}, got {type(item).__name__}"
+            )
+        return item
+
     def _handle_streaming_new_request(self, request_id: str, payload: Any) -> None:
         with self._abort_lock:
             self._aborted_request_ids.discard(request_id)
@@ -446,36 +455,26 @@ class StreamingSimpleScheduler:
                 self._handle_stream_done(request_id)
 
     def _handle_stream_chunk(self, request_id: str, item: Any) -> None:
-        if not isinstance(item, StreamItem):
-            raise TypeError(
-                f"{self.__class__.__name__} expected StreamItem for "
-                f"{request_id!r}, got {type(item).__name__}"
-            )
+        item = self._validate_stream_chunk_item(request_id, item)
         with self._state_lock:
             for out in self.on_stream_chunk(request_id, item):
                 if not self._is_aborted(request_id):
                     self.outbox.put(out)
 
     def _handle_stream_chunk_batch(self, batch: list[IncomingMessage]) -> None:
-        items = [
-            (msg.request_id, msg.data)
-            for msg in batch
-            if not self._is_aborted(msg.request_id)
-        ]
+        items: list[tuple[str, StreamItem]] = []
+        for msg in batch:
+            if self._is_aborted(msg.request_id):
+                continue
+            try:
+                item = self._validate_stream_chunk_item(msg.request_id, msg.data)
+            except Exception as exc:
+                self._emit_error(msg.request_id, exc)
+                self.abort(msg.request_id)
+                continue
+            items.append((msg.request_id, item))
         if items:
-            self._stream_chunk_batch_hist[len(items)] += 1
             self.on_stream_chunk_batch(items)
-
-    def _log_stream_chunk_batch_stats(self) -> None:
-        if not self._stream_chunk_batch_hist:
-            return
-        total = sum(self._stream_chunk_batch_hist.values())
-        logger.info(
-            "%s stream-chunk batch stats: %d dispatches, sizes=%s",
-            self.__class__.__name__,
-            total,
-            dict(sorted(self._stream_chunk_batch_hist.items())),
-        )
 
     def _handle_stream_done(self, request_id: str) -> None:
         with self._state_lock:

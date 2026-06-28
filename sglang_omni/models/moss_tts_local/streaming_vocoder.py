@@ -287,7 +287,7 @@ class _LocalStreamState:
 class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
     """Decode MOSS-TTS Local codec rows incrementally on the v2 codec."""
 
-    _batch_stream_chunks = True
+    _can_batch_stream_chunks = True
 
     def __init__(
         self,

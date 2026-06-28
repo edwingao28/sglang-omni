@@ -447,7 +447,7 @@ def test_batched_coalescing_matches_offline_decode(monkeypatch) -> None:
         stream_chunk_frames=10,
         initial_chunk_frames=5,
     )
-    assert scheduler._batch_stream_chunks is True
+    assert scheduler._can_batch_stream_chunks is True
     assert (
         scheduler._stream_chunk_batch_max == 8
     )  # follows stream_slots, not max_batch_size
@@ -463,7 +463,6 @@ def test_batched_coalescing_matches_offline_decode(monkeypatch) -> None:
     # initial=5 (to 8); the per-chunk path emits [5, 10, 8]. Total frames + PCM identical.
     assert sizes == [8, 10, 5]
     assert sum(sizes) == 23
-    assert dict(scheduler._stream_chunk_batch_hist) == {8: 2, 7: 1}
 
     audio = _concat_stream_audio(messages, "req")
     np.testing.assert_array_equal(audio, reference_waveform(rows[:, 1:]).numpy())
@@ -483,15 +482,15 @@ def test_batched_step_capped_at_chunk_frames(monkeypatch) -> None:
     rows = _rows(16, seed=3)
     messages = _run_stream_batched(scheduler, rows)
 
-    # 16 same-request chunks coalesce into one drain (cap follows stream_slots=16, not 4).
-    assert dict(scheduler._stream_chunk_batch_hist) == {16: 1}
     sizes = [
         _decode_audio(m.data).shape[1] // SAMPLES_PER_FRAME
         for m in messages
         if m.type == "stream"
     ]
-    # pending=16 at the single pump, but each streaming step is capped at stream_chunk_frames=10
-    # (the CUDA-graph capture ceiling) — never the 16-frame off-graph overshoot.
+    # With cap=stream_slots=16, the first pump sees all 16 queued chunks. Each streaming
+    # step is capped at stream_chunk_frames=10 (the CUDA-graph capture ceiling), so the
+    # same pump emits 10 frames and re-pumps the remaining 6. If the drain cap fell back
+    # to max_batch_size=4, the boundaries would be [8, 8] instead.
     assert max(sizes) <= 10
     assert sizes == [10, 6]
     audio = _concat_stream_audio(messages, "req")
