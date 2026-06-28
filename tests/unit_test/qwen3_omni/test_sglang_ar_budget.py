@@ -319,8 +319,6 @@ def test_qwen_talker_ar_threads_explicit_generation_batch_policy(monkeypatch) ->
 
 def test_talker_ar_default_running_batch_width_is_32(monkeypatch) -> None:
     """talker_ar default max_running_requests is 32; a config override still wins."""
-    import sglang_omni.models.qwen3_omni.bootstrap as bootstrap_mod
-
     captured: list[dict[str, object]] = []
 
     def _fake_builder(model_path, context_length, **overrides):
@@ -335,7 +333,7 @@ def test_talker_ar_default_running_batch_width_is_32(monkeypatch) -> None:
 
     monkeypatch.setattr(qwen_stages, "build_sglang_server_args", _fake_builder)
     monkeypatch.setattr(
-        bootstrap_mod, "create_talker_scheduler", lambda *a, **k: object()
+        qwen_bootstrap, "create_talker_scheduler", lambda *a, **k: object()
     )
     monkeypatch.setattr(qwen_stages, "avail_gpu_mem", lambda gpu_id: 90.0)
     monkeypatch.setattr(
