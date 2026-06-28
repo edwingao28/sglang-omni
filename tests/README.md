@@ -65,6 +65,7 @@ tests/
     │   ├── test_pipeline.py
     │   ├── test_sampling_params.py
     │   ├── test_semantic_conditioner.py
+    │   ├── test_sglang_output_processor.py
     │   ├── test_streaming_decode.py
     │   ├── test_streaming_e2e_glue.py
     │   ├── test_streaming_segmenter.py
@@ -329,6 +330,8 @@ that happened to contain an older version of the test.
     `--image-gen-gpu`, `--enable-standalone-semantic-encoder`,
     `--enable-byt5-text-rendering`): variant selection, override ordering against
     the thinker TP range, config-file preservation, and flag-conflict guards
+  - sglang backend output processor hidden-states slicing (single vs. batched
+    rows), which feeds the thinker → image_gen DiT relay
   - stage factory and scheduler contracts (preprocessing, encoders, thinker, talker, decode)
   - thinker bootstrap registration and Ming model runner wiring
   - multimodal embed injection (per-modality consumed state, pad-value fallback, short-embeds detection)
