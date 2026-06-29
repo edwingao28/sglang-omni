@@ -427,16 +427,20 @@ def _run_stream_batched(
                 request_id, "stream_chunk", _stream_item(row, metadata, index)
             )
         )
-    while True:
-        msg = scheduler._next_message()
-        if msg is None:
-            break
-        scheduler._handle_message(msg, None)
+    _pump_queued_stream_chunks(scheduler)
     scheduler._on_done(request_id)
     scheduler._on_streaming_new_request(
         request_id, _terminal_payload(rows, request_id=request_id, params=params)
     )
     return _drain(scheduler)
+
+
+def _pump_queued_stream_chunks(scheduler) -> None:
+    while True:
+        msg = scheduler._next_message()
+        if msg is None:
+            break
+        scheduler._handle_message(msg, None)
 
 
 def test_batched_coalescing_matches_offline_decode(monkeypatch) -> None:
@@ -495,6 +499,107 @@ def test_batched_step_capped_at_chunk_frames(monkeypatch) -> None:
     assert sizes == [10, 6]
     audio = _concat_stream_audio(messages, "req")
     np.testing.assert_array_equal(audio, reference_waveform(rows[:, 1:]).numpy())
+
+
+def test_batched_coalescing_handles_two_streaming_lanes(monkeypatch) -> None:
+    processor = FakeProcessor()
+    codec = processor.audio_tokenizer
+    scheduler = _make_scheduler(
+        monkeypatch,
+        processor,
+        stream_slots=2,
+        stream_chunk_frames=3,
+        initial_chunk_frames=3,
+    )
+    rows_a = _rows(6, seed=4)
+    rows_b = _rows(6, seed=5)
+    metadata = _metadata()
+    chunk_id = 0
+    for index in range(6):
+        scheduler.inbox.put(
+            IncomingMessage(
+                "a", "stream_chunk", _stream_item(rows_a[index], metadata, chunk_id)
+            )
+        )
+        chunk_id += 1
+        scheduler.inbox.put(
+            IncomingMessage(
+                "b", "stream_chunk", _stream_item(rows_b[index], metadata, chunk_id)
+            )
+        )
+        chunk_id += 1
+
+    _pump_queued_stream_chunks(scheduler)
+    scheduler._on_done("a")
+    scheduler._on_streaming_new_request("a", _terminal_payload(rows_a, request_id="a"))
+    scheduler._on_done("b")
+    scheduler._on_streaming_new_request("b", _terminal_payload(rows_b, request_id="b"))
+    messages = _drain(scheduler)
+
+    stream_boundaries = [
+        (m.request_id, _decode_audio(m.data).shape[1] // SAMPLES_PER_FRAME)
+        for m in messages
+        if m.type == "stream"
+    ]
+    assert stream_boundaries == [("a", 3), ("b", 3), ("a", 3), ("b", 3)]
+    assert codec.frame_calls == 2
+    np.testing.assert_array_equal(
+        _concat_stream_audio(messages, "a"),
+        reference_waveform(rows_a[:, 1:]).numpy(),
+    )
+    np.testing.assert_array_equal(
+        _concat_stream_audio(messages, "b"),
+        reference_waveform(rows_b[:, 1:]).numpy(),
+    )
+
+
+def test_batched_ingest_failure_aborts_and_cleans_up_off_lock(monkeypatch) -> None:
+    processor = FakeProcessor()
+    scheduler = _make_scheduler(
+        monkeypatch,
+        processor,
+        stream_chunk_frames=2,
+        initial_chunk_frames=2,
+    )
+    cleanup_calls: list[str] = []
+    cleanup_saw_lock_owned: list[bool] = []
+
+    def cleanup(request_id: str) -> None:
+        is_owned = getattr(scheduler._state_lock, "_is_owned", lambda: False)
+        cleanup_saw_lock_owned.append(bool(is_owned()))
+        cleanup_calls.append(request_id)
+
+    monkeypatch.setattr(scheduler, "_cleanup_aborted_request", cleanup)
+    rows = _rows(2, seed=6)
+    metadata = _metadata()
+    scheduler.inbox.put(
+        IncomingMessage("ok", "stream_chunk", _stream_item(rows[0], metadata, 0))
+    )
+    scheduler.inbox.put(
+        IncomingMessage(
+            "bad",
+            "stream_chunk",
+            _stream_item(torch.tensor([7], dtype=torch.long), metadata, 1),
+        )
+    )
+    scheduler.inbox.put(
+        IncomingMessage("ok", "stream_chunk", _stream_item(rows[1], metadata, 2))
+    )
+
+    _pump_queued_stream_chunks(scheduler)
+    scheduler._on_done("ok")
+    scheduler._on_streaming_new_request("ok", _terminal_payload(rows, request_id="ok"))
+    messages = _drain(scheduler)
+
+    assert cleanup_calls == ["bad"]
+    assert cleanup_saw_lock_owned == [False]
+    assert scheduler._is_aborted("bad")
+    assert "bad" not in scheduler._stream_states
+    assert any(m.request_id == "bad" and m.type == "error" for m in messages)
+    np.testing.assert_array_equal(
+        _concat_stream_audio(messages, "ok"),
+        reference_waveform(rows[:, 1:]).numpy(),
+    )
 
 
 def test_initial_chunk_frames_request_override(monkeypatch) -> None:

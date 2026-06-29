@@ -429,8 +429,7 @@ class MossTTSLocalStreamingVocoderScheduler(StreamingSimpleScheduler):
                     self._ingest_chunk(request_id, item)
                 except Exception as exc:
                     self._emit_error(request_id, exc)
-                    self._record_aborted_request_id(request_id)
-                    self._clear_request_state(request_id, keep_aborted=True)
+                    self._abort_state(request_id)
                     failed.append(request_id)
             self._pump_streams()
         # Run the external abort callback off the GPU-serializing lock, matching the serving loop.

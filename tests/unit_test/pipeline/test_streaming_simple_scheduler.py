@@ -287,3 +287,17 @@ def test_stream_chunk_batch_validates_items_before_hook() -> None:
     assert [m.request_id for m in out if m.type == "stream"] == ["a", "c"]
     assert any(m.request_id == "bad" and m.type == "error" for m in out)
     assert scheduler._is_aborted("bad")
+
+
+def test_stream_chunk_batch_filters_request_aborted_during_validation() -> None:
+    scheduler = _DefaultBatchScheduler(max_batch_size=4)
+    scheduler.inbox.put(_raw_chunk("bad", "not-a-stream-item"))
+    scheduler.inbox.put(_chunk("c", "z"))
+
+    scheduler._handle_message(_chunk("bad", "x"), None)
+
+    out = _drain_results(scheduler)
+    assert [m.request_id for m in out if m.type == "stream"] == ["c"]
+    assert any(m.request_id == "bad" and m.type == "error" for m in out)
+    assert scheduler._is_aborted("bad")
+    assert "bad" not in scheduler.stream_state

@@ -101,6 +101,8 @@ class StreamingSimpleScheduler:
         Subclasses own their locking and emit via outbox internally.
         """
         for request_id, item in items:
+            if self._is_aborted(request_id):
+                continue
             try:
                 self._handle_stream_chunk(request_id, item)
             except Exception as exc:
@@ -145,9 +147,12 @@ class StreamingSimpleScheduler:
         self._running = False
 
     def abort(self, request_id: str) -> None:
+        self._abort_state(request_id)
+        self._cleanup_aborted_request(request_id)
+
+    def _abort_state(self, request_id: str) -> None:
         self._record_aborted_request_id(request_id)
         self._clear_request_state(request_id, keep_aborted=True)
-        self._cleanup_aborted_request(request_id)
 
     def _handle_message(
         self, msg: IncomingMessage, loop: asyncio.AbstractEventLoop
@@ -296,8 +301,8 @@ class StreamingSimpleScheduler:
     def _collect_stream_chunk_batch(
         self, first_msg: IncomingMessage
     ) -> list[IncomingMessage]:
-        """(wenyao) Front-pushback of the first non-chunk message preserves arrival order; no
-        blocking wait, so only already-queued chunks coalesce."""
+        """Front-pushback of the first non-chunk message preserves arrival order; no blocking
+        wait, so only already-queued chunks coalesce."""
         batch = [first_msg]
         cap = self._stream_chunk_batch_max or max(self._max_batch_size, 1)
         if cap <= 1:
@@ -473,6 +478,11 @@ class StreamingSimpleScheduler:
                 self.abort(msg.request_id)
                 continue
             items.append((msg.request_id, item))
+        items = [
+            (request_id, item)
+            for request_id, item in items
+            if not self._is_aborted(request_id)
+        ]
         if items:
             self.on_stream_chunk_batch(items)
 
