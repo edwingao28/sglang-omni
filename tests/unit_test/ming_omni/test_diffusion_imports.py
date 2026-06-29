@@ -20,6 +20,8 @@ def test_ming_diffusion_lightweight_modules_import() -> None:
         "sglang_omni.models.ming_omni.diffusion.bailing_moe_model",
         "sglang_omni.models.ming_omni.diffusion.byt5_encoder",
         "sglang_omni.models.ming_omni.diffusion.query_info",
+        "sglang_omni.models.ming_omni.diffusion.registry",
+        "sglang_omni.models.ming_omni.diffusion.sensenovau1_backend",
         "sglang_omni.models.ming_omni.diffusion.semantic_conditioner",
         "sglang_omni.models.ming_omni.diffusion.semantic_encoder",
         "sglang_omni.models.ming_omni.diffusion.zimage_backend",

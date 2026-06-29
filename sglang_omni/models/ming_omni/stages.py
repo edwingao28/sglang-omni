@@ -329,7 +329,14 @@ def create_image_gen_executor(
     device: str = "cuda",
     enable_standalone_semantic_encoder: bool = False,
     enable_byt5_text_rendering: bool = False,
+    tp_rank: int = 0,
+    tp_size: int = 1,
+    nccl_port: int | None = None,
 ):
+    # tp_rank / tp_size / nccl_port are injected by the mp runner for tp_size>1
+    # stages. The backend is not sharded yet (v1), so they are accepted and
+    # ignored here to avoid a TypeError; backend sharding is a future step.
+    del tp_rank, tp_size, nccl_port
     from sglang_omni.models.ming_omni.components.image_gen_executor import (
         MingImageGenExecutor,
     )

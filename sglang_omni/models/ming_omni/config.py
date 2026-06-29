@@ -206,6 +206,7 @@ def _image_gen_stage(
     dit_model_path: str | None = None,
     enable_standalone_semantic_encoder: bool = False,
     enable_byt5_text_rendering: bool = False,
+    tp_size: int = 1,
 ) -> StageConfig:
     factory_args = {"device": "cuda", "dit_type": dit_type}
     if dit_model_path is not None:
@@ -221,6 +222,7 @@ def _image_gen_stage(
         factory_args=factory_args,
         gpu=gpu,
         terminal=True,
+        tp_size=tp_size,
     )
 
 

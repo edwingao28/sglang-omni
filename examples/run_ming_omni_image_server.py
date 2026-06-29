@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
         "--dit-type",
         type=str,
         default="zimage",
-        choices=["zimage"],
+        choices=["zimage", "sensenovau1"],
         help="Image generation DiT backend",
     )
     parser.add_argument(

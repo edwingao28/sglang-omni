@@ -174,9 +174,17 @@ def test_create_backend_lazy_imports_zimage_and_rejects_unknown(
     )
 
     assert isinstance(_create_backend("zimage"), FakeZImageBackend)
-    with pytest.raises(ValueError, match="Unknown dit_type: 'sd3'.*zimage"):
-        _create_backend("sd3")
-    with pytest.raises(ValueError, match="Unknown dit_type: 'other'.*zimage"):
+
+    # The error message lists registry.available() dynamically, which now also
+    # includes the sensenovau1 backend.
+    from sglang_omni.models.ming_omni.diffusion import registry
+
+    assert "sensenovau1" in registry.available()
+    expected = ", ".join(registry.available())
+    with pytest.raises(
+        ValueError,
+        match=f"Unknown dit_type: 'other'. Must be one of: {expected}.",
+    ):
         _create_backend("other")
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-_MING_TP_STAGES = frozenset({"thinker", "image_encoder"})
+_MING_TP_STAGES = frozenset({"thinker", "image_encoder", "image_gen"})
 
 
 def validate_attention_tp_config(

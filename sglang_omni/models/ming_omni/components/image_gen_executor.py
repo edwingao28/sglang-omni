@@ -30,12 +30,15 @@ logger = logging.getLogger(__name__)
 
 
 def _create_backend(dit_type: str) -> DiffusionBackend:
-    """Instantiate a diffusion backend without importing backend modules eagerly."""
-    if dit_type == "zimage":
-        from sglang_omni.models.ming_omni.diffusion.zimage_backend import ZImageBackend
+    """Instantiate a diffusion backend without importing backend modules eagerly.
 
-        return ZImageBackend()
-    raise ValueError(f"Unknown dit_type: {dit_type!r}. Must be 'zimage'.")
+    Delegates to the lazy backend registry; the registry keeps each backend's
+    heavy import inside its loader and raises ``ValueError`` listing the
+    available backends for an unknown ``dit_type``.
+    """
+    from sglang_omni.models.ming_omni.diffusion import registry
+
+    return registry.get(dit_type)
 
 
 class MingImageGenExecutor:
@@ -96,6 +99,10 @@ class MingImageGenExecutor:
                 load_kwargs["load_semantic_encoder"] = True
             if self._enable_byt5_text_rendering:
                 load_kwargs["load_byt5_text_encoder"] = True
+        elif self._dit_type == "sensenovau1":
+            # SenseNova-U1 is self-contained (loads its own tokenizer + DiT);
+            # no extra framework-side load kwargs in v1.
+            pass
         self._backend.load_models(self._dit_model_path, device, **load_kwargs)
         logger.info("[IMG_GEN] Diffusion backend loaded in %.1fs", time.time() - t0)
 
