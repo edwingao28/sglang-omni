@@ -56,11 +56,11 @@
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
     <link rel="next" title="RL Admin Control" href="rl_admin_control.html" />
-    <link rel="prev" title="Communication" href="communication.html" />
+    <link rel="prev" title="Reference Encode Service" href="reference_encode_service.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.1.0" />
-    <meta name="docbuild:last-update" content="Jun 18, 2026"/>
+    <meta name="docbuild:last-update" content="Jul 07, 2026"/>
   </head>
   
   
@@ -188,6 +188,7 @@
 <li class="toctree-l1"><a class="reference internal" href="pipeline.html">Pipeline Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="config.html">Config</a></li>
 <li class="toctree-l1"><a class="reference internal" href="communication.html">Communication</a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference_encode_service.html">Reference Encode Service</a></li>
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">Request-level profiler</a></li>
 <li class="toctree-l1"><a class="reference internal" href="rl_admin_control.html">RL Admin Control</a></li>
 </ul>
@@ -517,9 +518,9 @@ first executable prefill / extend batch is selected.</p>
 <td><p><code class="docutils literal notranslate"><span class="pre">stage_first_stream_chunk_sent</span></code> (terminal stage → coordinator)</p></td>
 <td><p>same</p></td>
 </tr>
-<tr class="row-odd"><td><p>Talker request build start / end</p></td>
+<tr class="row-odd"><td><p>Talker request build execution start / end</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">scheduler_request_build_start</span></code> / <code class="docutils literal notranslate"><span class="pre">_end</span></code> (stage = talker)</p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">OmniScheduler.process_input_requests</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">OmniScheduler._run_request_builder</span></code></p></td>
 </tr>
 <tr class="row-even"><td><p>Talker prefill start</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">scheduler_prefill_start</span></code> (stage = talker)</p></td>
@@ -787,12 +788,12 @@ from “talker prefill start”.</p></li>
                   
 <div class="prev-next-area">
     <a class="left-prev"
-       href="communication.html"
+       href="reference_encode_service.html"
        title="previous page">
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">previous</p>
-        <p class="prev-next-title">Communication</p>
+        <p class="prev-next-title">Reference Encode Service</p>
       </div>
     </a>
     <a class="right-next"
@@ -865,7 +866,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Jun 18, 2026.
+  Last updated on Jul 07, 2026.
   <br/>
 </p>
   </div>
