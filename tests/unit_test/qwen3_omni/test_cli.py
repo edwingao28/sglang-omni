@@ -89,9 +89,9 @@ def _set_colocated_runtime(config: Qwen3OmniSpeechColocatedPipelineConfig) -> No
         "talker_ar": 0.35,
         "code2wav": 0.05,
     }.items():
-        _stage(
-            config, stage_name
-        ).runtime.resources.total_gpu_memory_fraction = fraction
+        _stage(config, stage_name).runtime.resources.total_gpu_memory_fraction = (
+            fraction
+        )
 
 
 @patch("sglang_omni.cli.serve.ConfigManager.from_model_path")
