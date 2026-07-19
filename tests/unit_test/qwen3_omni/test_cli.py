@@ -67,6 +67,7 @@ def _serve_kwargs(**overrides):
         thinker_cuda_graph="default",
         talker_cuda_graph="default",
         talker_partial_start="default",
+        talker_partial_start_min_chunks=None,
         thinker_torch_compile="default",
         talker_torch_compile="default",
         thinker_torch_compile_max_bs=None,
@@ -88,9 +89,9 @@ def _set_colocated_runtime(config: Qwen3OmniSpeechColocatedPipelineConfig) -> No
         "talker_ar": 0.35,
         "code2wav": 0.05,
     }.items():
-        _stage(config, stage_name).runtime.resources.total_gpu_memory_fraction = (
-            fraction
-        )
+        _stage(
+            config, stage_name
+        ).runtime.resources.total_gpu_memory_fraction = fraction
 
 
 @patch("sglang_omni.cli.serve.ConfigManager.from_model_path")
@@ -377,17 +378,29 @@ def test_partial_start_default_is_on():
 def test_partial_start_cli_override_can_disable_and_enable():
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
 
-    apply_partial_start_cli_overrides(config, talker_partial_start="off")
+    apply_partial_start_cli_overrides(
+        config,
+        talker_partial_start="off",
+        talker_partial_start_min_chunks=None,
+    )
     talker = next(stage for stage in config.stages if stage.name == "talker_ar")
     assert resolve_stage_factory_args(talker, config)["enable_partial_start"] is False
 
-    apply_partial_start_cli_overrides(config, talker_partial_start="on")
+    apply_partial_start_cli_overrides(
+        config,
+        talker_partial_start="on",
+        talker_partial_start_min_chunks=None,
+    )
     assert resolve_stage_factory_args(talker, config)["enable_partial_start"] is True
 
 
 def test_partial_start_cli_default_preserves_config_default():
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
-    apply_partial_start_cli_overrides(config, talker_partial_start="default")
+    apply_partial_start_cli_overrides(
+        config,
+        talker_partial_start="default",
+        talker_partial_start_min_chunks=None,
+    )
     talker = next(stage for stage in config.stages if stage.name == "talker_ar")
     assert resolve_stage_factory_args(talker, config)["enable_partial_start"] is True
 
@@ -395,7 +408,11 @@ def test_partial_start_cli_default_preserves_config_default():
 def test_partial_start_cli_invalid_mode_rejected():
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
     with pytest.raises(typer.BadParameter):
-        apply_partial_start_cli_overrides(config, talker_partial_start="bogus")
+        apply_partial_start_cli_overrides(
+            config,
+            talker_partial_start="bogus",
+            talker_partial_start_min_chunks=None,
+        )
 
 
 def test_partial_start_cli_rejects_unsupported_config_with_stable_message():
@@ -404,4 +421,51 @@ def test_partial_start_cli_rejects_unsupported_config_with_stable_message():
         typer.BadParameter,
         match="--talker-partial-start is not supported by Qwen3OmniPipelineConfig",
     ):
-        apply_partial_start_cli_overrides(config, talker_partial_start="on")
+        apply_partial_start_cli_overrides(
+            config,
+            talker_partial_start="on",
+            talker_partial_start_min_chunks=None,
+        )
+
+
+def test_partial_start_cli_threshold_reaches_resolved_talker_args():
+    config = Qwen3OmniSpeechColocatedPipelineConfig(model_path="dummy")
+
+    apply_partial_start_cli_overrides(
+        config,
+        talker_partial_start="on",
+        talker_partial_start_min_chunks=8,
+    )
+
+    talker = next(stage for stage in config.stages if stage.name == "talker_ar")
+    talker_args = resolve_stage_factory_args(talker, config)
+    assert talker_args["enable_partial_start"] is True
+    assert talker_args["partial_start_min_chunks"] == 8
+
+
+def test_partial_start_cli_threshold_rejects_below_safe_floor():
+    config = Qwen3OmniSpeechColocatedPipelineConfig(model_path="dummy")
+
+    with pytest.raises(
+        typer.BadParameter,
+        match="--talker-partial-start-min-chunks must be >= 3",
+    ):
+        apply_partial_start_cli_overrides(
+            config,
+            talker_partial_start="on",
+            talker_partial_start_min_chunks=2,
+        )
+
+
+def test_partial_start_cli_threshold_rejects_disabled_mode():
+    config = Qwen3OmniSpeechColocatedPipelineConfig(model_path="dummy")
+
+    with pytest.raises(
+        typer.BadParameter,
+        match="requires --talker-partial-start on",
+    ):
+        apply_partial_start_cli_overrides(
+            config,
+            talker_partial_start="off",
+            talker_partial_start_min_chunks=5,
+        )

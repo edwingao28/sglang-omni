@@ -767,10 +767,23 @@ def apply_partial_start_cli_overrides(
     pipeline_config: PipelineConfig,
     *,
     talker_partial_start: str,
+    talker_partial_start_min_chunks: int | None = None,
 ) -> PipelineConfig:
     mode = _normalize_stage_toggle_mode("talker_partial_start", talker_partial_start)
-    if mode == "default":
+    if mode == "default" and talker_partial_start_min_chunks is None:
         return pipeline_config
+    if talker_partial_start_min_chunks is not None:
+        from sglang_omni.models.qwen3_omni.config import MIN_PARTIAL_START_CHUNKS
+
+        if mode != "on":
+            raise typer.BadParameter(
+                "--talker-partial-start-min-chunks requires --talker-partial-start on"
+            )
+        if talker_partial_start_min_chunks < MIN_PARTIAL_START_CHUNKS:
+            raise typer.BadParameter(
+                "--talker-partial-start-min-chunks must be >= "
+                f"{MIN_PARTIAL_START_CHUNKS}"
+            )
     stage_name = _resolve_talker_stage(
         pipeline_config,
         flag_name="--talker-partial-start",
@@ -786,11 +799,10 @@ def apply_partial_start_cli_overrides(
                 "--talker-partial-start currently supports only Qwen3-Omni "
                 f"talker; stage {stage.name!r} uses factory {stage.factory!r}"
             )
-    _apply_factory_args_updates(
-        pipeline_config,
-        matching_stages,
-        {"enable_partial_start": mode == "on"},
-    )
+    updates: dict[str, object] = {"enable_partial_start": mode == "on"}
+    if talker_partial_start_min_chunks is not None:
+        updates["partial_start_min_chunks"] = talker_partial_start_min_chunks
+    _apply_factory_args_updates(pipeline_config, matching_stages, updates)
     return pipeline_config
 
 
@@ -1094,6 +1106,18 @@ def serve(
             ),
         ),
     ] = "default",
+    talker_partial_start_min_chunks: Annotated[
+        int | None,
+        typer.Option(
+            "--talker-partial-start-min-chunks",
+            "--talker_partial_start_min_chunks",
+            help=(
+                "Start the Qwen3-Omni talker after this many usable thinker "
+                "chunks. Requires --talker-partial-start on. Omit to use the "
+                "pipeline default."
+            ),
+        ),
+    ] = None,
     thinker_torch_compile: Annotated[
         str,
         typer.Option(
@@ -1108,8 +1132,7 @@ def serve(
             "--talker-torch-compile",
             "--talker_torch_compile",
             help=(
-                "torch.compile mode for supported SGLang talker stage: "
-                "default|on|off."
+                "torch.compile mode for supported SGLang talker stage: default|on|off."
             ),
         ),
     ] = "default",
@@ -1300,6 +1323,7 @@ def serve(
     merged_config = apply_partial_start_cli_overrides(
         merged_config,
         talker_partial_start=talker_partial_start,
+        talker_partial_start_min_chunks=talker_partial_start_min_chunks,
     )
 
     if _should_print_merged_config(colocate=colocate, log_level=log_level):
