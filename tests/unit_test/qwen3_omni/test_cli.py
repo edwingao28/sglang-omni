@@ -469,3 +469,17 @@ def test_partial_start_cli_threshold_rejects_disabled_mode():
             talker_partial_start="off",
             talker_partial_start_min_chunks=5,
         )
+
+
+def test_partial_start_cli_threshold_rejects_default_mode():
+    config = Qwen3OmniSpeechColocatedPipelineConfig(model_path="dummy")
+
+    with pytest.raises(
+        typer.BadParameter,
+        match="requires --talker-partial-start on",
+    ):
+        apply_partial_start_cli_overrides(
+            config,
+            talker_partial_start="default",
+            talker_partial_start_min_chunks=5,
+        )
