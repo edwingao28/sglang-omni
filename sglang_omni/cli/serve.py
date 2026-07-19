@@ -1132,7 +1132,8 @@ def serve(
             "--talker-torch-compile",
             "--talker_torch_compile",
             help=(
-                "torch.compile mode for supported SGLang talker stage: default|on|off."
+                "torch.compile mode for supported SGLang talker stage: "
+                "default|on|off."
             ),
         ),
     ] = "default",
