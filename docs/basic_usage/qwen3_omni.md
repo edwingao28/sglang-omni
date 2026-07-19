@@ -232,6 +232,24 @@ python examples/run_omni.py qwen3-speech-server \
 the global value for that stage. Values must be greater than `0` and less than
 `1`.
 
+To start the Qwen3-Omni Talker after the earliest supported three usable
+Thinker chunks, enable partial start and set its threshold explicitly:
+
+```bash
+sgl-omni serve \
+  --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct \
+  --config examples/configs/qwen3_omni_colocated_h100_bf16.yaml \
+  --colocate \
+  --talker-partial-start on \
+  --talker-partial-start-min-chunks 3 \
+  --port 8008
+```
+
+The minimum is three chunks because Talker prefill requires that layout.
+Supplying the threshold without `--talker-partial-start on` is rejected.
+This option does not change the default partial-start enablement of either
+the split or colocated topology.
+
 ## Single-GPU FP8 on H100/H20
 
 SGLang-Omni can also serve native FP8 Qwen3-Omni checkpoints. Native FP8 uses
