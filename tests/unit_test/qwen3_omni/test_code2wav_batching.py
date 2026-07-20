@@ -11,6 +11,10 @@ import torch
 from sglang_omni.models.qwen3_omni.components.code2wav_scheduler import (
     Code2WavScheduler,
 )
+from sglang_omni.models.qwen3_omni.components.code2wav_cuda_graph import (
+    Code2WavRunResult,
+    GraphKey,
+)
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.scheduling.messages import IncomingMessage
 from tests.unit_test.fixtures.qwen_fakes import FakeCode2WavModel
@@ -268,3 +272,72 @@ def test_one_participation_per_pump() -> None:
     state = scheduler._stream_states["req-1"]
     assert state.emitted == 6
     assert len(state.chunks) - state.emitted == 0
+
+
+class _StubGraphRunner:
+    def __init__(self) -> None:
+        self.calls: list[tuple[tuple[int, ...], bool]] = []
+
+    def run(self, codes: torch.Tensor, *, eligible: bool = True) -> Code2WavRunResult:
+        self.calls.append((tuple(codes.shape), eligible))
+        return Code2WavRunResult(
+            output=torch.zeros(codes.shape[0], 1, int(codes.shape[-1]) * 2),
+            execution_mode="cuda_graph",
+            key=GraphKey(
+                batch_size=int(codes.shape[0]), frames=int(codes.shape[-1])
+            ),
+            fallback_reason=None,
+        )
+
+
+def test_factory_flags_reach_scheduler(monkeypatch) -> None:
+    import sglang_omni.models.qwen3_omni.components.code2wav_scheduler as mod
+
+    monkeypatch.setattr(
+        mod,
+        "load_code2wav_model",
+        lambda path, *, device, dtype: FakeCode2WavModel(total_upsample=2),
+    )
+    scheduler = mod.create_code2wav_scheduler(
+        "fake-path",
+        device="cpu",
+        stream_chunk_size=2,
+        left_context_size=1,
+        enable_batching=True,
+        max_batch_wait_ms=250,
+        batch_floor=3,
+        batch_ceiling=4,
+    )
+    assert scheduler._enable_batching is True
+    assert scheduler._max_batch_wait_s == 0.25
+    assert scheduler._batch_floor == 3
+    assert scheduler._batch_ceiling == 4
+    assert scheduler._graph_runner is None
+    assert scheduler._can_batch_stream_chunks is True
+
+
+def test_forward_codes_uses_graph_runner() -> None:
+    runner = _StubGraphRunner()
+    scheduler = _make_batching_scheduler(graph_runner=runner)
+    codes = torch.zeros(1, 2, 2, dtype=torch.long)
+    wav, meta = scheduler._forward_codes(codes, graph_eligible=True)
+    assert runner.calls == [((1, 2, 2), True)]
+    assert meta == {
+        "execution_mode": "cuda_graph",
+        "graph_key": {"batch_size": 1, "frames": 2},
+        "fallback_reason": None,
+    }
+    assert tuple(wav.shape) == (1, 1, 4)
+    scheduler._forward_codes(codes, graph_eligible=False)
+    assert runner.calls[-1] == ((1, 2, 2), False)
+
+
+def test_forward_codes_eager_without_runner() -> None:
+    scheduler = _make_batching_scheduler()
+    codes = torch.zeros(1, 2, 2, dtype=torch.long)
+    _, meta = scheduler._forward_codes(codes, graph_eligible=True)
+    assert meta == {
+        "execution_mode": "eager",
+        "graph_key": None,
+        "fallback_reason": None,
+    }

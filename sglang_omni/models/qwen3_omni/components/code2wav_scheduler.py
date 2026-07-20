@@ -6,6 +6,7 @@ runs vocoder incrementally, outputs final audio via outbox.
 """
 from __future__ import annotations
 
+import json
 import logging
 import queue
 import time
@@ -15,6 +16,10 @@ from typing import Any, Mapping
 import numpy as np
 import torch
 
+from sglang_omni.models.qwen3_omni.components.code2wav_cuda_graph import (
+    Code2WavCudaGraphRunner,
+    Code2WavRunResult,
+)
 from sglang_omni.profiler.event_recorder import emit as _emit_event
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.streaming_vocoder import StreamingVocoderBase
@@ -190,15 +195,28 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
     def _forward_codes(
         self, codes: torch.Tensor, *, graph_eligible: bool
     ) -> tuple[torch.Tensor, dict[str, Any]]:
-        del graph_eligible
         with torch.no_grad():
             if self._device.type == "cuda":
                 torch.cuda.set_device(self._device)
-            wav = self._model(codes)
-        return wav, {
-            "execution_mode": "eager",
-            "graph_key": None,
-            "fallback_reason": None,
+            if self._graph_runner is None:
+                result = Code2WavRunResult(
+                    output=self._model(codes),
+                    execution_mode="eager",
+                    key=None,
+                    fallback_reason=None,
+                )
+            else:
+                result = self._graph_runner.run(codes, eligible=graph_eligible)
+        graph_key = None
+        if result.key is not None:
+            graph_key = {
+                "batch_size": int(result.key.batch_size),
+                "frames": int(result.key.frames),
+            }
+        return result.output, {
+            "execution_mode": result.execution_mode,
+            "graph_key": graph_key,
+            "fallback_reason": result.fallback_reason,
         }
 
     def _batch_deadline(self) -> float | None:
@@ -369,14 +387,47 @@ def create_code2wav_scheduler(
     gpu_id: int | None = None,
     stream_chunk_size: int = 10,
     left_context_size: int = 25,
+    enable_batching: bool = False,
+    max_batch_wait_ms: int = 0,
+    batch_floor: int = 2,
+    batch_ceiling: int = 8,
+    enable_cuda_graph: bool = False,
+    total_gpu_memory_fraction: float | None = None,
 ):
     """Factory: returns Code2WavScheduler."""
     if gpu_id is not None:
         device = f"cuda:{gpu_id}"
+    concrete_device = torch.device(device)
+    if concrete_device.type == "cuda" and concrete_device.index is None:
+        concrete_device = torch.device("cuda", torch.cuda.current_device())
+    device = str(concrete_device)
     model = load_code2wav_model(model_path, device=device, dtype=dtype)
+    graph_runner = None
+    if enable_cuda_graph:
+        # Note (wenyao): build() captures and warms up before the stage goes
+        # ready; build failure disables the runner entirely (eager fallback).
+        graph_runner = Code2WavCudaGraphRunner.build(
+            model,
+            device=concrete_device,
+            num_quantizers=int(model.config.num_quantizers),
+            total_gpu_memory_fraction=total_gpu_memory_fraction,
+        )
+        logger.info(
+            "Code2Wav CUDA graph startup stats=%s",
+            json.dumps(
+                graph_runner.stats(),
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
     return Code2WavScheduler(
         model,
         device=device,
         stream_chunk_size=stream_chunk_size,
         left_context_size=left_context_size,
+        enable_batching=enable_batching,
+        max_batch_wait_ms=max_batch_wait_ms,
+        batch_floor=batch_floor,
+        batch_ceiling=batch_ceiling,
+        graph_runner=graph_runner,
     )
