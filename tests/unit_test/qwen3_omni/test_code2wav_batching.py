@@ -341,3 +341,47 @@ def test_forward_codes_eager_without_runner() -> None:
         "graph_key": None,
         "fallback_reason": None,
     }
+
+
+def test_batch_events_emitted(monkeypatch) -> None:
+    import sglang_omni.models.qwen3_omni.components.code2wav_scheduler as mod
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        mod,
+        "_emit_event",
+        lambda **kw: events.append((kw["event_name"], kw["metadata"])),
+    )
+
+    class _ActiveRecorder:
+        def is_active(self) -> bool:
+            return True
+
+    monkeypatch.setattr(mod, "_get_recorder", lambda: _ActiveRecorder())
+
+    scheduler = _make_batching_scheduler(max_batch_wait_ms=1000, batch_floor=2)
+    _feed_batch(scheduler, [("req-a", 1), ("req-a", 2)])
+    _feed_batch(scheduler, [("req-b", 3), ("req-b", 4)])
+    _drain_outbox(scheduler)
+    events.clear()
+
+    _feed_batch(scheduler, [("req-a", 5), ("req-a", 6), ("req-b", 7), ("req-b", 8)])
+
+    batch_events = [
+        (name, meta)
+        for name, meta in events
+        if name in ("code2wav_batch_start", "code2wav_batch_end")
+    ]
+    assert [name for name, _ in batch_events] == [
+        "code2wav_batch_start",
+        "code2wav_batch_end",
+    ]
+    start_meta = batch_events[0][1]
+    end_meta = batch_events[1][1]
+    assert start_meta["fire_reason"] == "floor"
+    assert start_meta["batch_size"] == 2
+    assert start_meta["subbatch_decomposition"] == [2]
+    assert start_meta["bucket"] == [1, 3]
+    assert start_meta["due_bucket_count"] == 1
+    assert end_meta["audio_samples"] > 0
+    assert end_meta["execution_mode"] == "eager"
