@@ -7,6 +7,8 @@ runs vocoder incrementally, outputs final audio via outbox.
 from __future__ import annotations
 
 import logging
+import queue
+import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -96,6 +98,8 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         self._drain_mode = False
         self._last_fire_reason: str | None = None
         self._can_batch_stream_chunks = self._enable_batching
+        if self._enable_batching:
+            self._stream_chunk_batch_max = self._batch_ceiling
 
     def is_streaming_payload(self, payload: StagePayload) -> bool:
         del payload
@@ -195,6 +199,31 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
             "graph_key": None,
             "fallback_reason": None,
         }
+
+    def _batch_deadline(self) -> float | None:
+        return None
+
+    def _collect_stream_chunk_batch(self, first_msg):
+        batch = super()._collect_stream_chunk_batch(first_msg)
+        deadline = self._batch_deadline()
+        if deadline is None:
+            return batch
+        cap = self._stream_chunk_batch_max or max(self._max_batch_size, 1)
+        while len(batch) < cap:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                msg = self.inbox.get(timeout=remaining)
+            except queue.Empty:
+                break
+            if msg.type != "stream_chunk":
+                self._pending_messages.appendleft(msg)
+                break
+            if self._is_aborted(msg.request_id):
+                continue
+            batch.append(msg)
+        return batch
 
     def _ready(self, state: Code2WavStreamState) -> int:
         return len(state.chunks) - state.emitted
