@@ -25,8 +25,9 @@ class _ThinkerLaunchBuf:
     """Resolve payload for one launched thinker decode step.
 
     ``tokens`` is the pinned host staging of ``next_token_ids``; ``aux_hidden`` is
-    a launch-time DEVICE clone of the talker hidden-capture tuple (or None for a
-    text-only batch). Snapshotting at launch is what makes speech async-safe: the
+    a launch-time DEVICE clone of the talker hidden-capture tuple (None for a
+    text-only batch, where ``_text_only_capture_guard`` blanked layers_to_capture so
+    the hook never wrote a capture). Snapshotting at launch is what makes speech async-safe: the
     live ``_captured_aux_hidden_states`` side channel is single-slot, so launch(N)
     overwrites it before resolve(N-1) reads (item 1.4).
     """
@@ -397,8 +398,8 @@ class ThinkerModelRunner(ModelRunner):
         return self.tp_worker.model_runner.sample(logits_output, forward_batch)
 
     def _snapshot_aux_hidden(self):
-        # note (Wenyao Gao): device clone is mandatory — the captured tuple aliases
-        # live/graph-static activation buffers a later launch/replay overwrites.
+        # Note:(Wenyao Gao) device clone is mandatory — the captured tuple aliases
+        # live/graph-static activation buffers a later launch/replay overwrites
         aux = self.model._captured_aux_hidden_states
         self.model._captured_aux_hidden_states = None
         if aux is None:
@@ -428,6 +429,11 @@ class ThinkerModelRunner(ModelRunner):
             return
         n = len(requests)
         result.next_token_ids = launch_buf.tokens[:n].to(torch.long).clone()
+        # Note:(Wenyao Gao) slot has three writers (hook, output-proc clear, this
+        # restore); non-None here means the resolve/finalize adjacency contract broke
+        assert (
+            self.model._captured_aux_hidden_states is None
+        ), "aux side channel not cleared before resolve restore"
         # note (Wenyao Gao): restore the launch-time snapshot onto the side channel
         # the output processor reads in _finalize, so resolve(N-1) sees step N-1
         # hidden even after launch(N) already overwrote the live capture.

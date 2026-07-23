@@ -19,8 +19,8 @@ from sglang_omni.model_runner.base import _PendingStep
 from sglang_omni.model_runner.thinker_model_runner import ThinkerModelRunner
 from sglang_omni.scheduling.types import SchedulerOutput
 
-# The sglang_backend package __init__ pulls in heavy sglang.srt cache modules the
-# unit shim does not fake; load the output processor straight from its file.
+# Note:(Wenyao Gao) load the output processor straight from its file: the package
+# __init__ pulls heavy sglang.srt cache modules the unit shim does not fake
 _OP_PATH = (
     Path(__file__).resolve().parents[3]
     / "sglang_omni/scheduling/sglang_backend/output_processor.py"
@@ -45,8 +45,8 @@ def _expected(step: int, row: int) -> torch.Tensor:
 def _runner(model, rows: int) -> ThinkerModelRunner:
     r = object.__new__(ThinkerModelRunner)
     r.model = model
-    # Pre-seed non-pinned host buffers so _async_host_buf skips its pinned alloc
-    # (pin_memory needs CUDA, absent on the unit host) while still ping-ponging.
+    # Note:(Wenyao Gao) pre-seed non-pinned host buffers: pin_memory needs CUDA,
+    # absent on the unit host
     r._th_host_bufs = [torch.zeros(rows, dtype=torch.long) for _ in range(2)]
     r._th_slot = 0
     r._async_query_hit = 0
@@ -100,9 +100,8 @@ def test_resolve_reads_launch_snapshot_not_next_launch():
     result = _result(rows)
     launch_buf = runner.post_decode_launch(result, None, [None] * rows)
 
-    # launch(N) overwrites the single-slot side channel with step-2 hidden before
-    # resolve(N-1) runs.
     model._captured_aux_hidden_states = _aux(step=2, rows=rows)
+    runner.post_decode_launch(_result(rows), None, [None] * rows)
     runner.post_decode_resolve(launch_buf, result, None, None, [None] * rows)
 
     rids = ["r0", "r1"]
@@ -113,7 +112,6 @@ def test_resolve_reads_launch_snapshot_not_next_launch():
         hidden = outputs[rid].extra["hidden_states"]
         assert torch.equal(hidden["embed"], _expected(1, row))
         assert torch.equal(hidden[24], _expected(1, row))
-    # side channel consumed by the read; never leaked step-2 hidden.
     assert model._captured_aux_hidden_states is None
 
 
@@ -126,6 +124,7 @@ def test_retract_between_launch_and_resolve_keeps_neighbors_aligned():
     launch_buf = runner.post_decode_launch(result, None, [None] * rows)
 
     model._captured_aux_hidden_states = _aux(step=2, rows=rows)
+    runner.post_decode_launch(_result(rows), None, [None] * rows)
 
     sched_reqs = [
         _sched_req("r0"),
@@ -148,7 +147,54 @@ def test_retract_between_launch_and_resolve_keeps_neighbors_aligned():
     outputs = mr_output.outputs
     assert torch.equal(outputs["r0"].extra["hidden_states"]["embed"], _expected(1, 0))
     assert torch.equal(outputs["r2"].extra["hidden_states"]["embed"], _expected(1, 2))
-    # retracted row is skipped (no step advance); neighbors advance normally.
     assert sched_reqs[1].data.generation_steps == 0
     assert sched_reqs[0].data.generation_steps == 1
     assert sched_reqs[2].data.generation_steps == 1
+
+
+def test_snapshot_clones_against_in_place_capture_mutation():
+    # Note:(Wenyao Gao) in-place mutation (not reassignment) is what a graph replay
+    # does to the aliased buffers — only this catches a missing .clone()
+    rows = 2
+    step1 = _aux(step=1, rows=rows)
+    model = _model(step1)
+    runner = _runner(model, rows)
+    result = _result(rows)
+    launch_buf = runner.post_decode_launch(result, None, [None] * rows)
+
+    for t in step1:
+        t.mul_(0)
+
+    for layer in launch_buf.aux_hidden:
+        assert torch.equal(layer, _aux(1, rows)[0])
+
+    runner.post_decode_resolve(launch_buf, result, None, None, [None] * rows)
+    rids = ["r0", "r1"]
+    outputs = _output_processor(model).process(
+        result, _sched_output([_sched_req(r) for r in rids])
+    )
+    for row, rid in enumerate(rids):
+        hidden = outputs[rid].extra["hidden_states"]
+        assert torch.equal(hidden["embed"], _expected(1, row))
+        assert torch.equal(hidden[24], _expected(1, row))
+
+
+def test_text_only_none_capture_launch_resolve_finalize():
+    rows = 2
+    model = _model(None)
+    runner = _runner(model, rows)
+    result = _result(rows)
+    launch_buf = runner.post_decode_launch(result, None, [None] * rows)
+    assert launch_buf.aux_hidden is None
+    assert model._captured_aux_hidden_states is None
+
+    runner.post_decode_resolve(launch_buf, result, None, None, [None] * rows)
+    assert model._captured_aux_hidden_states is None
+
+    rids = ["r0", "r1"]
+    outputs = _output_processor(model).process(
+        result, _sched_output([_sched_req(r) for r in rids])
+    )
+    for rid in rids:
+        assert rid in outputs
+        assert outputs[rid].extra is None
