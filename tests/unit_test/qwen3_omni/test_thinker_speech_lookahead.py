@@ -19,7 +19,7 @@ from sglang_omni.model_runner.base import _PendingStep
 from sglang_omni.model_runner.thinker_model_runner import ThinkerModelRunner
 from sglang_omni.scheduling.types import SchedulerOutput
 
-# Note:(Wenyao Gao) load the output processor straight from its file: the package
+# Note (wenyao): load the output processor straight from its file: the package
 # __init__ pulls heavy sglang.srt cache modules the unit shim does not fake
 _OP_PATH = (
     Path(__file__).resolve().parents[3]
@@ -45,7 +45,7 @@ def _expected(step: int, row: int) -> torch.Tensor:
 def _runner(model, rows: int) -> ThinkerModelRunner:
     r = object.__new__(ThinkerModelRunner)
     r.model = model
-    # Note:(Wenyao Gao) pre-seed non-pinned host buffers: pin_memory needs CUDA,
+    # Note (wenyao): pre-seed non-pinned host buffers: pin_memory needs CUDA,
     # absent on the unit host
     r._th_host_bufs = [torch.zeros(rows, dtype=torch.long) for _ in range(2)]
     r._th_slot = 0
@@ -153,7 +153,7 @@ def test_retract_between_launch_and_resolve_keeps_neighbors_aligned():
 
 
 def test_snapshot_clones_against_in_place_capture_mutation():
-    # Note:(Wenyao Gao) in-place mutation (not reassignment) is what a graph replay
+    # Note (wenyao): in-place mutation (not reassignment) is what a graph replay
     # does to the aliased buffers — only this catches a missing .clone()
     rows = 2
     step1 = _aux(step=1, rows=rows)

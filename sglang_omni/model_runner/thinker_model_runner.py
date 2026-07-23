@@ -398,7 +398,7 @@ class ThinkerModelRunner(ModelRunner):
         return self.tp_worker.model_runner.sample(logits_output, forward_batch)
 
     def _snapshot_aux_hidden(self):
-        # Note:(Wenyao Gao) device clone is mandatory — the captured tuple aliases
+        # Note (wenyao): device clone is mandatory — the captured tuple aliases
         # live/graph-static activation buffers a later launch/replay overwrites
         aux = self.model._captured_aux_hidden_states
         self.model._captured_aux_hidden_states = None
@@ -429,7 +429,7 @@ class ThinkerModelRunner(ModelRunner):
             return
         n = len(requests)
         result.next_token_ids = launch_buf.tokens[:n].to(torch.long).clone()
-        # Note:(Wenyao Gao) slot has three writers (hook, output-proc clear, this
+        # Note (wenyao): slot has three writers (hook, output-proc clear, this
         # restore); non-None here means the resolve/finalize adjacency contract broke
         assert (
             self.model._captured_aux_hidden_states is None
