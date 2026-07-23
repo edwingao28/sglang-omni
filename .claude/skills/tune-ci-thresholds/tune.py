@@ -195,9 +195,11 @@ def match_metric(name, nested):
         return "cp_cer_percent"
     if "DELTA_CER_PERCENT" in name:
         return "delta_cer_percent"
-    # Non-streaming uses MOSS_TD_N_ABOVE_50_CER_REF (+ slack-derived MAX).
+    # Non-streaming uses *_N_ABOVE_50_CER_REF (+ slack-derived MAX).
     # Streaming MAX is in _FIXED_THRESHOLD_SYMBOLS and never matches here.
-    if "N_ABOVE_50_CER_MAX" in name:
+    # Match REF so discover/apply calibrate the reference; slack-derived MAX
+    # is skipped separately via _slack_derived_threshold_names.
+    if "N_ABOVE_50_CER_REF" in name or "N_ABOVE_50_CER_MAX" in name:
         return "n_above_50_pct_cer"
     # DER calibrates the reference constant (test derives the MAX via slack),
     # so match the *_REF symbol; the computed *_MAX literal is left unmatched.
@@ -441,7 +443,7 @@ def environment_fingerprint(py: str, cfg: dict, versions: dict) -> dict:
     ])
     topology = _command_output(["nvidia-smi", "topo", "-m"])
     env_keys = (
-        "HOME", "OMNI_CI_HOME", "HF_HOME", "MODELSCOPE_CACHE",
+        "HOME", "OMNI_CI_HOME", "HF_HOME", "HF_HUB_DISABLE_XET",
         "XDG_CACHE_HOME", "HF_ENDPOINT", "TORCHINDUCTOR_CACHE_DIR",
         "FLASHINFER_DISABLE_VERSION_CHECK", "SEEDTTS_SIM_CACHE_DIR",
         "TUNE_GPU_INCLUDE", "TUNE_GPU_EXCLUDE", "LD_LIBRARY_PATH",
