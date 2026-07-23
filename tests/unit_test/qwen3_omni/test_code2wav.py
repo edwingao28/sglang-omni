@@ -13,7 +13,6 @@ import torch
 
 from sglang_omni.models.qwen3_omni.components import code2wav_scheduler
 from sglang_omni.models.qwen3_omni.components.code2wav_cuda_graph import (
-    CODE2WAV_GRAPH_KEYS,
     Code2WavRunResult,
     GraphKey,
 )
@@ -23,6 +22,10 @@ from sglang_omni.models.qwen3_omni.components.code2wav_scheduler import (
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.scheduling.messages import IncomingMessage
 from tests.unit_test.fixtures.qwen_fakes import FakeCode2WavModel, make_qwen_payload
+
+_DEFAULT_GRAPH_KEYS = tuple(
+    GraphKey(batch_size=1, frames=frames) for frames in (10, 20, 30, 35)
+)
 
 
 class _FactoryModel(FakeCode2WavModel):
@@ -48,7 +51,7 @@ class _FakeCudaGraphRunner:
             raise self.replay_error
         output = self.model(codes)
         key = GraphKey(batch_size=int(codes.shape[0]), frames=int(codes.shape[-1]))
-        if eligible and key in CODE2WAV_GRAPH_KEYS:
+        if eligible and key in _DEFAULT_GRAPH_KEYS:
             return Code2WavRunResult(output, "cuda_graph", key, None)
         if eligible:
             return Code2WavRunResult(output, "eager", key, "key_miss")
@@ -150,11 +153,33 @@ def test_qwen_code2wav_enabled_factory_rejects_missing_typed_budget_before_load(
     assert load_calls == 0
 
 
-def test_qwen_code2wav_enabled_factory_normalizes_device_once_and_uses_budget(
+@pytest.mark.parametrize(
+    ("stream_chunk_size", "left_context_size", "expected_frames"),
+    [
+        (10, 25, (10, 20, 30, 35)),
+        (20, 25, (20, 40, 45)),
+        (6, 0, (6,)),
+    ],
+)
+def test_qwen_code2wav_serial_threshold_graph_keys_follow_scheduler_windows(
+    stream_chunk_size: int,
+    left_context_size: int,
+    expected_frames: tuple[int, ...],
+) -> None:
+    assert code2wav_scheduler._serial_threshold_graph_keys(
+        stream_chunk_size,
+        left_context_size,
+    ) == tuple(GraphKey(batch_size=1, frames=frames) for frames in expected_frames)
+
+
+def test_qwen_code2wav_enabled_factory_normalizes_device_and_derives_graph_keys(
     monkeypatch,
     caplog,
 ) -> None:
     model = _FactoryModel(num_quantizers=12)
+    expected_graph_keys = tuple(
+        GraphKey(batch_size=1, frames=frames) for frames in (20, 40, 45)
+    )
     runner = SimpleNamespace(
         stats=lambda: {
             "enabled": True,
@@ -162,10 +187,10 @@ def test_qwen_code2wav_enabled_factory_normalizes_device_once_and_uses_budget(
             "graph_contract": {
                 "keys": [
                     {"batch_size": key.batch_size, "frames": key.frames}
-                    for key in CODE2WAV_GRAPH_KEYS
+                    for key in expected_graph_keys
                 ]
             },
-            "build": {"published_graph_count": 4},
+            "build": {"published_graph_count": 3},
         }
     )
     load_call: dict = {}
@@ -196,6 +221,8 @@ def test_qwen_code2wav_enabled_factory_normalizes_device_once_and_uses_budget(
             "dummy",
             enable_cuda_graph=True,
             total_gpu_memory_fraction=0.02,
+            stream_chunk_size=20,
+            left_context_size=25,
         )
 
     assert model.eval_calls == 1
@@ -209,8 +236,11 @@ def test_qwen_code2wav_enabled_factory_normalizes_device_once_and_uses_budget(
         "device": torch.device("cuda:3"),
         "num_quantizers": 12,
         "total_gpu_memory_fraction": 0.02,
+        "graph_keys": expected_graph_keys,
     }
     assert scheduler._device == torch.device("cuda:3")
+    assert scheduler._stream_chunk_size == 20
+    assert scheduler._left_context_size == 25
     assert scheduler._cuda_graph_runner is runner
     stats_record = next(
         record

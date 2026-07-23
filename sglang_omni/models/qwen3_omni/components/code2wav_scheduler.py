@@ -17,6 +17,7 @@ import torch
 from sglang_omni.models.qwen3_omni.components.code2wav_cuda_graph import (
     Code2WavCudaGraphRunner,
     Code2WavRunResult,
+    GraphKey,
 )
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.profiler.event_recorder import emit as _emit_event
@@ -27,6 +28,25 @@ from sglang_omni.scheduling.streaming_simple_scheduler import StreamingSimpleSch
 from sglang_omni.utils.audio_payload import audio_waveform_payload
 
 logger = logging.getLogger(__name__)
+
+
+def _serial_threshold_graph_keys(
+    stream_chunk_size: int,
+    left_context_size: int,
+) -> tuple[GraphKey, ...]:
+    # Each serial threshold decode advances by one chunk while its context grows
+    # to the configured cap.
+    frames = (
+        *range(
+            stream_chunk_size,
+            stream_chunk_size + left_context_size,
+            stream_chunk_size,
+        ),
+        stream_chunk_size + left_context_size,
+    )
+    return tuple(
+        GraphKey(batch_size=1, frames=window_frames) for window_frames in frames
+    )
 
 
 def load_code2wav_model(
@@ -394,6 +414,8 @@ def create_code2wav_scheduler(
     if concrete_device.type == "cuda" and concrete_device.index is None:
         concrete_device = torch.device("cuda", torch.cuda.current_device())
     device = str(concrete_device)
+    stream_chunk_size = max(int(stream_chunk_size), 1)
+    left_context_size = max(int(left_context_size), 0)
     model = load_code2wav_model(model_path, device=device, dtype=dtype)
     cuda_graph_runner = None
     if enable_cuda_graph:
@@ -402,6 +424,10 @@ def create_code2wav_scheduler(
             device=concrete_device,
             num_quantizers=int(model.config.num_quantizers),
             total_gpu_memory_fraction=total_gpu_memory_fraction,
+            graph_keys=_serial_threshold_graph_keys(
+                stream_chunk_size,
+                left_context_size,
+            ),
         )
         logger.info(
             "Code2Wav CUDA graph startup stats=%s",

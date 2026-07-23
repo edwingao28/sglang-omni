@@ -189,8 +189,9 @@ When replay is enabled, a custom Code2Wav stage must define
 `runtime.resources.total_gpu_memory_fraction`; startup rejects a missing typed
 budget before loading the model.
 
-The feature captures only the current serial serving windows
-`B1/T{10,20,30,35}`. Unsupported shapes and final stream tails run eagerly.
+The feature derives the exact `B=1` threshold windows from
+`stream_chunk_size` and `left_context_size`; the defaults capture
+`T{10,20,30,35}`. Unsupported shapes and final stream tails run eagerly.
 Capture-time incompatibilities also fall back to eager execution.
 
 For manual multi-GPU placement, use the example script:

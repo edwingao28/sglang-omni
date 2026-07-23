@@ -26,11 +26,6 @@ class GraphKey:
     frames: int
 
 
-CODE2WAV_GRAPH_KEYS = tuple(
-    GraphKey(batch_size=1, frames=frames) for frames in (10, 20, 30, 35)
-)
-
-
 @dataclass(frozen=True, slots=True)
 class Code2WavRunResult:
     """Result metadata for either an exact graph replay or eager fallback.
@@ -159,6 +154,7 @@ class Code2WavCudaGraphRunner:
         *,
         device: str | torch.device,
         num_quantizers: int,
+        graph_keys: tuple[GraphKey, ...],
         cuda_api: Any,
     ) -> None:
         self._model = model
@@ -168,6 +164,7 @@ class Code2WavCudaGraphRunner:
         self._num_quantizers = int(num_quantizers)
         if self._num_quantizers <= 0:
             raise ValueError("Code2Wav CUDA graphs require a positive quantizer count")
+        self._graph_keys = graph_keys
         self._owner_pid = os.getpid()
         self._cuda = cuda_api
         self._graphs: dict[GraphKey, _CapturedGraph] = {}
@@ -192,14 +189,16 @@ class Code2WavCudaGraphRunner:
         device: str | torch.device,
         num_quantizers: int,
         total_gpu_memory_fraction: float | None,
+        graph_keys: tuple[GraphKey, ...],
         cuda_api: Any | None = None,
     ) -> Code2WavCudaGraphRunner:
-        """Build the four serving-reachable serial graphs."""
+        """Build the configured serving-reachable serial graphs."""
 
         runner = cls(
             model,
             device=device,
             num_quantizers=num_quantizers,
+            graph_keys=graph_keys,
             cuda_api=_TorchCudaApi() if cuda_api is None else cuda_api,
         )
         runner._build(total_gpu_memory_fraction)
@@ -234,7 +233,7 @@ class Code2WavCudaGraphRunner:
 
                 pool = self._cuda.graph_pool_handle()
                 capture_stream = self._cuda.new_stream(self._device)
-                for key in reversed(CODE2WAV_GRAPH_KEYS):
+                for key in reversed(self._graph_keys):
                     self._build_stats["attempted_graph_count"] += 1
                     temporary[key] = self._capture_graph(
                         key,
@@ -285,7 +284,7 @@ class Code2WavCudaGraphRunner:
 
         self._pool = pool
         self._capture_stream = capture_stream
-        self._graphs = {key: temporary[key] for key in CODE2WAV_GRAPH_KEYS}
+        self._graphs = {key: temporary[key] for key in self._graph_keys}
         self._build_stats["published_graph_count"] = len(self._graphs)
         self._enabled = True
         logger.info(
@@ -515,7 +514,7 @@ class Code2WavCudaGraphRunner:
                         "batch_size": key.batch_size,
                         "frames": key.frames,
                     }
-                    for key in CODE2WAV_GRAPH_KEYS
+                    for key in self._graph_keys
                 ],
             },
             "build": deepcopy(self._build_stats),
@@ -529,7 +528,6 @@ class Code2WavCudaGraphRunner:
 
 
 __all__ = [
-    "CODE2WAV_GRAPH_KEYS",
     "Code2WavCudaGraphRunner",
     "Code2WavRunResult",
     "GraphKey",

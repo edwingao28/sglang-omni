@@ -12,9 +12,12 @@ import torch
 
 from sglang_omni.models.qwen3_omni.components import code2wav_cuda_graph
 from sglang_omni.models.qwen3_omni.components.code2wav_cuda_graph import (
-    CODE2WAV_GRAPH_KEYS,
     Code2WavCudaGraphRunner,
     GraphKey,
+)
+
+_DEFAULT_GRAPH_KEYS = tuple(
+    GraphKey(batch_size=1, frames=frames) for frames in (10, 20, 30, 35)
 )
 
 
@@ -204,6 +207,7 @@ def _build_runner(
         device="cuda:0",
         num_quantizers=16,
         total_gpu_memory_fraction=total_gpu_memory_fraction,
+        graph_keys=_DEFAULT_GRAPH_KEYS,
         cuda_api=backend,
     )
     return runner, backend, model
@@ -225,10 +229,30 @@ def _codes(
     return backend.mark_cuda(tensor, device=device)
 
 
-def test_graph_keys_are_the_four_serial_serving_shapes() -> None:
-    assert CODE2WAV_GRAPH_KEYS == tuple(
-        GraphKey(batch_size=1, frames=frames) for frames in (10, 20, 30, 35)
+def test_build_captures_only_the_explicit_graph_keys() -> None:
+    graph_keys = tuple(GraphKey(batch_size=1, frames=frames) for frames in (20, 40, 45))
+    backend = _FakeCudaBackend()
+    runner = Code2WavCudaGraphRunner.build(
+        _FakeModel(),
+        device="cuda:0",
+        num_quantizers=16,
+        total_gpu_memory_fraction=0.5,
+        graph_keys=graph_keys,
+        cuda_api=backend,
     )
+
+    assert [tuple(graph.static_input.shape) for graph in backend.graphs] == [
+        (1, 16, 45),
+        (1, 16, 40),
+        (1, 16, 20),
+    ]
+    assert runner.stats()["graph_contract"]["keys"] == [
+        {"batch_size": key.batch_size, "frames": key.frames} for key in graph_keys
+    ]
+    assert runner.stats()["build"] == {
+        "attempted_graph_count": 3,
+        "published_graph_count": 3,
+    }
 
 
 def test_build_uses_three_warmups_one_private_pool_and_atomic_publication() -> None:
@@ -249,7 +273,7 @@ def test_build_uses_three_warmups_one_private_pool_and_atomic_publication() -> N
     assert stats["enabled"] is True
     assert stats["graph_contract"]["keys"] == [
         {"batch_size": key.batch_size, "frames": key.frames}
-        for key in CODE2WAV_GRAPH_KEYS
+        for key in _DEFAULT_GRAPH_KEYS
     ]
     assert stats["build"]["published_graph_count"] == 4
     assert stats["memory"] == {
@@ -313,7 +337,7 @@ def test_stats_report_only_operational_state() -> None:
 def test_all_serving_keys_hit_while_batch_two_misses() -> None:
     runner, backend, model = _build_runner()
 
-    for key in CODE2WAV_GRAPH_KEYS:
+    for key in _DEFAULT_GRAPH_KEYS:
         result = runner.run(_codes(backend, key.batch_size, key.frames))
         assert result.execution_mode == "cuda_graph"
         assert result.key == key
@@ -430,13 +454,14 @@ def test_real_cuda_build_and_replay_matches_eager() -> None:
         device=device,
         num_quantizers=2,
         total_gpu_memory_fraction=1.0,
+        graph_keys=_DEFAULT_GRAPH_KEYS,
     )
 
     stats = runner.stats()
     assert stats["enabled"] is True
-    assert stats["build"]["published_graph_count"] == len(CODE2WAV_GRAPH_KEYS)
+    assert stats["build"]["published_graph_count"] == len(_DEFAULT_GRAPH_KEYS)
 
-    for key in CODE2WAV_GRAPH_KEYS:
+    for key in _DEFAULT_GRAPH_KEYS:
         codes = torch.arange(
             key.batch_size * 2 * key.frames,
             dtype=torch.long,
