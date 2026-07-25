@@ -208,27 +208,25 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
             return None
         return min(due) + self._max_batch_wait_s
 
-    def _collect_stream_chunk_batch(self, first_msg):
-        batch = super()._collect_stream_chunk_batch(first_msg)
+    def _next_message(self):
+        if self._pending_messages:
+            return self._pending_messages.popleft()
         deadline = self._batch_deadline()
-        if deadline is None:
-            return batch
-        cap = self._stream_chunk_batch_max or max(self._max_batch_size, 1)
-        while len(batch) < cap:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                msg = self.inbox.get(timeout=remaining)
-            except queue.Empty:
-                break
-            if msg.type != "stream_chunk":
-                self._pending_messages.appendleft(msg)
-                break
-            if self._is_aborted(msg.request_id):
-                continue
-            batch.append(msg)
-        return batch
+        timeout = 0.1
+        if deadline is not None:
+            timeout = min(timeout, max(deadline - time.monotonic(), 0.0))
+        try:
+            return self.inbox.get(timeout=timeout)
+        except queue.Empty:
+            if deadline is not None and time.monotonic() >= deadline:
+                self._pump_due_streams()
+            return None
+
+    def _pump_due_streams(self) -> None:
+        with self._state_lock:
+            failed = self._pump_streams()
+        for request_id in failed:
+            self._cleanup_aborted_request(request_id)
 
     def _ready(self, state: Code2WavStreamState) -> int:
         return len(state.chunks) - state.emitted

@@ -32,16 +32,41 @@ def _chunk(request_id: str) -> IncomingMessage:
     return IncomingMessage(request_id=request_id, type="stream_chunk", data=None)
 
 
-def _put_later(scheduler: Code2WavScheduler, msg: IncomingMessage, delay: float):
-    timer = threading.Timer(delay, scheduler.inbox.put, args=(msg,))
-    timer.start()
-    return timer
-
-
 def _stream_item(code: int, *, stream: bool = True) -> StreamItem:
     return StreamItem(
         0, torch.tensor([code, code * 10]), "talker", metadata={"stream": stream}
     )
+
+
+def _stream_chunk(request_id: str, code: int) -> IncomingMessage:
+    return IncomingMessage(
+        request_id=request_id,
+        type="stream_chunk",
+        data=_stream_item(code),
+    )
+
+
+def _start_scheduler(scheduler: Code2WavScheduler) -> threading.Thread:
+    thread = threading.Thread(target=scheduler.start)
+    thread.start()
+    return thread
+
+
+def _stop_scheduler(scheduler: Code2WavScheduler, thread: threading.Thread) -> None:
+    scheduler.stop()
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+
+
+def _next_stream(scheduler: Code2WavScheduler, request_id: str, *, timeout: float):
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(f"timed out waiting for stream from {request_id}")
+        message = scheduler.outbox.get(timeout=remaining)
+        if message.type == "stream" and message.request_id == request_id:
+            return message
 
 
 def _feed_batch(
@@ -64,39 +89,69 @@ def _drain_outbox(scheduler: Code2WavScheduler) -> list:
     return messages
 
 
-def test_collector_waits_until_deadline() -> None:
+def test_collector_collects_only_already_queued_chunks() -> None:
     scheduler = _make_batching_scheduler()
-    scheduler._batch_deadline = lambda: time.monotonic() + 0.2
-    timer = _put_later(scheduler, _chunk("req-2"), 0.05)
-    try:
-        batch = scheduler._collect_stream_chunk_batch(_chunk("req-1"))
-    finally:
-        timer.join()
+    scheduler.inbox.put(_chunk("req-2"))
+    batch = scheduler._collect_stream_chunk_batch(_chunk("req-1"))
     assert [m.request_id for m in batch] == ["req-1", "req-2"]
 
 
 def test_collector_no_wait_when_nothing_due() -> None:
     scheduler = _make_batching_scheduler()
     assert scheduler._batch_deadline() is None
-    timer = _put_later(scheduler, _chunk("req-2"), 0.05)
-    try:
-        batch = scheduler._collect_stream_chunk_batch(_chunk("req-1"))
-    finally:
-        timer.join()
+    batch = scheduler._collect_stream_chunk_batch(_chunk("req-1"))
     assert [m.request_id for m in batch] == ["req-1"]
 
 
 def test_collector_pushback_non_chunk() -> None:
     scheduler = _make_batching_scheduler()
-    scheduler._batch_deadline = lambda: time.monotonic() + 0.2
     done = IncomingMessage(request_id="req-1", type="stream_done", data=None)
-    timer = _put_later(scheduler, done, 0.05)
-    try:
-        batch = scheduler._collect_stream_chunk_batch(_chunk("req-1"))
-    finally:
-        timer.join()
+    scheduler.inbox.put(done)
+    batch = scheduler._collect_stream_chunk_batch(_chunk("req-1"))
     assert [m.request_id for m in batch] == ["req-1"]
     assert scheduler._pending_messages[0] is done
+
+
+def test_scheduler_loop_wakes_at_batch_deadline() -> None:
+    scheduler = _make_batching_scheduler(max_batch_wait_ms=50, batch_floor=2)
+    thread = _start_scheduler(scheduler)
+    try:
+        scheduler.inbox.put(_stream_chunk("req-1", 1))
+        scheduler.inbox.put(_stream_chunk("req-1", 2))
+        _next_stream(scheduler, "req-1", timeout=0.5)
+
+        started = time.monotonic()
+        scheduler.inbox.put(_stream_chunk("req-1", 3))
+        scheduler.inbox.put(_stream_chunk("req-1", 4))
+        _next_stream(scheduler, "req-1", timeout=0.5)
+        elapsed = time.monotonic() - started
+
+        assert 0.025 <= elapsed < 0.2
+    finally:
+        _stop_scheduler(scheduler, thread)
+
+
+def test_old_deadline_does_not_delay_new_first_window() -> None:
+    scheduler = _make_batching_scheduler(max_batch_wait_ms=300, batch_floor=2)
+    thread = _start_scheduler(scheduler)
+    try:
+        scheduler.inbox.put(_stream_chunk("req-a", 1))
+        scheduler.inbox.put(_stream_chunk("req-a", 2))
+        _next_stream(scheduler, "req-a", timeout=0.5)
+
+        scheduler.inbox.put(_stream_chunk("req-a", 3))
+        scheduler.inbox.put(_stream_chunk("req-a", 4))
+        time.sleep(0.02)
+
+        started = time.monotonic()
+        scheduler.inbox.put(_stream_chunk("req-b", 5))
+        scheduler.inbox.put(_stream_chunk("req-b", 6))
+        _next_stream(scheduler, "req-b", timeout=0.5)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 0.15
+    finally:
+        _stop_scheduler(scheduler, thread)
 
 
 def test_decompose_batch() -> None:

@@ -553,7 +553,7 @@ def test_code2wav_streaming_emits_per_window_and_slim_final():
     )
     sched._stream_payloads["req-1"] = payload
 
-    # Two chunks → triggers _decode_and_emit (stream_chunk_size=2).
+    # Two chunks trigger the first decode step (stream_chunk_size=2).
     sched._on_chunk("req-1", _make_code_chunk(metadata={"stream": True}))
     sched._on_chunk("req-1", _make_code_chunk(metadata={"stream": True}))
 
