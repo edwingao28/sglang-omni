@@ -208,20 +208,34 @@ class QwenTalkerModelRunner(ModelRunner):
         """Copy an unconsumed feedback row out of its slot before the slot is reused.
 
         Called while the retracted request is being requeued: its pool index is
-        already freed, but no other request has emitted into the row yet.
+        already freed, but no other request has emitted into the row yet. That makes
+        this the last legal read of the recorded slot, so the index is retired here
+        on every retract - a second retract before a new emit would otherwise read a
+        row the pool has since handed to another request.
+
+        Replay depth is one row: the slot table keeps only the newest emit per
+        request, so a request retracted with more than one unconsumed frame cannot be
+        fully replayed and raises in ``_generated_prefill_slice`` instead.
         """
         if not self._feedback_enabled:
             return
         data = getattr(req, "_omni_data", None)
-        if data is None or getattr(data, "pending_feedback_count", 0) <= 0:
+        if data is None:
+            return
+        slot_idx = getattr(data, "feedback_slot_idx", None)
+        data.feedback_slot_idx = None
+        pending = getattr(data, "pending_feedback_count", 0)
+        if pending <= 0:
             return
         if getattr(data, "retracted_feedback_embed", None) is not None:
             return
-        slot_idx = getattr(data, "feedback_slot_idx", None)
         if slot_idx is None:
             raise RuntimeError(
                 "Talker request has pending feedback but no recorded slot to "
-                "snapshot on retract"
+                f"snapshot on retract (pending_feedback_count={pending}): the "
+                "recorded slot is retired by every retract, so a second retract "
+                "before a new emit has no row left to read and the freed pool "
+                "index may already belong to another request"
             )
         data.retracted_feedback_embed = self.model._feedback_slots[slot_idx].clone()
 
@@ -413,7 +427,11 @@ class QwenTalkerModelRunner(ModelRunner):
             if combined is None:
                 raise RuntimeError(
                     "Cannot replay retracted talker decode tokens: missing "
-                    "feedback/text input embeds for generated-token prefill"
+                    "feedback/text input embeds for generated-token prefill "
+                    "(pending_feedback_count="
+                    f"{getattr(data, 'pending_feedback_count', 0)}). A retract "
+                    "recovers at most one feedback row, so a request retracted with "
+                    "more than one unconsumed frame cannot be fully replayed"
                 )
             QwenTalkerModelRunner._append_decode_input_history(data, combined)
 
