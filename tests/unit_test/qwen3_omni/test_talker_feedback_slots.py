@@ -35,3 +35,19 @@ def test_feedback_batch_buffers_keep_batch_dim() -> None:
     assert model._feedback_buffer.shape == (4, 16)
     assert model._feedback_mask.shape == (4,)
     assert model._feedback_mask.dtype == torch.bool
+
+
+def test_feedback_slots_cover_max_req_pool_idx() -> None:
+    # ReqToTokenPool hands out req_pool_idx in [1, max_running_requests], so a
+    # request at the top index must be addressable.
+    max_running_requests = 4
+    model = make_fake_model(
+        pool_size=max_running_requests + 1,
+        hidden=16,
+        max_batch_size=max_running_requests,
+    )
+
+    row = torch.ones(16, dtype=model._feedback_slots.dtype)
+    model._feedback_slots[max_running_requests] = row
+
+    assert torch.equal(model._feedback_slots[max_running_requests], row)
