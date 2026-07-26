@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import json
 import threading
@@ -100,6 +101,7 @@ class Qwen3TTSSGLangRequestData(SGLangARRequestData):
     """Qwen3-TTS scheduler-owned request state."""
 
     enforce_request_limits: bool = True
+    pending_feedback_queue: Any = field(default_factory=collections.deque)
     output_codes: list[torch.Tensor] = field(default_factory=list)
     ref_code: torch.Tensor | None = None
     ref_code_len: int = 0

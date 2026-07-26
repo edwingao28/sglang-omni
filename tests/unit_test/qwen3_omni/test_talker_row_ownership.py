@@ -12,11 +12,16 @@ from sglang_omni.models.qwen3_omni.talker_model_runner import QwenTalkerModelRun
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 from sglang_omni.scheduling.types import ModelRunnerOutput
 
+POOL_SIZE = 8
+# Pool index per request id: deliberately not equal to the batch row index.
+POOL_BY_RID = {"r0": 3, "r1": 5, "r2": 0}
+
 
 def _fake_model(n: int, hidden: int, code_groups: int) -> SimpleNamespace:
     return SimpleNamespace(
         _feedback_buffer=torch.zeros(n, hidden, dtype=torch.float32),
         _feedback_mask=torch.zeros(n, dtype=torch.bool),
+        _feedback_slots=torch.zeros(POOL_SIZE, hidden, dtype=torch.float32),
         _output_codes=torch.stack(
             [torch.tensor([i, i + 100], dtype=torch.long) for i in range(n)]
         )[:, :code_groups],
@@ -40,16 +45,20 @@ def _data(
     feedback: torch.Tensor | None,
     text: torch.Tensor | None,
     *,
+    rid: str = "r0",
     thinker_done: bool = False,
     pad: torch.Tensor | None = None,
     stage_payload: Any = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        pending_feedback_queue=deque([feedback]) if feedback is not None else deque(),
+        pending_feedback_count=0 if feedback is None else 1,
+        retracted_feedback_embed=None,
         pending_text_queue=deque([text]) if text is not None else deque(),
         thinker_chunks_done=thinker_done,
         tts_pad_embed=pad,
         stage_payload=stage_payload,
+        decode_input_embeds=[],
+        req=SimpleNamespace(req_pool_idx=POOL_BY_RID[rid]),
     )
 
 
@@ -58,7 +67,12 @@ def _req_wrap(data: SimpleNamespace) -> SimpleNamespace:
 
 
 def _sched_batch(n: int) -> SimpleNamespace:
-    return SimpleNamespace(reqs=[SimpleNamespace(rid=f"r{i}") for i in range(n)])
+    return SimpleNamespace(
+        reqs=[
+            SimpleNamespace(rid=f"r{i}", req_pool_idx=POOL_BY_RID[f"r{i}"])
+            for i in range(n)
+        ]
+    )
 
 
 def test_row_ownership_survives_prep_then_emit() -> None:
@@ -68,7 +82,9 @@ def test_row_ownership_survives_prep_then_emit() -> None:
 
     feedbacks = [torch.full((hidden,), float(i + 1)) for i in range(n)]
     texts = [torch.full((hidden,), float(10 * (i + 1))) for i in range(n)]
-    requests = [_req_wrap(_data(feedbacks[i], texts[i])) for i in range(n)]
+    requests = [_req_wrap(_data(feedbacks[i], texts[i], rid=f"r{i}")) for i in range(n)]
+    for i in range(n):
+        model._feedback_slots[POOL_BY_RID[f"r{i}"]] = feedbacks[i]
     schedule_batch = _sched_batch(n)
 
     runner._write_feedback_buffers(requests)
@@ -87,9 +103,10 @@ def test_row_ownership_survives_prep_then_emit() -> None:
         assert msg.target == "code2wav"
         assert msg.metadata == {"stream": False}
         assert torch.equal(msg.data, model._output_codes[i])
-        fb_queue = requests[i].data.pending_feedback_queue
-        assert len(fb_queue) == 1
-        assert torch.equal(fb_queue[0], model._output_embeds[i])
+        assert requests[i].data.pending_feedback_count == 1
+        assert torch.equal(
+            model._feedback_slots[POOL_BY_RID[f"r{i}"]], model._output_embeds[i]
+        )
 
 
 def test_sparse_feedback_row_stays_unwritten() -> None:
@@ -100,10 +117,12 @@ def test_sparse_feedback_row_stays_unwritten() -> None:
     feedbacks = [torch.full((hidden,), float(i + 1)) for i in range(n)]
     texts = [torch.full((hidden,), float(10 * (i + 1))) for i in range(n)]
     requests = [
-        _req_wrap(_data(feedbacks[0], texts[0])),
-        _req_wrap(_data(feedbacks[1], None, thinker_done=False)),
-        _req_wrap(_data(feedbacks[2], texts[2])),
+        _req_wrap(_data(feedbacks[0], texts[0], rid="r0")),
+        _req_wrap(_data(feedbacks[1], None, rid="r1", thinker_done=False)),
+        _req_wrap(_data(feedbacks[2], texts[2], rid="r2")),
     ]
+    for i in range(n):
+        model._feedback_slots[POOL_BY_RID[f"r{i}"]] = feedbacks[i]
 
     runner._write_feedback_buffers(requests)
 
@@ -123,9 +142,13 @@ def test_stale_mask_cannot_leak_into_reused_slot() -> None:
     feedback1 = torch.full((hidden,), 5.0)
     text1 = torch.full((hidden,), 50.0)
     requests = [
-        _req_wrap(_data(torch.full((hidden,), 1.0), None, thinker_done=False)),
-        _req_wrap(_data(feedback1, text1)),
+        _req_wrap(
+            _data(torch.full((hidden,), 1.0), None, rid="r0", thinker_done=False)
+        ),
+        _req_wrap(_data(feedback1, text1, rid="r1")),
     ]
+    model._feedback_slots[POOL_BY_RID["r0"]] = torch.full((hidden,), 1.0)
+    model._feedback_slots[POOL_BY_RID["r1"]] = feedback1
 
     runner._write_feedback_buffers(requests)
 
@@ -143,12 +166,16 @@ def test_row_ownership_tracks_current_batch_order_across_steps() -> None:
         "r0": _data(
             torch.full((hidden,), 1.0),
             torch.full((hidden,), 10.0),
+            rid="r0",
         ),
         "r1": _data(
             torch.full((hidden,), 2.0),
             torch.full((hidden,), 20.0),
+            rid="r1",
         ),
     }
+    model._feedback_slots[POOL_BY_RID["r0"]] = torch.full((hidden,), 1.0)
+    model._feedback_slots[POOL_BY_RID["r1"]] = torch.full((hidden,), 2.0)
     request_data["r0"].pending_text_queue.extend(
         [torch.full((hidden,), 11.0), torch.full((hidden,), 12.0)]
     )
@@ -169,7 +196,9 @@ def test_row_ownership_tracks_current_batch_order_across_steps() -> None:
     for step, order in enumerate(step_orders):
         requests = [_req_wrap(request_data[rid]) for rid in order]
         schedule_batch = SimpleNamespace(
-            reqs=[SimpleNamespace(rid=rid) for rid in order],
+            reqs=[
+                SimpleNamespace(rid=rid, req_pool_idx=POOL_BY_RID[rid]) for rid in order
+            ],
             output_ids=None,
         )
         expected_inputs = [
@@ -219,7 +248,7 @@ def test_row_ownership_tracks_current_batch_order_across_steps() -> None:
         assert [message.request_id for message in emitted] == list(order)
         for row, rid in enumerate(order):
             assert torch.equal(emitted[row].data, codes[row])
-            assert torch.equal(request_data[rid].pending_feedback_queue[0], embeds[row])
+            assert torch.equal(model._feedback_slots[POOL_BY_RID[rid]], embeds[row])
             previous_feedback[rid] = embeds[row].clone()
             expected_messages.append((rid, codes[row].clone()))
             expected_pending_feedback[rid] = embeds[row].clone()
@@ -231,9 +260,10 @@ def test_row_ownership_tracks_current_batch_order_across_steps() -> None:
             assert message.request_id == expected_rid
             assert torch.equal(message.data, expected_code)
         for rid, expected_feedback in expected_pending_feedback.items():
-            pending_feedback = request_data[rid].pending_feedback_queue
-            assert len(pending_feedback) == 1
-            assert torch.equal(pending_feedback[0], expected_feedback)
+            assert request_data[rid].pending_feedback_count == 1
+            assert torch.equal(
+                model._feedback_slots[POOL_BY_RID[rid]], expected_feedback
+            )
 
         device_chain_tokens = tokens + 1000
         schedule_batch.output_ids = device_chain_tokens
