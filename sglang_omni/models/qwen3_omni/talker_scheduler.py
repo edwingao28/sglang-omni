@@ -130,7 +130,21 @@ class QwenTalkerScheduler(OmniScheduler):
         if is_retracted or bool(getattr(req, "is_retracted", False)):
             runner = getattr(self, "_model_runner", None)
             if runner is not None:
-                runner.snapshot_feedback_for_retract(req)
+                try:
+                    runner.snapshot_feedback_for_retract(req)
+                except Exception as exc:
+                    # Note (wenyao): retract runs inside get_next_batch_to_run, which
+                    # the event loop calls outside any try, so an error escaping here
+                    # kills the scheduler thread and every co-resident request. Fail
+                    # this request the way a batch failure does and keep the stage up.
+                    logger.exception(
+                        "Talker retract feedback snapshot failed for request=%s; "
+                        "aborting that request alone",
+                        req.rid,
+                    )
+                    self._emit_request_error(req.rid, exc)
+                    self.abort(req.rid, defer_running_cleanup=False)
+                    return
         return _Upstream._add_request_to_queue(self, req, is_retracted=is_retracted)
 
     def _rollback_decode_prep_after_skip(self, batch: Any) -> None:

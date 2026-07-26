@@ -9,6 +9,8 @@ drive a second retract against a recycled slot on CPU, without a server or a GPU
 
 from __future__ import annotations
 
+import queue
+import threading
 from collections import deque
 from types import SimpleNamespace
 from typing import Any
@@ -25,6 +27,8 @@ MAX_RUNNING_REQUESTS = 4
 POOL_IDX = 2
 HIDDEN = 3
 CPU = torch.device("cpu")
+STRANGER_VALUE = 99.0
+TEXT_ROW = torch.full((HIDDEN,), 10.0)
 
 
 def _model() -> SimpleNamespace:
@@ -106,21 +110,19 @@ def _retract(scheduler: QwenTalkerScheduler, req: SimpleNamespace) -> None:
     scheduler._add_request_to_queue(req, is_retracted=True)
 
 
-def _replay_one_row(data: SimpleNamespace) -> torch.Tensor | None:
-    data.pending_text_queue.append(torch.full((HIDDEN,), 10.0))
-    return QwenTalkerModelRunner._take_next_decode_input_embed(
-        sched_req=SimpleNamespace(data=data),
-        device=CPU,
-        dtype=torch.float32,
-    )
+def _consume_one_frame(runner: QwenTalkerModelRunner, data: SimpleNamespace) -> None:
+    # The production consumer: this is what nulls the snapshot on a decode step.
+    data.pending_text_queue.append(TEXT_ROW)
+    runner._write_feedback_buffers([SimpleNamespace(data=data)])
 
 
-def test_second_retract_cannot_read_a_recycled_slot(monkeypatch: Any) -> None:
-    model = _model()
-    runner = _runner(model)
-    req = _req("rA", POOL_IDX)
-    data = _data(req)
-
+def _drive_to_second_retract(
+    runner: QwenTalkerModelRunner,
+    scheduler: QwenTalkerScheduler,
+    req: SimpleNamespace,
+    data: SimpleNamespace,
+) -> SimpleNamespace:
+    """Emit twice, retract, consume the snapshot, then let another request take the slot."""
     # Two emits with no consume between them: a retract requeue re-prefills and emits
     # again while the previous frame is still owed, so one snapshot cannot cover the
     # count and the request survives its own replay with feedback still pending.
@@ -129,25 +131,54 @@ def test_second_retract_cannot_read_a_recycled_slot(monkeypatch: Any) -> None:
     assert data.pending_feedback_count == 2
     assert data.feedback_slot_idx == POOL_IDX
 
-    scheduler = _retract_scheduler(runner, monkeypatch)
     _retract(scheduler, req)
     assert torch.equal(data.retracted_feedback_embed, torch.full((HIDDEN,), 6.0))
 
-    # Partial replay: the snapshot comes back and is dropped, one frame still owed.
-    assert _replay_one_row(data) is not None
+    _consume_one_frame(runner, data)
     assert data.pending_feedback_count == 1
     assert data.retracted_feedback_embed is None
 
     # POOL_IDX has been reallocated and now holds another request's row.
     other = _req("rB", POOL_IDX)
-    _emit(runner, other, _data(other), 99.0)
-    assert torch.equal(model._feedback_slots[POOL_IDX], torch.full((HIDDEN,), 99.0))
+    _emit(runner, other, _data(other), STRANGER_VALUE)
+    assert torch.equal(
+        runner.model._feedback_slots[POOL_IDX], torch.full((HIDDEN,), STRANGER_VALUE)
+    )
+    return other
 
+
+def test_second_retract_cannot_read_a_recycled_slot(monkeypatch: Any) -> None:
+    model = _model()
+    runner = _runner(model)
+    req = _req("rA", POOL_IDX)
+    data = _data(req)
+    scheduler = _retract_scheduler(runner, monkeypatch)
+
+    _drive_to_second_retract(runner, scheduler, req, data)
+
+    # Asserted at the invariant site: the scheduler hook contains this raise into a
+    # single-request abort, covered by the containment test below.
+    req.is_retracted = True
+    req.req_pool_idx = None
     with pytest.raises(RuntimeError, match="no recorded slot"):
-        _retract(scheduler, req)
+        runner.snapshot_feedback_for_retract(req)
 
-    # The stranger's row must not have been adopted as rA's feedback.
+    # The stranger's row must not have been adopted as rA's feedback, and it must not
+    # reach the replay consumer by any other route either.
     assert data.retracted_feedback_embed is None
+    assert (
+        QwenTalkerModelRunner._take_next_decode_input_embed(
+            sched_req=SimpleNamespace(data=data),
+            device=CPU,
+            dtype=torch.float32,
+        )
+        is None
+    )
+    # rA's own frame was 6.0; the stranger's row would surface as 99.0 raw or 109.0
+    # combined with the text row.
+    own_row = torch.full((HIDDEN,), 6.0) + TEXT_ROW
+    for row in data.decode_input_embeds:
+        assert torch.equal(row, own_row)
 
 
 def test_snapshot_clears_the_recorded_slot_index(monkeypatch: Any) -> None:
@@ -220,6 +251,92 @@ def test_emit_after_retract_rearms_the_slot_index(monkeypatch: Any) -> None:
 
     assert torch.equal(data.retracted_feedback_embed, torch.full((HIDDEN,), 7.0))
     assert data.feedback_slot_idx is None
+
+
+def test_pause_path_retract_retires_the_slot_index(monkeypatch: Any) -> None:
+    # Upstream ``retract_all`` (the pause path) requeues without the is_retracted
+    # kwarg, so the hook's disjunction with Req.is_retracted has to carry the
+    # snapshot and the invalidation on its own.
+    model = _model()
+    runner = _runner(model)
+    req = _req("rA", POOL_IDX)
+    data = _data(req)
+    _emit(runner, req, data, 5.0)
+
+    scheduler = _retract_scheduler(runner, monkeypatch)
+    req.is_retracted = True
+    req.req_pool_idx = None
+    scheduler._add_request_to_queue(req)
+
+    assert scheduler.queued == [("rA", False)]
+    assert torch.equal(data.retracted_feedback_embed, torch.full((HIDDEN,), 5.0))
+    assert data.feedback_slot_idx is None
+
+
+def _containment_scheduler(
+    runner: QwenTalkerModelRunner, monkeypatch: Any
+) -> QwenTalkerScheduler:
+    """A scheduler with enough state for the real ``OmniScheduler.abort`` to run."""
+    scheduler = _retract_scheduler(runner, monkeypatch)
+    scheduler.is_entry_rank = True
+    scheduler.errors = []
+    scheduler.outbox = SimpleNamespace(put=scheduler.errors.append)
+    scheduler.inbox = queue.Queue()
+    scheduler._request_admission_lock = threading.Lock()
+    scheduler._aborted_request_ids = set()
+    scheduler._aborted_request_id_order = deque()
+    scheduler._pending_request_builds = {}
+    scheduler._backlogged_request_build_payloads = []
+    scheduler.waiting_queue = []
+    scheduler._abort_callback = None
+    scheduler._pending_stream_chunks = {}
+    scheduler._pending_stream_done = set()
+    scheduler._deferred_request_payloads = {}
+    scheduler._dirty_deferred_request_ids = set()
+    scheduler._first_emit_done = set()
+    scheduler._prefill_start_done = set()
+    scheduler.running_batch = None
+    scheduler.cur_batch = None
+    scheduler.last_batch = None
+    scheduler._async_pending = None
+    return scheduler
+
+
+def test_failed_retract_snapshot_fails_one_request_not_the_stage(
+    monkeypatch: Any,
+) -> None:
+    # The retract hook runs inside get_next_batch_to_run, which the event loop calls
+    # outside any try, so an escaping error would take the scheduler thread and every
+    # co-resident request with it.
+    model = _model()
+    runner = _runner(model)
+    scheduler = _containment_scheduler(runner, monkeypatch)
+
+    doomed = _req("rA", POOL_IDX)
+    doomed_data = _data(doomed)
+    _drive_to_second_retract(runner, scheduler, doomed, doomed_data)
+    scheduler.queued.clear()
+
+    # A co-resident request on its own slot, retracted in the same pass.
+    healthy = _req("rC", POOL_IDX + 1)
+    healthy_data = _data(healthy)
+    _emit(runner, healthy, healthy_data, 3.0)
+
+    _retract(scheduler, doomed)
+    _retract(scheduler, healthy)
+
+    # rA failed alone: an error went to its client, it is marked aborted so later
+    # admissions drop it, and it was never requeued.
+    assert [(m.request_id, m.type) for m in scheduler.errors] == [("rA", "error")]
+    assert isinstance(scheduler.errors[0].data, RuntimeError)
+    assert scheduler._aborted_request_ids == {"rA"}
+    assert doomed_data.retracted_feedback_embed is None
+
+    # rC survived: snapshotted, requeued, and the stage is still running.
+    assert scheduler.queued == [("rC", True)]
+    assert torch.equal(
+        healthy_data.retracted_feedback_embed, torch.full((HIDDEN,), 3.0)
+    )
 
 
 def test_replay_past_the_single_snapshot_raises() -> None:
