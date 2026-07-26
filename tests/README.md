@@ -63,6 +63,7 @@ tests/
     │   ├── test_sglang_ar_budget.py
     │   ├── test_streaming.py
     │   ├── test_talker.py
+    │   ├── test_talker_prefill_embed_cache.py
     │   └── test_text_template.py
     ├── ming_omni/
     │   ├── test_omni_serve.py

@@ -41,26 +41,39 @@ def _read_rows_from_safetensor(
             return tensor[row_ids]
 
 
-def load_thinker_embedding_rows(model_path: str, row_ids: list[int]) -> torch.Tensor:
-    model_dir = Path(model_path)
+_EMBED_SOURCE_CACHE: dict[str, tuple[Path, str]] = {}
 
+
+def _resolve_embed_source(model_path: str) -> tuple[Path, str]:
+    cached = _EMBED_SOURCE_CACHE.get(model_path)
+    if cached is not None:
+        return cached
+
+    model_dir = Path(model_path)
     for index_path in model_dir.glob("*.safetensors.index.json"):
         index_data = json.loads(index_path.read_text())
         weight_map = index_data["weight_map"]
         for tensor_name in _THINKER_EMBED_CANDIDATE_KEYS:
             shard_name = weight_map.get(tensor_name)
             if shard_name is not None:
-                return _read_rows_from_safetensor(
-                    model_dir / shard_name, tensor_name, row_ids
-                )
+                source = (model_dir / shard_name, tensor_name)
+                _EMBED_SOURCE_CACHE[model_path] = source
+                return source
 
     for shard_path in model_dir.glob("*.safetensors"):
         with safe_open(str(shard_path), framework="pt", device="cpu") as handle:
             for tensor_name in _THINKER_EMBED_CANDIDATE_KEYS:
                 if tensor_name in handle.keys():
-                    return _read_rows_from_safetensor(shard_path, tensor_name, row_ids)
+                    source = (shard_path, tensor_name)
+                    _EMBED_SOURCE_CACHE[model_path] = source
+                    return source
 
     raise KeyError(f"Unable to locate thinker embedding weights in {model_path}")
+
+
+def load_thinker_embedding_rows(model_path: str, row_ids: list[int]) -> torch.Tensor:
+    shard_path, tensor_name = _resolve_embed_source(model_path)
+    return _read_rows_from_safetensor(shard_path, tensor_name, row_ids)
 
 
 def coerce_feature_tensor(value: Any) -> torch.Tensor | None:
