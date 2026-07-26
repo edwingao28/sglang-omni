@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import inspect
 from collections import deque
 from types import SimpleNamespace
 from typing import Any
@@ -12,6 +13,7 @@ from sglang.srt.managers.scheduler import Scheduler as _Upstream
 from sglang_omni.models.qwen3_omni.talker_model_runner import QwenTalkerModelRunner
 from sglang_omni.models.qwen3_omni.talker_scheduler import QwenTalkerScheduler
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
+from sglang_omni.scheduling.sglang_backend.request_data import SGLangARRequestData
 from sglang_omni.scheduling.types import ModelRunnerOutput
 
 POOL_SIZE = 8
@@ -201,6 +203,51 @@ def test_retract_snapshots_slot_before_another_request_reuses_it(
     assert torch.equal(combined, torch.full((hidden,), 15.0))
     assert data.pending_feedback_count == 0
     assert data.retracted_feedback_embed is None
+
+
+def test_retract_snapshot_runs_on_the_flag_only_path(monkeypatch: Any) -> None:
+    # _retract_running_requests requeues without the is_retracted kwarg, so the
+    # snapshot must also trigger off Req.reset_for_retract's flag alone.
+    n, hidden, code_groups = 1, 3, 2
+    model = _fake_model(n, hidden, code_groups)
+    runner = _runner(model)
+
+    req = _make_req("r0")
+    data = _data(None, torch.full((hidden,), 10.0), req=req)
+    req._omni_data = data
+    _emit(runner, req, data, torch.full((hidden,), 5.0))
+
+    scheduler = _retract_scheduler(runner, monkeypatch)
+    req.is_retracted = True
+    req.req_pool_idx = None
+    scheduler._add_request_to_queue(req)
+
+    assert scheduler.queued == [("r0", False)]
+    assert torch.equal(data.retracted_feedback_embed, torch.full((hidden,), 5.0))
+
+
+def test_upstream_add_request_to_queue_still_takes_is_retracted() -> None:
+    # The hook forwards is_retracted; a version bump dropping it must fail here
+    # instead of during a production retract.
+    parameters = inspect.signature(_Upstream._add_request_to_queue).parameters
+    assert "is_retracted" in parameters
+
+
+def test_pending_feedback_without_recorded_slot_raises() -> None:
+    n, hidden, code_groups = 1, 3, 2
+    runner = _runner(_fake_model(n, hidden, code_groups))
+
+    req = _make_req("r0")
+    data = _data(torch.full((hidden,), 5.0), torch.full((hidden,), 10.0), req=req)
+    data.feedback_slot_idx = None
+    req._omni_data = data
+
+    with pytest.raises(RuntimeError, match="no recorded slot"):
+        runner.snapshot_feedback_for_retract(req)
+
+
+def test_request_data_defaults_feedback_slot_idx_to_none() -> None:
+    assert SGLangARRequestData().feedback_slot_idx is None
 
 
 def test_retract_without_pending_feedback_takes_no_snapshot(monkeypatch: Any) -> None:
