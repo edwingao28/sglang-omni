@@ -1056,6 +1056,8 @@ class OmniScheduler:
             finally:
                 data.prefill_input_embeds = None
                 data.decode_input_embeds = None
+                data.pending_feedback_count = 0
+                data.retracted_feedback_embed = None
 
             self._first_emit_done.discard(rid)
             self._prefill_start_done.discard(rid)

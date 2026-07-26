@@ -114,6 +114,16 @@ class QwenTalkerScheduler(OmniScheduler):
             return None
         return batch
 
+    def _add_request_to_queue(self, req: Any, is_retracted: bool = False) -> None:
+        # Note (wenyao): retract has already freed req_pool_idx but nothing has
+        # emitted into that feedback slot yet, so this is the last point where an
+        # unconsumed feedback row can still be read back for replay.
+        if is_retracted or bool(getattr(req, "is_retracted", False)):
+            runner = getattr(self, "_model_runner", None)
+            if runner is not None:
+                runner.snapshot_feedback_for_retract(req)
+        return _Upstream._add_request_to_queue(self, req, is_retracted=is_retracted)
+
     def _rollback_decode_prep_after_skip(self, batch: Any) -> None:
         # Note(Chenchen Hong, Xuesong): This is talker-only. It does not fully
         # invert prepare_for_decode; talker disables overlap/spec/Mamba/hisparse,
