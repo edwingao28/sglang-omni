@@ -6,7 +6,10 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
-from sglang_omni.models.qwen3_omni.components.talker import Qwen3OmniMoeTalkerTextModel
+from sglang_omni.models.qwen3_omni.components.talker import (
+    Qwen3OmniMoeTalkerTextModel,
+    feedback_slot_rows,
+)
 
 
 def make_fake_model(
@@ -42,7 +45,7 @@ def test_feedback_slots_cover_max_req_pool_idx() -> None:
     # request at the top index must be addressable.
     max_running_requests = 4
     model = make_fake_model(
-        pool_size=max_running_requests + 1,
+        pool_size=feedback_slot_rows(max_running_requests),
         hidden=16,
         max_batch_size=max_running_requests,
     )

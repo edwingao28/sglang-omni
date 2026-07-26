@@ -48,6 +48,17 @@ from sglang_omni.vendor.sglang.utils import make_layers
 logger = logging.getLogger(__name__)
 
 
+def feedback_slot_rows(max_running_requests: int) -> int:
+    """Rows a table keyed by ``req_pool_idx`` needs to cover a pool of that size.
+
+    ``ReqToTokenPool`` reserves row 0 as the CUDA-graph pad row and allocates from
+    ``[1, size]`` inclusive, so its own backing tensor is ``size + 1`` rows and the
+    largest valid ``req_pool_idx`` equals the pool size. Any table addressed by the
+    same index must match that shape.
+    """
+    return max_running_requests + 1
+
+
 def _bind_default_weight_loaders(module: nn.Module) -> None:
     for param in module.parameters():
         if not hasattr(param, "weight_loader"):
@@ -479,9 +490,7 @@ class Qwen3OmniMoeTalkerTextModel(nn.Module):
         self._cp_enabled = True
         self._init_feedback_state(
             max_batch_size=max_batch_size,
-            # Note (wenyao): ReqToTokenPool reserves row 0 as the CUDA-graph pad
-            # and hands out req_pool_idx in [1, max_running_requests].
-            req_pool_size=max_batch_size + 1,
+            req_pool_size=feedback_slot_rows(max_batch_size),
         )
 
         # Disable fused_qk_norm_rope so the separate QK-norm + RoPE path is
