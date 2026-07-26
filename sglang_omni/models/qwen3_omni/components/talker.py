@@ -479,7 +479,9 @@ class Qwen3OmniMoeTalkerTextModel(nn.Module):
         self._cp_enabled = True
         self._init_feedback_state(
             max_batch_size=max_batch_size,
-            req_pool_size=max_batch_size,
+            # Note (wenyao): ReqToTokenPool reserves row 0 as the CUDA-graph pad
+            # and hands out req_pool_idx in [1, max_running_requests].
+            req_pool_size=max_batch_size + 1,
         )
 
         # Disable fused_qk_norm_rope so the separate QK-norm + RoPE path is
