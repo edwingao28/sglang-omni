@@ -7,6 +7,8 @@ import logging
 from collections import deque
 from typing import Any
 
+from sglang.srt.managers.scheduler import Scheduler as _Upstream
+
 from sglang_omni.models.qwen3_omni.config import MIN_PARTIAL_START_CHUNKS
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 from sglang_omni.vendor.sglang.server_args import override_server_args
@@ -117,6 +119,16 @@ class QwenTalkerScheduler(OmniScheduler):
             self._rollback_decode_prep_after_skip(batch)
             return None
         return batch
+
+    def _add_request_to_queue(self, req: Any, is_retracted: bool = False) -> None:
+        # Note (wenyao): retract has already freed req_pool_idx but nothing has
+        # emitted into that feedback slot yet, so this is the last point where an
+        # unconsumed feedback row can still be read back for replay.
+        if is_retracted or bool(getattr(req, "is_retracted", False)):
+            runner = getattr(self, "_model_runner", None)
+            if runner is not None:
+                runner.snapshot_feedback_for_retract(req)
+        return _Upstream._add_request_to_queue(self, req, is_retracted=is_retracted)
 
     def _rollback_decode_prep_after_skip(self, batch: Any) -> None:
         # Note(Chenchen Hong, Xuesong): This is talker-only. It does not fully

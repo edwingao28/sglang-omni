@@ -7,8 +7,10 @@ from typing import Any
 
 import pytest
 import torch
+from sglang.srt.managers.scheduler import Scheduler as _Upstream
 
 from sglang_omni.models.qwen3_omni.talker_model_runner import QwenTalkerModelRunner
+from sglang_omni.models.qwen3_omni.talker_scheduler import QwenTalkerScheduler
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 from sglang_omni.scheduling.types import ModelRunnerOutput
 
@@ -74,6 +76,176 @@ def _sched_batch(reqs: list) -> SimpleNamespace:
     # Note (wenyao): the batch and data.req must be the same objects, so the two
     # sources of req_pool_idx cannot silently diverge.
     return SimpleNamespace(reqs=list(reqs))
+
+
+def _pool_req(rid: str, pool_idx: int | None) -> SimpleNamespace:
+    return SimpleNamespace(rid=rid, req_pool_idx=pool_idx)
+
+
+def _retract_scheduler(
+    runner: QwenTalkerModelRunner, monkeypatch: Any
+) -> SimpleNamespace:
+    scheduler = object.__new__(QwenTalkerScheduler)
+    scheduler._model_runner = runner
+    scheduler.queued = []
+    monkeypatch.setattr(
+        _Upstream,
+        "_add_request_to_queue",
+        lambda self, req, is_retracted=False: self.queued.append(
+            (req.rid, is_retracted)
+        ),
+    )
+    return scheduler
+
+
+def _emit(
+    runner: QwenTalkerModelRunner,
+    req: SimpleNamespace,
+    data: SimpleNamespace,
+    embed: torch.Tensor,
+) -> None:
+    runner.model._output_embeds[0] = embed
+    runner._emit_code_chunks_and_feedback(
+        schedule_batch=_sched_batch([req]), requests=[_req_wrap(data)]
+    )
+
+
+def test_recycled_pool_slot_cannot_feed_stale_feedback() -> None:
+    n, hidden, code_groups = 2, 3, 2
+    model = _fake_model(n, hidden, code_groups)
+    runner = _runner(model)
+
+    old_req = _make_req("r0")
+    old_data = _data(None, torch.full((hidden,), 10.0), req=old_req)
+    _emit(runner, old_req, old_data, torch.full((hidden,), 5.0))
+    assert torch.equal(
+        model._feedback_slots[POOL_BY_RID["r0"]], torch.full((hidden,), 5.0)
+    )
+
+    # r0 finishes with its feedback unconsumed; the pool slot is recycled.
+    new_req = _pool_req("r9", POOL_BY_RID["r0"])
+    new_data = _data(None, torch.full((hidden,), 20.0), req=new_req)
+    assert not QwenTalkerModelRunner._data_has_next_decode_input(new_data)
+
+    _emit(runner, new_req, new_data, torch.full((hidden,), 7.0))
+    runner._write_feedback_buffers([_req_wrap(new_data)])
+
+    assert torch.equal(model._feedback_buffer[0], torch.full((hidden,), 27.0))
+
+
+def test_retract_replay_reproduces_history_rows() -> None:
+    n, hidden, code_groups = 1, 3, 2
+    model = _fake_model(n, hidden, code_groups)
+    runner = _runner(model)
+
+    req = _make_req("r0")
+    data = _data(None, None, req=req)
+    for step in range(2):
+        model._feedback_slots[POOL_BY_RID["r0"]] = torch.full(
+            (hidden,), float(step + 1)
+        )
+        data.pending_feedback_count = 1
+        data.pending_text_queue.append(torch.full((hidden,), float(10 * (step + 1))))
+        runner._write_feedback_buffers([_req_wrap(data)])
+    history = [row.clone() for row in data.decode_input_embeds]
+    assert len(history) == 2
+
+    req.req_pool_idx = None
+    model._feedback_slots[POOL_BY_RID["r0"]] = torch.full((hidden,), -1.0)
+
+    replayed = QwenTalkerModelRunner._generated_prefill_slice(
+        sched_req=_req_wrap(data),
+        gen_start=0,
+        gen_end=2,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+
+    assert torch.equal(replayed, torch.stack(history))
+
+
+def test_retract_snapshots_slot_before_another_request_reuses_it(
+    monkeypatch: Any,
+) -> None:
+    n, hidden, code_groups = 2, 3, 2
+    model = _fake_model(n, hidden, code_groups)
+    runner = _runner(model)
+
+    req = _make_req("r0")
+    data = _data(None, torch.full((hidden,), 10.0), req=req)
+    req._omni_data = data
+    _emit(runner, req, data, torch.full((hidden,), 5.0))
+    assert data.pending_feedback_count == 1
+
+    scheduler = _retract_scheduler(runner, monkeypatch)
+    req.is_retracted = True
+    req.req_pool_idx = None
+    scheduler._add_request_to_queue(req, is_retracted=True)
+
+    assert scheduler.queued == [("r0", True)]
+    assert data.pending_feedback_count == 1
+
+    other_req = _pool_req("r9", POOL_BY_RID["r0"])
+    other_data = _data(None, None, req=other_req)
+    _emit(runner, other_req, other_data, torch.full((hidden,), 99.0))
+    assert torch.equal(
+        model._feedback_slots[POOL_BY_RID["r0"]], torch.full((hidden,), 99.0)
+    )
+
+    combined = QwenTalkerModelRunner._take_next_decode_input_embed(
+        sched_req=_req_wrap(data),
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+
+    assert torch.equal(combined, torch.full((hidden,), 15.0))
+    assert data.pending_feedback_count == 0
+    assert data.retracted_feedback_embed is None
+
+
+def test_retract_without_pending_feedback_takes_no_snapshot(monkeypatch: Any) -> None:
+    n, hidden, code_groups = 1, 3, 2
+    model = _fake_model(n, hidden, code_groups)
+    runner = _runner(model)
+
+    req = _make_req("r0")
+    data = _data(None, torch.full((hidden,), 10.0), req=req)
+    req._omni_data = data
+    req.is_retracted = True
+
+    scheduler = _retract_scheduler(runner, monkeypatch)
+    scheduler._add_request_to_queue(req, is_retracted=True)
+
+    assert data.retracted_feedback_embed is None
+    assert scheduler.queued == [("r0", True)]
+
+
+def test_finish_clears_pending_feedback_state() -> None:
+    hidden = 3
+    scheduler = object.__new__(OmniScheduler)
+    scheduler._aborted_request_ids = set()
+    scheduler._first_emit_done = set()
+    scheduler._prefill_start_done = set()
+    scheduler.server_args = SimpleNamespace(weight_version="w0")
+    scheduler._result_adapter = lambda data: data
+    scheduler.outbox = SimpleNamespace(put=lambda message: None)
+
+    data = _data(None, None, req=None)
+    data.pending_feedback_count = 2
+    data.retracted_feedback_embed = torch.zeros(hidden)
+    req = SimpleNamespace(
+        rid="r0",
+        output_ids=[1, 2],
+        finished_reason=None,
+        _omni_data=data,
+        finished=lambda: True,
+    )
+
+    scheduler.stream_output([req])
+
+    assert data.pending_feedback_count == 0
+    assert data.retracted_feedback_embed is None
+    assert data.decode_input_embeds is None
 
 
 def test_row_ownership_survives_prep_then_emit() -> None:

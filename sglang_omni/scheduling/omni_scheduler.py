@@ -1425,6 +1425,8 @@ class OmniScheduler:
                             terminal_error = exc
                 data.prefill_input_embeds = None
                 data.decode_input_embeds = None
+                data.pending_feedback_count = 0
+                data.retracted_feedback_embed = None
                 # Note: (Jiaxin Deng) close the model-path interval before
                 # _close_completed_request, which discards the same rid that
                 # _emit_model_path_end_once dedups on. Emitting afterwards

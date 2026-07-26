@@ -120,8 +120,9 @@ class QwenTalkerModelRunner(ModelRunner):
         # fresh allocation so its rows survive the next in-graph write to the
         # fixed-address _output_codes.
         codes_snap = self.model._output_codes[:bs].detach().clone()
+        slot_ids = [schedule_batch.reqs[i].req_pool_idx for i in range(bs)]
         pool_ids = torch.tensor(
-            [schedule_batch.reqs[i].req_pool_idx for i in range(bs)],
+            slot_ids,
             dtype=torch.long,
             device=self.model._output_embeds.device,
         )
@@ -148,6 +149,30 @@ class QwenTalkerModelRunner(ModelRunner):
                 )
             )
             sched_req.data.pending_feedback_count += 1
+            # Note (wenyao): retract frees req_pool_idx, so the slot this frame was
+            # written into is only recoverable from the request's own record.
+            sched_req.data.feedback_slot_idx = slot_ids[idx]
+
+    def snapshot_feedback_for_retract(self, req: Any) -> None:
+        """Copy an unconsumed feedback row out of its slot before the slot is reused.
+
+        Called while the retracted request is being requeued: its pool index is
+        already freed, but no other request has emitted into the row yet.
+        """
+        if not self._feedback_enabled:
+            return
+        data = getattr(req, "_omni_data", None)
+        if data is None or getattr(data, "pending_feedback_count", 0) <= 0:
+            return
+        if getattr(data, "retracted_feedback_embed", None) is not None:
+            return
+        slot_idx = getattr(data, "feedback_slot_idx", None)
+        if slot_idx is None:
+            raise RuntimeError(
+                "Talker request has pending feedback but no recorded slot to "
+                "snapshot on retract"
+            )
+        data.retracted_feedback_embed = self.model._feedback_slots[slot_idx].clone()
 
     def sample_before_post_prefill(
         self, forward_batch: Any, schedule_batch: Any, requests: list
