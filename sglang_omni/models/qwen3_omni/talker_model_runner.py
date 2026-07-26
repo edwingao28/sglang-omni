@@ -9,6 +9,7 @@ import torch
 from sglang.srt.managers.scheduler import GenerationBatchResult
 
 from sglang_omni.model_runner.base import ModelRunner
+from sglang_omni.models.qwen3_omni.components.talker import feedback_slot_rows
 from sglang_omni.scheduling.messages import OutgoingMessage
 
 
@@ -27,6 +28,34 @@ class QwenTalkerModelRunner(ModelRunner):
         self._outbox = outbox
         self._code2wav_target = code2wav_target
         self._feedback_enabled = bool(feedback_enabled)
+        if self._feedback_enabled:
+            self._check_feedback_slots_cover_pool()
+
+    def _check_feedback_slots_cover_pool(self) -> None:
+        """Cross-check the req_pool_idx-keyed feedback table against the real pool.
+
+        The model allocates ``_feedback_slots`` in its own ``__init__``, before
+        ``req_to_token_pool`` exists, so it has to size from server args. This is the
+        first point where both are visible; checking once here turns any future
+        divergence into a startup error instead of an async device-side index assert
+        that only sustained slot churn reaches.
+        """
+        slots = getattr(self.model, "_feedback_slots", None)
+        pool = getattr(self.tp_worker.model_runner, "req_to_token_pool", None)
+        if slots is None or pool is None:
+            return
+        # Note (wenyao): prefer the pool's own row count so this stays an independent
+        # check rather than a restatement of the model's sizing formula.
+        required = getattr(pool, "_alloc_size", None)
+        if required is None:
+            required = feedback_slot_rows(pool.size)
+        if slots.shape[0] < required:
+            raise RuntimeError(
+                "Talker feedback slots are too small for the request pool: "
+                f"_feedback_slots has {slots.shape[0]} rows but req_to_token_pool "
+                f"of size {pool.size} allocates req_pool_idx in [1, {pool.size}], "
+                f"needing {required} rows"
+            )
 
     def execute(self, scheduler_output: Any):
         return super().execute(scheduler_output)
