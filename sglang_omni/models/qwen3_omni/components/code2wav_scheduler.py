@@ -35,6 +35,8 @@ def _serial_threshold_graph_keys(
     stream_chunk_size: int,
     left_context_size: int,
 ) -> tuple[GraphKey, ...]:
+    # Each serial threshold decode advances by one chunk while its context grows
+    # to the configured cap.
     frames = (
         *range(
             stream_chunk_size,
@@ -295,11 +297,12 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         }
 
     def _batch_deadline(self) -> float | None:
-        due = [
-            state.due_since
-            for _, state in self._stream_state_items()
-            if state.due_since is not None
-        ]
+        with self._state_lock:
+            due = [
+                state.due_since
+                for _, state in self._stream_state_items()
+                if state.due_since is not None
+            ]
         if not due:
             return None
         return min(due) + self._max_batch_wait_s
