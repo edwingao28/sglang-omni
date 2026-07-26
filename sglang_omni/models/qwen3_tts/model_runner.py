@@ -202,7 +202,7 @@ class Qwen3TTSModelRunner(ModelRunner):
         rows = []
 
         for row_idx, sched_req in enumerate(requests):
-            combined = QwenTalkerModelRunner._take_next_decode_input_embed(
+            combined = self._take_next_decode_input_embed(
                 sched_req=sched_req,
                 device=decode_feedback_embedding.weight.device,
                 dtype=decode_feedback_embedding.weight.dtype,
@@ -221,6 +221,29 @@ class Qwen3TTSModelRunner(ModelRunner):
             decode_feedback_embedding.weight[:batch_size].copy_(stacked)
         # During graph decode, input_ids carries staged embedding row ids.
         input_ids[:batch_size].copy_(row_ids)
+
+    @staticmethod
+    def _take_next_decode_input_embed(
+        *,
+        sched_req: Any,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor | None:
+        data = sched_req.data
+        queue = getattr(data, "pending_feedback_queue", None)
+        combined = QwenTalkerModelRunner._combine_feedback_with_next_text(
+            data=data,
+            feedback=QwenTalkerModelRunner._peek_left(queue),
+            device=device,
+            dtype=dtype,
+        )
+        if combined is None:
+            return None
+
+        QwenTalkerModelRunner._pop_left(queue)
+        if getattr(data, "pending_text_queue", None):
+            QwenTalkerModelRunner._pop_left(data.pending_text_queue)
+        return combined
 
     def _build_prefill_input_embeds(
         self,
