@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import torch
@@ -12,6 +13,8 @@ from sglang_omni.model_runner.base import ModelRunner
 from sglang_omni.model_runner.sglang_execution import attn_forward_context
 from sglang_omni.models.qwen3_omni.components.talker import feedback_slot_rows
 from sglang_omni.scheduling.messages import OutgoingMessage
+
+logger = logging.getLogger(__name__)
 
 
 class QwenTalkerModelRunner(ModelRunner):
@@ -43,13 +46,32 @@ class QwenTalkerModelRunner(ModelRunner):
         """
         slots = getattr(self.model, "_feedback_slots", None)
         pool = getattr(self.tp_worker.model_runner, "req_to_token_pool", None)
+        # Note (wenyao): a skip must be audible. If either attribute is ever renamed
+        # upstream the index sites keep working and only this check goes quiet, which
+        # puts us back on an async device assert with no startup signal.
         if slots is None or pool is None:
+            missing = "model._feedback_slots" if slots is None else ""
+            if pool is None:
+                missing = f"{missing} and " if missing else ""
+                missing += "model_runner.req_to_token_pool"
+            logger.warning(
+                "Talker feedback slot bound check skipped: %s not found. A slot table "
+                "too small for the request pool would now fail as a device-side index "
+                "assert under load instead of at startup.",
+                missing,
+            )
             return
         # Note (wenyao): prefer the pool's own row count so this stays an independent
         # check rather than a restatement of the model's sizing formula.
         required = getattr(pool, "_alloc_size", None)
         if required is None:
             required = feedback_slot_rows(pool.size)
+            logger.info(
+                "Talker feedback slot bound check fell back to req_to_token_pool.size "
+                "+ 1: %s has no _alloc_size. Still correct, but no longer independent "
+                "of the model's own sizing formula.",
+                type(pool).__name__,
+            )
         if slots.shape[0] < required:
             raise RuntimeError(
                 "Talker feedback slots are too small for the request pool: "

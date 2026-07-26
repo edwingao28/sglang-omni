@@ -6,34 +6,37 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
-from sglang_omni.models.qwen3_omni.components.talker import (
-    Qwen3OmniMoeTalkerTextModel,
-    feedback_slot_rows,
-)
+from sglang_omni.models.qwen3_omni.components.talker import Qwen3OmniMoeTalkerTextModel
 
 
 def make_fake_model(
-    pool_size: int, hidden: int, max_batch_size: int = 4
+    hidden: int, max_batch_size: int = 4
 ) -> Qwen3OmniMoeTalkerTextModel:
+    # No pool size is passed: _init_feedback_state derives it, so these tests cover the
+    # production sizing rule instead of asserting a size the caller chose.
     model = object.__new__(Qwen3OmniMoeTalkerTextModel)
     nn.Module.__init__(model)
     model.config = SimpleNamespace(hidden_size=hidden)
     model.codec_embedding = nn.Embedding(2, hidden)
-    model._init_feedback_state(max_batch_size=max_batch_size, req_pool_size=pool_size)
+    model._init_feedback_state(max_batch_size=max_batch_size)
     return model
 
 
-def test_feedback_slots_allocated_with_pool_size() -> None:
-    model = make_fake_model(pool_size=8, hidden=16)
+def test_feedback_slots_sized_for_the_reserved_pool_row() -> None:
+    # Spelled out rather than derived from feedback_slot_rows: this is the independent
+    # statement of the rule, so a regression in the helper has to fail here.
+    model = make_fake_model(hidden=16, max_batch_size=8)
 
-    assert model._feedback_slots.shape == (8, 16)
+    assert model._feedback_slots.shape == (9, 16)
     assert model._feedback_slots.dtype == model._feedback_buffer.dtype
     assert model._feedback_slots.device == model._feedback_buffer.device
-    assert torch.equal(model._feedback_slots, torch.zeros(8, 16))
+    assert torch.equal(model._feedback_slots, torch.zeros(9, 16))
 
 
 def test_feedback_batch_buffers_keep_batch_dim() -> None:
-    model = make_fake_model(pool_size=8, hidden=16, max_batch_size=4)
+    # The batch-position-indexed buffers stay at batch capacity; only the pool-keyed
+    # slot table carries the extra reserved row.
+    model = make_fake_model(hidden=16, max_batch_size=4)
 
     assert model._feedback_buffer.shape == (4, 16)
     assert model._feedback_mask.shape == (4,)
@@ -44,11 +47,7 @@ def test_feedback_slots_cover_max_req_pool_idx() -> None:
     # ReqToTokenPool hands out req_pool_idx in [1, max_running_requests], so a
     # request at the top index must be addressable.
     max_running_requests = 4
-    model = make_fake_model(
-        pool_size=feedback_slot_rows(max_running_requests),
-        hidden=16,
-        max_batch_size=max_running_requests,
-    )
+    model = make_fake_model(hidden=16, max_batch_size=max_running_requests)
 
     row = torch.ones(16, dtype=model._feedback_slots.dtype)
     model._feedback_slots[max_running_requests] = row
