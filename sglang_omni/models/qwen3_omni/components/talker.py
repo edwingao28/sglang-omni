@@ -488,10 +488,7 @@ class Qwen3OmniMoeTalkerTextModel(nn.Module):
         self.layers_to_capture = []
         max_batch_size = get_global_server_args().max_running_requests
         self._cp_enabled = True
-        self._init_feedback_state(
-            max_batch_size=max_batch_size,
-            req_pool_size=feedback_slot_rows(max_batch_size),
-        )
+        self._init_feedback_state(max_batch_size=max_batch_size)
 
         # Disable fused_qk_norm_rope so the separate QK-norm + RoPE path is
         # used.  The fp32 weight promotion + cast_x_before_out_mul is applied
@@ -500,7 +497,10 @@ class Qwen3OmniMoeTalkerTextModel(nn.Module):
             self.layers[idx].self_attn.use_fused_qk_norm_rope = False
             self.layers[idx].self_attn.compatible_with_fused_qk_norm_rope = False
 
-    def _init_feedback_state(self, max_batch_size: int, req_pool_size: int) -> None:
+    def _init_feedback_state(self, max_batch_size: int) -> None:
+        # Note (wenyao): the pool-keyed row count is derived here, not passed in, so no
+        # caller can size the slot table independently of the pool's own convention.
+        req_pool_size = feedback_slot_rows(max_batch_size)
         device = self.codec_embedding.weight.device
         dtype = self.codec_embedding.weight.dtype
         self._feedback_buffer = torch.zeros(

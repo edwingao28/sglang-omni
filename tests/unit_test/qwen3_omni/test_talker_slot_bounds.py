@@ -9,12 +9,14 @@ these fail on CPU instead of only under sustained slot churn on a GPU.
 
 from __future__ import annotations
 
+import logging
 from collections import deque
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from sglang_omni.models.qwen3_omni import talker_model_runner
 from sglang_omni.models.qwen3_omni.components.talker import feedback_slot_rows
 from sglang_omni.models.qwen3_omni.talker_model_runner import QwenTalkerModelRunner
 
@@ -113,6 +115,24 @@ def test_emit_scatter_covers_every_allocatable_index() -> None:
     assert torch.equal(model._feedback_slots[0], torch.zeros(HIDDEN))
 
 
+def test_emit_ignores_cuda_graph_padded_rows() -> None:
+    # A CUDA-graph padded batch carries extra reqs defaulted to req_pool_idx 0. Emit is
+    # driven by len(requests), so the pad rows must stay out of the scatter entirely.
+    real_pool_ids = [1, TOP_POOL_IDX]
+    model = _model(bs=len(real_pool_ids))
+    runner = _runner(model)
+
+    schedule_batch = _sched_batch(real_pool_ids + [0, 0])
+    runner._emit_code_chunks_and_feedback(
+        schedule_batch=schedule_batch, requests=_emit_requests(len(real_pool_ids))
+    )
+
+    for i, pool_idx in enumerate(real_pool_ids):
+        assert torch.equal(model._feedback_slots[pool_idx], model._output_embeds[i])
+    assert torch.equal(model._feedback_slots[0], torch.zeros(HIDDEN))
+    assert len(runner._outbox.sent) == len(real_pool_ids)
+
+
 def test_consume_gather_reads_top_pool_index() -> None:
     model = _model(bs=1)
     runner = _runner(model)
@@ -165,16 +185,17 @@ def _runner_through_init(
     *,
     feedback_enabled: bool = True,
     expose_alloc_size: bool = True,
+    expose_pool: bool = True,
 ) -> QwenTalkerModelRunner:
     model = SimpleNamespace(_feedback_slots=torch.zeros(slot_rows, HIDDEN))
     # Mirrors ReqToTokenPool: size rows allocatable from [1, size], _alloc_size total.
     pool = SimpleNamespace(size=pool_size)
     if expose_alloc_size:
         pool._alloc_size = pool_size + 1
-    tp_worker = SimpleNamespace(
-        gpu_id=0,
-        model_runner=SimpleNamespace(model=model, req_to_token_pool=pool),
-    )
+    inner_runner = SimpleNamespace(model=model)
+    if expose_pool:
+        inner_runner.req_to_token_pool = pool
+    tp_worker = SimpleNamespace(gpu_id=0, model_runner=inner_runner)
     return QwenTalkerModelRunner(
         tp_worker,
         output_processor=None,
@@ -194,6 +215,26 @@ def test_startup_guard_accepts_pool_sized_slots() -> None:
 def test_startup_guard_rejects_slots_missing_the_reserved_row() -> None:
     with pytest.raises(RuntimeError, match="too small for the request pool"):
         _runner_through_init(MAX_RUNNING_REQUESTS, MAX_RUNNING_REQUESTS)
+
+
+def test_startup_guard_rejects_tables_undersized_by_many_rows() -> None:
+    # A bound check, not a "+1" check: a table far below the pool must be rejected too.
+    with pytest.raises(RuntimeError, match="too small for the request pool"):
+        _runner_through_init(4, 16)
+
+
+def test_startup_guard_logs_instead_of_silently_skipping(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # An upstream rename of req_to_token_pool leaves every index site working and only
+    # this check quiet, so the skip has to announce itself.
+    with caplog.at_level(logging.WARNING, logger=talker_model_runner.__name__):
+        _runner_through_init(
+            MAX_RUNNING_REQUESTS, MAX_RUNNING_REQUESTS, expose_pool=False
+        )
+
+    assert "bound check skipped" in caplog.text
+    assert "req_to_token_pool" in caplog.text
 
 
 def test_startup_guard_falls_back_to_size_when_alloc_size_absent() -> None:
