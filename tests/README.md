@@ -411,6 +411,9 @@ that happened to contain an older version of the test.
     `_rollback_decode_prep_after_skip` idempotency contract, projected prefill
     tensor storage/slicing, decode feedback/text FIFO consumption, and replay
     of generated-token input embeds after decode retract
+  - talker overlap gate: `SGLANG_OMNI_TALKER_OVERLAP=1` keeps the caller's
+    `disable_overlap_schedule` while the default forces it off, with
+    CUDA-graph handling unchanged
   - Code2Wav streaming/cleanup behavior plus bounded batching deadlines,
     fire rules, sub-batch decomposition, output equivalence, and lifecycle
   - Code2Wav CUDA Graph lifecycle, exact-shape replay, atomic rollback, memory
