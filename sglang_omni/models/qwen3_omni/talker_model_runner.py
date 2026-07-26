@@ -216,7 +216,8 @@ class QwenTalkerModelRunner(ModelRunner):
 
         Replay depth is one row: the slot table keeps only the newest emit per
         request, so a request retracted with more than one unconsumed frame cannot be
-        fully replayed and raises in ``_generated_prefill_slice`` instead.
+        fully replayed. ``_generated_prefill_slice`` raises if replay ever needs a
+        second row.
         """
         if not self._feedback_enabled:
             return
@@ -229,6 +230,10 @@ class QwenTalkerModelRunner(ModelRunner):
         if pending <= 0:
             return
         if getattr(data, "retracted_feedback_embed", None) is not None:
+            # Note (wenyao): retiring the index here discards the newer row the
+            # re-prefill emitted into the slot, which is safe because that prefill
+            # regenerates the same frame; the older held snapshot is the one still
+            # owed to the model.
             return
         if slot_idx is None:
             raise RuntimeError(
