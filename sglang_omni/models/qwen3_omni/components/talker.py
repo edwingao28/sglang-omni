@@ -477,16 +477,9 @@ class Qwen3OmniMoeTalkerTextModel(nn.Module):
         self.layers_to_capture = []
         max_batch_size = get_global_server_args().max_running_requests
         self._cp_enabled = True
-        self._feedback_buffer = torch.zeros(
-            max_batch_size,
-            config.hidden_size,
-            device=self.codec_embedding.weight.device,
-            dtype=self.codec_embedding.weight.dtype,
-        )
-        self._feedback_mask = torch.zeros(
-            max_batch_size,
-            dtype=torch.bool,
-            device=self.codec_embedding.weight.device,
+        self._init_feedback_state(
+            max_batch_size=max_batch_size,
+            req_pool_size=max_batch_size,
         )
 
         # Disable fused_qk_norm_rope so the separate QK-norm + RoPE path is
@@ -495,6 +488,28 @@ class Qwen3OmniMoeTalkerTextModel(nn.Module):
         for idx in range(self.start_layer, self.end_layer):
             self.layers[idx].self_attn.use_fused_qk_norm_rope = False
             self.layers[idx].self_attn.compatible_with_fused_qk_norm_rope = False
+
+    def _init_feedback_state(self, max_batch_size: int, req_pool_size: int) -> None:
+        device = self.codec_embedding.weight.device
+        dtype = self.codec_embedding.weight.dtype
+        self._feedback_buffer = torch.zeros(
+            max_batch_size,
+            self.config.hidden_size,
+            device=device,
+            dtype=dtype,
+        )
+        self._feedback_mask = torch.zeros(
+            max_batch_size,
+            dtype=torch.bool,
+            device=device,
+        )
+        # Note (wenyao): indexed by req_pool_idx, not batch position.
+        self._feedback_slots = torch.zeros(
+            req_pool_size,
+            self.config.hidden_size,
+            device=device,
+            dtype=dtype,
+        )
 
     def get_input_embeddings(self):
         return self.codec_embedding
@@ -891,6 +906,7 @@ class Qwen3OmniTalker(nn.Module):
         self._cp_enabled = self.model._cp_enabled
         self._feedback_buffer = self.model._feedback_buffer
         self._feedback_mask = self.model._feedback_mask
+        self._feedback_slots = self.model._feedback_slots
         self._predictor_input_buffer = torch.zeros(
             max_batch_size,
             predictor_len,
