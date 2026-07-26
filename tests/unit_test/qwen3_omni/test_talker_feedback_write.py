@@ -5,6 +5,7 @@ from collections import deque
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 import torch
 
 from sglang_omni.models.qwen3_omni import talker_model_runner
@@ -178,6 +179,38 @@ def test_write_records_decode_input_history() -> None:
 
     assert len(data.decode_input_embeds) == 1
     assert torch.equal(data.decode_input_embeds[0], torch.full((hidden,), 21.0))
+
+
+def test_consumed_rows_survive_later_buffer_writes() -> None:
+    n, hidden = 2, 3
+    model = _fake_model(n, hidden)
+    runner = _runner(model)
+
+    feedbacks = [torch.full((hidden,), float(i + 1)) for i in range(n)]
+    texts = [torch.full((hidden,), float(10 * (i + 1))) for i in range(n)]
+    _seed_slots(model, feedbacks)
+    requests = [_req_wrap(_data(texts[i], pool_idx=POOL_IDS[i])) for i in range(n)]
+
+    runner._write_feedback_buffers(requests)
+
+    expected = [feedbacks[i] + texts[i] for i in range(n)]
+    model._feedback_buffer.copy_(model._feedback_buffer + 999.0)
+    model._feedback_slots.copy_(model._feedback_slots + 999.0)
+
+    for i in range(n):
+        assert torch.equal(requests[i].data.decode_input_embeds[0], expected[i])
+
+
+def test_pending_feedback_without_pool_slot_raises() -> None:
+    n, hidden = 1, 3
+    model = _fake_model(n, hidden)
+    runner = _runner(model)
+
+    data = _data(torch.full((hidden,), 10.0), pool_idx=POOL_IDS[0])
+    data.req.req_pool_idx = None
+
+    with pytest.raises(RuntimeError, match="no pool slot"):
+        runner._write_feedback_buffers([_req_wrap(data)])
 
 
 def test_readiness_requires_pending_feedback_count() -> None:
