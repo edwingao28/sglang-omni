@@ -510,6 +510,12 @@ class Qwen3OmniMoeTalkerTextModel(nn.Module):
             device=device,
             dtype=dtype,
         )
+        # Note (wenyao): consume adds slot rows straight into _feedback_buffer without
+        # per-row dtype/device checks, so pin the invariant once here.
+        assert (
+            self._feedback_slots.dtype == self._feedback_buffer.dtype
+            and self._feedback_slots.device == self._feedback_buffer.device
+        ), "Talker feedback slots must match the feedback buffer dtype/device"
 
     def get_input_embeddings(self):
         return self.codec_embedding

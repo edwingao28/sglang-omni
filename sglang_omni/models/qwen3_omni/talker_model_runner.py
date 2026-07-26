@@ -373,7 +373,11 @@ class QwenTalkerModelRunner(ModelRunner):
             override = getattr(data, "retracted_feedback_embed", None)
             pool_idx = getattr(getattr(data, "req", None), "req_pool_idx", None)
             if override is None and pool_idx is None:
-                continue
+                raise RuntimeError(
+                    "Talker request has pending feedback but no pool slot to read it "
+                    "from: req_pool_idx is None and no retracted feedback snapshot "
+                    "was taken"
+                )
             next_text = self._peek_next_text_row(data)
             if next_text is None:
                 continue
@@ -399,8 +403,10 @@ class QwenTalkerModelRunner(ModelRunner):
             self._consume_feedback_and_text(data)
 
         if len(rows) == batch_size:
-            # Note (wenyao): dense steady state: rows is exactly range(batch_size),
-            # so slice-assign and skip the per-frame pageable index H2D
+            # Note (wenyao): dense steady state: rows is exactly range(batch_size), so
+            # the write is a slice-assign and needs no row-index tensor. The pool_ids
+            # gather above still costs one H2D per step; a persistent pool-id buffer
+            # is deferred to the overlap work that reshapes batch prep.
             feedback_buffer[:batch_size] = combined
             feedback_mask[:batch_size] = True
             return
