@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections import deque
 from typing import Any
 
@@ -28,12 +29,14 @@ def configure_talker_server_args(
     """
 
     want_cuda_graph = not bool(server_args.disable_cuda_graph)
+    overlap_requested = os.environ.get("SGLANG_OMNI_TALKER_OVERLAP", "0") == "1"
     overrides = {
         "disable_radix_cache": True,
         "chunked_prefill_size": 0,
     }
     if feedback_enabled:
-        overrides["disable_overlap_schedule"] = True
+        if not overlap_requested:
+            overrides["disable_overlap_schedule"] = True
         if want_cuda_graph:
             overrides["disable_cuda_graph"] = True
     override_server_args(server_args, "qwen3_omni.talker", **overrides)
