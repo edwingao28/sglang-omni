@@ -51,7 +51,8 @@ def _take_decode_input(sched_req: SimpleNamespace) -> torch.Tensor | None:
 def test_qwen_talker_decode_input_consumes_feedback_and_text_or_pad() -> None:
     """Preserves FIFO consumption for ordinary text and final pad fallback."""
     text_req = _sched_req(
-        pending_feedback_queue=deque([torch.tensor([1.0, 2.0])]),
+        pending_feedback_count=1,
+        retracted_feedback_embed=torch.tensor([1.0, 2.0]),
         pending_text_queue=deque([torch.tensor([20.0, 20.0])]),
         tts_pad_embed=torch.tensor([7.0, 8.0]),
         thinker_chunks_done=False,
@@ -61,26 +62,27 @@ def test_qwen_talker_decode_input_consumes_feedback_and_text_or_pad() -> None:
         _take_decode_input(text_req),
         torch.tensor([21.0, 22.0]),
     )
-    assert len(text_req.data.pending_feedback_queue) == 0
+    assert text_req.data.pending_feedback_count == 0
+    assert text_req.data.retracted_feedback_embed is None
     assert len(text_req.data.pending_text_queue) == 0
 
     pad_req = _sched_req(
-        pending_feedback_queue=deque([torch.tensor([1.0, 2.0])]),
+        pending_feedback_count=1,
+        retracted_feedback_embed=torch.tensor([1.0, 2.0]),
         pending_text_queue=deque(),
         tts_pad_embed=torch.tensor([7.0, 8.0]),
         thinker_chunks_done=True,
     )
     assert torch.equal(_take_decode_input(pad_req), torch.tensor([8.0, 10.0]))
-    assert len(pad_req.data.pending_feedback_queue) == 0
+    assert pad_req.data.pending_feedback_count == 0
     assert len(pad_req.data.pending_text_queue) == 0
 
 
 def test_qwen_talker_decode_input_consumes_device_text_queue() -> None:
     """Preserves FIFO decode semantics for tensor-backed future text rows."""
     text_req = _sched_req(
-        pending_feedback_queue=deque(
-            [torch.tensor([1.0, 2.0]), torch.tensor([3.0, 4.0])]
-        ),
+        pending_feedback_count=1,
+        retracted_feedback_embed=torch.tensor([1.0, 2.0]),
         pending_text_queue=PendingTextTensorQueue.from_tensor(
             torch.tensor([[20.0, 20.0], [30.0, 30.0]])
         ),
@@ -90,6 +92,9 @@ def test_qwen_talker_decode_input_consumes_device_text_queue() -> None:
 
     assert torch.equal(_take_decode_input(text_req), torch.tensor([21.0, 22.0]))
     assert len(text_req.data.pending_text_queue) == 1
+
+    text_req.data.pending_feedback_count = 1
+    text_req.data.retracted_feedback_embed = torch.tensor([3.0, 4.0])
     assert torch.equal(_take_decode_input(text_req), torch.tensor([33.0, 34.0]))
     assert len(text_req.data.pending_text_queue) == 0
 
@@ -97,7 +102,8 @@ def test_qwen_talker_decode_input_consumes_device_text_queue() -> None:
 def test_qwen_talker_decode_input_rejects_implicit_row_transfer() -> None:
     """Keeps decode hot path free of implicit dtype/device conversions."""
     sched_req = _sched_req(
-        pending_feedback_queue=deque([torch.tensor([1.0, 2.0])]),
+        pending_feedback_count=1,
+        retracted_feedback_embed=torch.tensor([1.0, 2.0]),
         pending_text_queue=deque([torch.tensor([20.0, 20.0], dtype=torch.float64)]),
         tts_pad_embed=torch.tensor([7.0, 8.0]),
         thinker_chunks_done=False,
@@ -110,42 +116,40 @@ def test_qwen_talker_decode_input_rejects_implicit_row_transfer() -> None:
 def test_qwen_talker_decode_input_preserves_feedback_until_text_arrives() -> None:
     """Preserves queued feedback when neither text nor final pad is ready."""
     sched_req = _sched_req(
-        pending_feedback_queue=deque(
-            [torch.tensor([1.0, 2.0]), torch.tensor([3.0, 4.0])]
-        ),
+        pending_feedback_count=2,
+        retracted_feedback_embed=torch.tensor([1.0, 2.0]),
         pending_text_queue=deque(),
         tts_pad_embed=torch.tensor([7.0, 8.0]),
         thinker_chunks_done=False,
     )
 
     assert _take_decode_input(sched_req) is None
-    assert len(sched_req.data.pending_feedback_queue) == 2
+    assert sched_req.data.pending_feedback_count == 2
+    assert torch.equal(
+        sched_req.data.retracted_feedback_embed, torch.tensor([1.0, 2.0])
+    )
 
     sched_req.data.pending_text_queue.append(torch.tensor([20.0, 20.0]))
     assert torch.equal(_take_decode_input(sched_req), torch.tensor([21.0, 22.0]))
-    assert len(sched_req.data.pending_feedback_queue) == 1
-    assert torch.equal(
-        sched_req.data.pending_feedback_queue[0],
-        torch.tensor([3.0, 4.0]),
-    )
+    assert sched_req.data.pending_feedback_count == 1
 
 
 def test_qwen_talker_decode_readiness_requires_feedback_and_text_or_pad() -> None:
     """Preserves decode gating across no-text, text-ready, and pad-ready states."""
     no_text = SimpleNamespace(
-        pending_feedback_queue=deque([torch.tensor([1.0, 2.0])]),
+        pending_feedback_count=1,
         pending_text_queue=deque(),
         thinker_chunks_done=False,
         tts_pad_embed=torch.tensor([7.0, 8.0]),
     )
     with_text = SimpleNamespace(
-        pending_feedback_queue=deque([torch.tensor([1.0, 2.0])]),
+        pending_feedback_count=1,
         pending_text_queue=deque([torch.tensor([20.0, 20.0])]),
         thinker_chunks_done=False,
         tts_pad_embed=torch.tensor([7.0, 8.0]),
     )
     with_pad = SimpleNamespace(
-        pending_feedback_queue=deque([torch.tensor([1.0, 2.0])]),
+        pending_feedback_count=1,
         pending_text_queue=deque(),
         thinker_chunks_done=True,
         tts_pad_embed=torch.tensor([7.0, 8.0]),
@@ -1982,7 +1986,7 @@ def test_post_prefill_preserves_prefill_embeds_for_retract() -> None:
     embeds = torch.randn(4, 8)
     sched_req = _sched_req(
         prefill_input_embeds=embeds,
-        pending_feedback_queue=deque(),
+        pending_feedback_count=0,
         pending_text_queue=deque(),
         tts_pad_embed=None,
         thinker_chunks_done=True,
@@ -2011,7 +2015,7 @@ def test_projected_prefill_survives_decode_retract() -> None:
             prefix_indices=[],
             extend_input_len=10,
         ),
-        pending_feedback_queue=deque(),
+        pending_feedback_count=0,
         pending_text_queue=deque(),
         tts_pad_embed=None,
         thinker_chunks_done=True,
@@ -2055,16 +2059,21 @@ def test_write_feedback_buffers_records_decode_input_history() -> None:
     """Decode inputs consumed by the feedback buffer are replayable after retract."""
     feedback_buffer = torch.zeros(1, 2)
     feedback_mask = torch.zeros(1, dtype=torch.bool)
+    feedback_slots = torch.zeros(4, 2)
+    feedback_slots[3] = torch.tensor([1.0, 2.0])
     sched_req = _sched_req(
-        pending_feedback_queue=deque([torch.tensor([1.0, 2.0])]),
+        pending_feedback_count=1,
+        retracted_feedback_embed=None,
         pending_text_queue=deque([torch.tensor([20.0, 30.0])]),
         decode_input_embeds=[],
+        req=SimpleNamespace(req_pool_idx=3),
     )
 
     runner = object.__new__(QwenTalkerModelRunner)
     runner.model = SimpleNamespace(
         _feedback_buffer=feedback_buffer,
         _feedback_mask=feedback_mask,
+        _feedback_slots=feedback_slots,
     )
 
     runner._write_feedback_buffers([sched_req])
@@ -2089,7 +2098,8 @@ def test_projected_prefill_retract_replays_generated_decode_inputs() -> None:
         input_embeds_are_projected=True,
         prefill_input_embeds=full_embeds,
         decode_input_embeds=decode_history,
-        pending_feedback_queue=deque([torch.tensor([3.0, 4.0])]),
+        pending_feedback_count=1,
+        retracted_feedback_embed=torch.tensor([3.0, 4.0]),
         pending_text_queue=deque([torch.tensor([30.0, 40.0])]),
         req=SimpleNamespace(
             input_embeds=None,
@@ -2129,7 +2139,8 @@ def test_projected_prefill_retract_replays_generated_decode_inputs() -> None:
     )
     assert torch.equal(result._embeds, expected)
     assert len(sched_req.data.decode_input_embeds) == 3
-    assert len(sched_req.data.pending_feedback_queue) == 0
+    assert sched_req.data.pending_feedback_count == 0
+    assert sched_req.data.retracted_feedback_embed is None
     assert len(sched_req.data.pending_text_queue) == 0
 
 
