@@ -17,6 +17,16 @@ from sglang_omni.vendor.sglang.server_args import override_server_args
 logger = logging.getLogger(__name__)
 
 
+def talker_overlap_requested() -> bool:
+    """Whether the talker stage was asked to overlap decode steps.
+
+    Single source of truth for the env gate: it both keeps
+    ``disable_overlap_schedule`` unforced here and turns on the scheduler's
+    one-step-lookahead async decode loop in ``create_talker_scheduler``.
+    """
+    return os.environ.get("SGLANG_OMNI_TALKER_OVERLAP", "0") == "1"
+
+
 def configure_talker_server_args(
     server_args: Any,
     *,
@@ -29,7 +39,7 @@ def configure_talker_server_args(
     """
 
     want_cuda_graph = not bool(server_args.disable_cuda_graph)
-    overlap_requested = os.environ.get("SGLANG_OMNI_TALKER_OVERLAP", "0") == "1"
+    overlap_requested = talker_overlap_requested()
     overrides = {
         "disable_radix_cache": True,
         "chunked_prefill_size": 0,
