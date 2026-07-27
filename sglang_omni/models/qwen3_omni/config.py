@@ -208,7 +208,6 @@ def _code2wav_stage(*, gpu: int, process: str) -> StageConfig:
             "max_batch_wait_ms": 0,
             "batch_floor": 2,
             "batch_ceiling": 8,
-            "enable_cuda_graph": False,
         },
         gpu=gpu,
         terminal=True,
