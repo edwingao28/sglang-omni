@@ -10,6 +10,7 @@ import torch
 
 from sglang_omni.models.qwen3_omni.components.code2wav_scheduler import (
     Code2WavScheduler,
+    Code2WavStreamState,
 )
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.scheduling.messages import IncomingMessage
@@ -161,6 +162,23 @@ def test_decompose_batch() -> None:
     assert Code2WavScheduler._decompose_batch(6) == [4, 2]
     assert Code2WavScheduler._decompose_batch(7) == [4, 2, 1]
     assert Code2WavScheduler._decompose_batch(8) == [8]
+
+
+def test_eager_step_plan_is_one_forward() -> None:
+    scheduler = _make_batching_scheduler()
+    assert scheduler._cuda_graph_runner is None
+    participants = [(f"r{i}", Code2WavStreamState()) for i in range(7)]
+    assert scheduler.build_step_plan(participants) == [7]
+
+
+def test_five_streams_take_one_forward_not_two() -> None:
+    scheduler = _make_batching_scheduler(max_batch_wait_ms=0, batch_floor=2)
+    rids = [f"req-{i}" for i in range(5)]
+    _feed_batch(scheduler, [(rid, 1) for rid in rids])
+    _feed_batch(scheduler, [(rid, 2) for rid in rids])
+    assert scheduler._model.calls == [(5, 2, 2)]
+    for rid in rids:
+        assert scheduler._stream_states[rid].emitted == 2
 
 
 def test_first_window_fires_immediately() -> None:

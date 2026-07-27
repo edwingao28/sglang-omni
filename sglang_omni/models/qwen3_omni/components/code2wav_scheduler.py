@@ -404,6 +404,8 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
     def build_step_plan(
         self, participants: list[tuple[str, Code2WavStreamState]]
     ) -> list[int]:
+        if self._cuda_graph_runner is None:
+            return [len(participants)]
         return self._decompose_batch(len(participants))
 
     def run_step(
