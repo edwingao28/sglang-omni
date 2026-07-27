@@ -544,6 +544,72 @@ def test_omni_scheduler_emit_stream_output_skips_aborted_requests() -> None:
     assert scheduler.outbox.empty()
 
 
+def test_omni_scheduler_stream_output_clears_feedback_state_on_finish() -> None:
+    """Finish must retire the feedback slot index with the rest of the state."""
+    scheduler = object.__new__(OmniScheduler)
+    scheduler.outbox = Queue()
+    scheduler._aborted_request_ids = set()
+    scheduler._abort_callback = None
+    scheduler._first_emit_done = set()
+    scheduler._prefill_start_done = set()
+    scheduler.server_args = SimpleNamespace(weight_version="v0")
+    scheduler._result_adapter = lambda data: {"rid": "req-done"}
+
+    data = SimpleNamespace(
+        prefill_input_embeds=object(),
+        decode_input_embeds=object(),
+        pending_feedback_count=2,
+        retracted_feedback_embed=object(),
+        feedback_slot_idx=7,
+    )
+    req = SimpleNamespace(
+        rid="req-done",
+        finished=lambda: True,
+        finished_reason=None,
+        output_ids=[1],
+        _omni_data=data,
+    )
+
+    scheduler.stream_output([req])
+
+    assert scheduler.outbox.get_nowait().request_id == "req-done"
+    assert data.feedback_slot_idx is None
+    assert data.pending_feedback_count == 0
+    assert data.retracted_feedback_embed is None
+
+
+def test_omni_scheduler_stream_output_clears_feedback_state_on_abort() -> None:
+    """The FINISH_ABORT path must not leave a stale slot index behind."""
+    scheduler = object.__new__(OmniScheduler)
+    scheduler.outbox = Queue()
+    scheduler._aborted_request_ids = {"req-aborted"}
+    scheduler._abort_callback = None
+    scheduler._first_emit_done = set()
+    scheduler._prefill_start_done = set()
+
+    data = SimpleNamespace(
+        prefill_input_embeds=object(),
+        decode_input_embeds=object(),
+        pending_feedback_count=2,
+        retracted_feedback_embed=object(),
+        feedback_slot_idx=7,
+    )
+    req = SimpleNamespace(
+        rid="req-aborted",
+        finished=lambda: True,
+        finished_reason=None,
+        output_ids=[],
+        _omni_data=data,
+    )
+
+    scheduler.stream_output([req])
+
+    assert scheduler.outbox.empty()
+    assert data.feedback_slot_idx is None
+    assert data.pending_feedback_count == 0
+    assert data.retracted_feedback_embed is None
+
+
 def test_omni_scheduler_fish_abort_during_step_suppresses_chunk_and_result() -> None:
     """A Fish abort landing mid-step defers per-request cleanup to the
     upstream FINISH_ABORT path, leaves the buffered codes unconsumed, and
