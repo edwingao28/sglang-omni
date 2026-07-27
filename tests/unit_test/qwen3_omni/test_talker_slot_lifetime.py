@@ -19,7 +19,7 @@ import pytest
 import torch
 from sglang.srt.managers.scheduler import Scheduler as _Upstream
 
-from sglang_omni.models.qwen3_omni.components.talker import feedback_slot_rows
+from sglang_omni.models.qwen3_omni.components.feedback_slots import feedback_slot_rows
 from sglang_omni.models.qwen3_omni.talker_model_runner import QwenTalkerModelRunner
 from sglang_omni.models.qwen3_omni.talker_scheduler import QwenTalkerScheduler
 

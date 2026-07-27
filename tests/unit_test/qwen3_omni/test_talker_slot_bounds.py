@@ -17,7 +17,7 @@ import pytest
 import torch
 
 from sglang_omni.models.qwen3_omni import talker_model_runner
-from sglang_omni.models.qwen3_omni.components.talker import feedback_slot_rows
+from sglang_omni.models.qwen3_omni.components.feedback_slots import feedback_slot_rows
 from sglang_omni.models.qwen3_omni.talker_model_runner import QwenTalkerModelRunner
 
 MAX_RUNNING_REQUESTS = 4

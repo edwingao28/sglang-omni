@@ -14,6 +14,7 @@ from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.utils import add_prefix
 from torch import nn
 
+from sglang_omni.models.qwen3_omni.components.feedback_slots import feedback_slot_rows
 from sglang_omni.models.qwen3_omni.components.thinker_model import (
     Qwen3OmniMoeThinkerTextAttention,
     Qwen3OmniMoeThinkerTextDecoderLayer,
@@ -46,17 +47,6 @@ from sglang_omni.vendor.sglang.server_args import get_global_server_args
 from sglang_omni.vendor.sglang.utils import make_layers
 
 logger = logging.getLogger(__name__)
-
-
-def feedback_slot_rows(max_running_requests: int) -> int:
-    """Rows a table keyed by ``req_pool_idx`` needs to cover a pool of that size.
-
-    ``ReqToTokenPool`` reserves row 0 as the CUDA-graph pad row and allocates from
-    ``[1, size]`` inclusive, so its own backing tensor is ``size + 1`` rows and the
-    largest valid ``req_pool_idx`` equals the pool size. Any table addressed by the
-    same index must match that shape.
-    """
-    return max_running_requests + 1
 
 
 def _bind_default_weight_loaders(module: nn.Module) -> None:
