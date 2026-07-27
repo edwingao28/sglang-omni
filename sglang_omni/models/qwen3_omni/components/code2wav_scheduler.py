@@ -447,8 +447,10 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
             group = participants[cursor : cursor + sub]
             cursor += sub
             rows = []
+            window_ends: list[int] = []
             for _, state in group:
                 start, end = state.emitted, len(state.chunks)
+                window_ends.append(end)
                 context = min(self._left_context_size, start)
                 rows.append(
                     torch.stack(state.chunks[start - context : end], dim=0).transpose(
@@ -479,7 +481,7 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
             host = wav.detach().cpu().float()
             for i, (rid, state) in enumerate(group):
                 audio = host[i].reshape(-1).numpy().copy()
-                state.emitted = len(state.chunks)
+                state.emitted = window_ends[i]
                 state.due_since = None
                 if audio.size == 0:
                     continue

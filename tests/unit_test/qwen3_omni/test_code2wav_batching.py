@@ -233,6 +233,27 @@ def test_bucket_isolation() -> None:
     assert scheduler._stream_states["req-b"].emitted == 6
 
 
+def test_step_cursor_uses_captured_window_end() -> None:
+    scheduler = _make_batching_scheduler(max_batch_wait_ms=0, batch_floor=2)
+    _feed_batch(scheduler, [("req-1", 1), ("req-1", 2)])
+    _drain_outbox(scheduler)
+
+    state = scheduler._stream_states["req-1"]
+    real_forward = scheduler._forward_codes
+
+    def _forward_then_ingest(codes, **kwargs):
+        result = real_forward(codes, **kwargs)
+        state.chunks.append(torch.tensor([9, 90]))
+        return result
+
+    scheduler._forward_codes = _forward_then_ingest
+    _feed_batch(scheduler, [("req-1", 3), ("req-1", 4)])
+
+    assert state.emitted == 4
+    assert len(state.chunks) == 5
+    assert scheduler._ready(state) == 1
+
+
 def test_bitwise_equivalence() -> None:
     schedule = {
         "req-1": [1, 2, 3, 4, 5, 6],
