@@ -446,9 +446,21 @@ def _apply_model_worker_backend_policy(
     ):
         # Note:(Chenchen Hong) flashinfer_cutlass MoE deadlocks CUDA-graph
         # capture on H20 (no H20 kernel coverage); triton captures cleanly there.
-        server_args.moe_runner_backend = (
-            "triton" if _is_h20_device() else "flashinfer_cutlass"
-        )
+        if _is_h20_device():
+            server_args.moe_runner_backend = "triton"
+        else:
+            if not _is_flashinfer_cutlass_moe_prebuilt():
+                raise ValueError(
+                    "BF16 Qwen3-Omni talker needs flashinfer's prebuilt CUTLASS "
+                    "fused-MoE kernel, which is missing in this environment. Its "
+                    "first call runs inside talker CUDA graph capture, so building "
+                    "it from source there takes over ten minutes and trips the "
+                    "startup timeout. Install the flashinfer-jit-cache wheel "
+                    "matching your CUDA version from https://flashinfer.ai/whl/, "
+                    "or set the talker's moe_runner_backend to 'triton' (triton "
+                    "changes talker audio output)."
+                )
+            server_args.moe_runner_backend = "flashinfer_cutlass"
         moe_runner_backend = server_args.moe_runner_backend
 
     if (
@@ -544,6 +556,27 @@ def _is_h20_device() -> bool:
         return bool(re.search(r"\bH20\b", torch.cuda.get_device_name(0)))
     except Exception:
         return False
+
+
+def _is_flashinfer_cutlass_moe_prebuilt() -> bool:
+    """True unless flashinfer's CUTLASS fused-MoE module is known to need a source build."""
+    # Note:(Wenyao Gao) flashinfer-jit-cache is not on PyPI, so a pip install can lack
+    # the module entirely; answer True whenever availability cannot be determined so a
+    # detection gap never blocks an environment that would otherwise work.
+    try:
+        import torch
+        from flashinfer.jit import env as jit_env
+
+        if not torch.cuda.is_available():
+            return True
+        major, minor = torch.cuda.get_device_capability()
+        module_name = f"fused_moe_{major}{minor}"
+        return any(
+            (base / module_name).exists()
+            for base in (jit_env.FLASHINFER_AOT_DIR, jit_env.FLASHINFER_JIT_DIR)
+        )
+    except Exception:
+        return True
 
 
 def _is_fp8_cutlass_moe_supported() -> bool:

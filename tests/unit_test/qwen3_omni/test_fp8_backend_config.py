@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -27,6 +28,7 @@ class BackendPolicyCase:
     expected_moe_backend: str | None = None
     expected_fp8_gemm_backend: str | None = None
     error_match: str | None = None
+    flashinfer_moe_prebuilt: bool = True
 
 
 def _server_args(
@@ -96,6 +98,53 @@ def _model_config(
             expected_quantization=None,
             expected_moe_backend="triton",
             expected_fp8_gemm_backend="auto",
+        ),
+        BackendPolicyCase(
+            name="bf16_talker_auto_rejects_missing_flashinfer_moe_kernel",
+            model_quantization=None,
+            server_quantization=None,
+            native_fp8_block_quant=False,
+            model_arch_override="Qwen3OmniTalker",
+            has_moe=True,
+            initial_moe_backend="auto",
+            initial_fp8_gemm_backend="auto",
+            ep_size=1,
+            cutlass_supported=True,
+            expected_quantization=None,
+            error_match="flashinfer-jit-cache",
+            flashinfer_moe_prebuilt=False,
+        ),
+        BackendPolicyCase(
+            name="bf16_talker_explicit_triton_survives_missing_flashinfer_moe_kernel",
+            model_quantization=None,
+            server_quantization=None,
+            native_fp8_block_quant=False,
+            model_arch_override="Qwen3OmniTalker",
+            has_moe=True,
+            initial_moe_backend="triton",
+            initial_fp8_gemm_backend="auto",
+            ep_size=1,
+            cutlass_supported=True,
+            expected_quantization=None,
+            expected_moe_backend="triton",
+            expected_fp8_gemm_backend="auto",
+            flashinfer_moe_prebuilt=False,
+        ),
+        BackendPolicyCase(
+            name="fp8_talker_auto_ignores_missing_flashinfer_moe_kernel",
+            model_quantization="fp8",
+            server_quantization=None,
+            native_fp8_block_quant=True,
+            model_arch_override="Qwen3OmniTalker",
+            has_moe=True,
+            initial_moe_backend="auto",
+            initial_fp8_gemm_backend="auto",
+            ep_size=1,
+            cutlass_supported=True,
+            expected_quantization="fp8",
+            expected_moe_backend="cutlass",
+            expected_fp8_gemm_backend="triton",
+            flashinfer_moe_prebuilt=False,
         ),
         BackendPolicyCase(
             name="fp8_talker_auto_uses_cutlass_moe_and_triton_dense_gemm",
@@ -336,6 +385,11 @@ def test_model_worker_backend_policy_precedence(
         lambda: case.cutlass_supported,
     )
     monkeypatch.setattr(model_worker, "_is_h20_device", lambda: False)
+    monkeypatch.setattr(
+        model_worker,
+        "_is_flashinfer_cutlass_moe_prebuilt",
+        lambda: case.flashinfer_moe_prebuilt,
+    )
     server_args = _server_args(
         quantization=case.server_quantization,
         moe_runner_backend=case.initial_moe_backend,
@@ -408,6 +462,40 @@ def test_fp8_cutlass_moe_support_matches_sglang_0_5_12_post1_contract(
     )
 
     assert model_worker._is_fp8_cutlass_moe_supported() is expected_supported
+
+
+@pytest.mark.parametrize(
+    ("present_in", "expected"),
+    [
+        pytest.param("aot", True, id="shipped_by_jit_cache_wheel"),
+        pytest.param("jit", True, id="already_built_locally"),
+        pytest.param(None, False, id="absent_needs_source_build"),
+    ],
+)
+def test_flashinfer_cutlass_moe_prebuilt_detection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    present_in: str | None,
+    expected: bool,
+) -> None:
+    aot_dir = tmp_path / "aot"
+    jit_dir = tmp_path / "jit"
+    aot_dir.mkdir()
+    jit_dir.mkdir()
+    if present_in is not None:
+        ({"aot": aot_dir, "jit": jit_dir}[present_in] / "fused_moe_90").mkdir()
+
+    _install_fake_flashinfer_jit_env(monkeypatch, aot_dir=aot_dir, jit_dir=jit_dir)
+
+    assert model_worker._is_flashinfer_cutlass_moe_prebuilt() is expected
+
+
+def test_flashinfer_cutlass_moe_prebuilt_fails_open_when_undetectable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "flashinfer.jit", None)
+
+    assert model_worker._is_flashinfer_cutlass_moe_prebuilt() is True
 
 
 def test_backend_global_initialization_for_fp8_moe_model(monkeypatch) -> None:
@@ -592,6 +680,30 @@ def _install_fake_cutlass_support_modules(
         is_sm90_supported=lambda: sm90_supported,
         is_sm100_supported=lambda: sm100_supported,
     )
+
+
+def _install_fake_flashinfer_jit_env(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    aot_dir: Path,
+    jit_dir: Path,
+) -> None:
+    _install_fake_module(
+        monkeypatch,
+        "torch",
+        cuda=SimpleNamespace(
+            is_available=lambda: True,
+            get_device_capability=lambda: (9, 0),
+        ),
+    )
+    env_module = _install_fake_module(
+        monkeypatch,
+        "flashinfer.jit.env",
+        FLASHINFER_AOT_DIR=aot_dir,
+        FLASHINFER_JIT_DIR=jit_dir,
+    )
+    _install_fake_module(monkeypatch, "flashinfer")
+    _install_fake_module(monkeypatch, "flashinfer.jit", env=env_module)
 
 
 def _install_fake_module(

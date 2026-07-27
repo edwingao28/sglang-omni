@@ -15,9 +15,16 @@ docker run -it --shm-size 32g --gpus all frankleeeee/sglang-omni:dev /bin/zsh
 ```bash
 git clone https://github.com/sgl-project/sglang-omni.git
 cd sglang-omni
-uv venv .venv -p 3.12 && source .venv/bin/activate
-uv pip install -v .
+uv pip install --system -v .
 ```
+
+Install into the image's own environment, without creating a virtualenv. The BF16
+talker MoE needs flashinfer's prebuilt CUTLASS kernels, which ship in the image as
+`flashinfer-jit-cache`. That wheel is not on PyPI, so a fresh `uv venv` hides it and
+`uv pip install` cannot pull it back — the first talker CUDA graph capture then
+builds the kernel from source, which takes over ten minutes and trips the startup
+timeout. Outside this image, install the `flashinfer-jit-cache` wheel matching your
+CUDA version from <https://flashinfer.ai/whl/>.
 
 ## Server Configuration
 
