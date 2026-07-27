@@ -1044,6 +1044,12 @@ class OmniScheduler:
                         logger.exception(
                             "OmniScheduler: abort cleanup failed for %s", rid
                         )
+                data = req._omni_data
+                data.prefill_input_embeds = None
+                data.decode_input_embeds = None
+                data.pending_feedback_count = 0
+                data.retracted_feedback_embed = None
+                data.feedback_slot_idx = None
                 self._first_emit_done.discard(rid)
                 self._prefill_start_done.discard(rid)
                 continue
@@ -1075,6 +1081,7 @@ class OmniScheduler:
                 data.decode_input_embeds = None
                 data.pending_feedback_count = 0
                 data.retracted_feedback_embed = None
+                data.feedback_slot_idx = None
 
             self._first_emit_done.discard(rid)
             self._prefill_start_done.discard(rid)
