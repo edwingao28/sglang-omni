@@ -65,8 +65,11 @@ tests/
     │   ├── test_streaming.py
     │   ├── test_talker.py
     │   ├── test_talker_emit_snapshot.py
+    │   ├── test_talker_feedback_slots.py
     │   ├── test_talker_feedback_write.py
+    │   ├── test_talker_overlap_gate.py
     │   ├── test_talker_row_ownership.py
+    │   ├── test_talker_slot_bounds.py
     │   ├── test_talker_slot_lifetime.py
     │   ├── test_talker_token_readback.py
     │   └── test_text_template.py
