@@ -2192,6 +2192,7 @@ def _talker_seed_self(
         _sampling_staging_gpu=torch.zeros(6, max_bs, dtype=torch.int64, device=device),
         _sampling_staging_event=(torch.cuda.Event() if device.type == "cuda" else None),
         _sampled_token_ids=torch.zeros(max_bs, dtype=torch.long, device=device),
+        _mask_set_value=torch.ones((), dtype=torch.bool, device=device),
         _decode_prep_rids=None,
         _decode_prep_step_ids=[],
         _decode_prep_rep_rows=None,
@@ -2428,6 +2429,32 @@ def test_talker_prepare_decode_buffers_cuda_matches_fresh_rebuild() -> None:
         "_suppress_mask",
     ):
         torch.testing.assert_close(getattr(fake, name), getattr(fresh, name))
+
+
+def test_talker_decode_reuse_marks_the_mask_without_a_host_scalar(monkeypatch) -> None:
+    # The fast path is the first CUDA work of a decode step. Writing the mask as
+    # `mask[rows, toks] = True` hands torch a Python bool it materializes on the
+    # host and copies in, which blocks once the async loop lets the host run ahead.
+    fake = _talker_seed_self()
+    requests = [_talker_prep_req("a", penalty=1.5, output_ids=[2])]
+    Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
+    fake._sampled_token_ids[0] = 5
+    requests[0].data.req.decode_batch_idx += 1
+
+    setitem_values: list = []
+    real_setitem = torch.Tensor.__setitem__
+    monkeypatch.setattr(
+        torch.Tensor,
+        "__setitem__",
+        lambda self, key, value: setitem_values.append(value)
+        or real_setitem(self, key, value),
+    )
+
+    assert fake._reuse_decode_buffers(requests) is True
+
+    assert setitem_values == []
+    # Same bits the scalar form wrote: the seeded token and the new one.
+    assert bool(fake._repetition_mask[0, 2]) and bool(fake._repetition_mask[0, 5])
 
 
 def test_talker_prepare_decode_buffers_rebuild_triggers() -> None:
