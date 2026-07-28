@@ -73,6 +73,23 @@ def _data(req: SimpleNamespace) -> SimpleNamespace:
     return data
 
 
+def _pool_indices(requests: list) -> torch.Tensor:
+    """The device-side pool index row the runner slices off the forward batch."""
+    return torch.tensor(
+        [
+            0 if r.data.req.req_pool_idx is None else int(r.data.req.req_pool_idx)
+            for r in requests
+        ],
+        dtype=torch.long,
+    )
+
+
+def _emit_step(runner, requests: list) -> None:
+    runner._emit_code_chunks_and_feedback(
+        requests=requests, pool_indices=_pool_indices(requests)
+    )
+
+
 def _emit(
     runner: QwenTalkerModelRunner,
     req: SimpleNamespace,
@@ -83,7 +100,7 @@ def _emit(
     # record must be the same object.
     assert data.req is req
     runner.model._output_embeds[0] = torch.full((HIDDEN,), value)
-    runner._emit_code_chunks_and_feedback(requests=[SimpleNamespace(data=data)])
+    _emit_step(runner, [SimpleNamespace(data=data)])
 
 
 def _retract_scheduler(
@@ -111,7 +128,10 @@ def _retract(scheduler: QwenTalkerScheduler, req: SimpleNamespace) -> None:
 def _consume_one_frame(runner: QwenTalkerModelRunner, data: SimpleNamespace) -> None:
     # The production consumer: this is what nulls the snapshot on a decode step.
     data.pending_text_queue.append(TEXT_ROW)
-    runner._write_feedback_buffers([SimpleNamespace(data=data)])
+    runner._write_feedback_buffers(
+        [SimpleNamespace(data=data)],
+        _pool_indices([SimpleNamespace(data=data)]),
+    )
 
 
 def _drive_to_second_retract(

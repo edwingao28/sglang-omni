@@ -101,7 +101,6 @@ class QwenTalkerModelRunner(ModelRunner):
         is_lookahead: bool = False,
     ) -> None:
         del is_lookahead
-        del forward_batch
         del schedule_batch
         if not self._feedback_enabled:
             return
@@ -112,7 +111,9 @@ class QwenTalkerModelRunner(ModelRunner):
             )
 
         self.model.prepare_decode_buffers(requests)
-        self._write_feedback_buffers(requests)
+        self._write_feedback_buffers(
+            requests, self._batch_pool_indices(forward_batch, len(requests))
+        )
 
     def post_prefill(
         self,
@@ -137,7 +138,10 @@ class QwenTalkerModelRunner(ModelRunner):
         self.model.code_predictor_forward(layer0_codes, talker_hidden)
         schedule_batch.output_ids = result.next_token_ids
         self._stage_token_ids(result, result.next_token_ids)
-        self._emit_code_chunks_and_feedback(requests=requests)
+        self._emit_code_chunks_and_feedback(
+            requests=requests,
+            pool_indices=self._batch_pool_indices(forward_batch, len(requests)),
+        )
 
     def post_decode(
         self,
@@ -152,7 +156,10 @@ class QwenTalkerModelRunner(ModelRunner):
         result.next_token_ids = self._collect_sampled_token_ids(requests)
         schedule_batch.output_ids = result.next_token_ids
         self._stage_token_ids(result, result.next_token_ids)
-        self._emit_code_chunks_and_feedback(requests=requests)
+        self._emit_code_chunks_and_feedback(
+            requests=requests,
+            pool_indices=self._batch_pool_indices(forward_batch, len(requests)),
+        )
 
     def post_decode_launch(
         self,
@@ -170,13 +177,15 @@ class QwenTalkerModelRunner(ModelRunner):
         Returns the sampled ids as the resolve payload; ``_finalize`` reads them
         from the staged pinned copy, which the caller's event covers.
         """
-        del forward_batch
         if not self._feedback_enabled or not requests:
             return None
 
         result.next_token_ids = self._collect_sampled_token_ids(requests)
         self._stage_token_ids(result, result.next_token_ids)
-        self._emit_code_chunks_and_feedback(requests=requests)
+        self._emit_code_chunks_and_feedback(
+            requests=requests,
+            pool_indices=self._batch_pool_indices(forward_batch, len(requests)),
+        )
         return result.next_token_ids
 
     def post_decode_resolve(
@@ -222,29 +231,44 @@ class QwenTalkerModelRunner(ModelRunner):
         # before this step's resolve reads the ids.
         return self.model._sampled_token_ids[: len(requests)].clone()
 
+    @staticmethod
+    def _batch_pool_indices(forward_batch: Any, bs: int) -> torch.Tensor:
+        """This batch's ``req_pool_idx`` per row, already on the device.
+
+        Row i belongs to ``requests[i]``: upstream fills this tensor from the same
+        allocation that sets ``req.req_pool_idx`` and reslices it alongside
+        ``batch.reqs`` on every filter and merge, and any CUDA-graph padding is
+        appended past ``bs``.
+
+        Note (wenyao): building the index from a Python list instead would be a
+        pageable H2D, which ends in a stream synchronize — on the async path that
+        blocks the launch on its own forward and the lookahead overlaps nothing.
+        """
+        rows = forward_batch.req_pool_indices
+        if int(rows.shape[0]) < bs:
+            raise RuntimeError(
+                "Talker forward batch carries fewer pool indices than requests: "
+                f"{int(rows.shape[0])} rows for {bs} requests"
+            )
+        return rows[:bs]
+
     def _emit_code_chunks_and_feedback(
         self,
         *,
         requests: list,
+        pool_indices: torch.Tensor,
     ) -> None:
         bs = len(requests)
         # Note (wenyao): one batched clone, not one per row: the snapshot must be a
         # fresh allocation so its rows survive the next in-graph write to the
         # fixed-address _output_codes.
         codes_snap = self.model._output_codes[:bs].detach().clone()
-        reqs = [sched_req.data.req for sched_req in requests]
-        slot_ids = [req.req_pool_idx for req in reqs]
-        pool_ids = torch.tensor(
-            slot_ids,
-            dtype=torch.long,
-            device=self.model._output_embeds.device,
-        )
         # Note (wenyao): slots must be written before the next forward's in-graph
         # write to _output_embeds; emit runs post-forward on the same stream, so the
         # ordering holds without a sync.
-        self.model._feedback_slots[pool_ids] = self.model._output_embeds[:bs]
+        self.model._feedback_slots[pool_indices] = self.model._output_embeds[:bs]
         for idx, sched_req in enumerate(requests):
-            req = reqs[idx]
+            req = sched_req.data.req
             # Note (wenyao): a row that finished or retracted in an earlier step is
             # still carried by this batch; shipping its frame would append audio past
             # the end of the request. The slot write and the counter below stay
@@ -268,8 +292,10 @@ class QwenTalkerModelRunner(ModelRunner):
                 )
             sched_req.data.pending_feedback_count += 1
             # Note (wenyao): retract frees req_pool_idx, so the slot this frame was
-            # written into is only recoverable from the request's own record.
-            sched_req.data.feedback_slot_idx = slot_ids[idx]
+            # written into is only recoverable from the request's own record. Read
+            # off the request rather than pool_indices: that is a device tensor and
+            # touching it on the host would sync.
+            sched_req.data.feedback_slot_idx = req.req_pool_idx
 
     def _req_is_done(self, req: Any) -> bool:
         """Whether this row was finished or retracted by an earlier step.
@@ -527,7 +553,9 @@ class QwenTalkerModelRunner(ModelRunner):
             return None
         return torch.stack(rows, dim=0)
 
-    def _write_feedback_buffers(self, requests: list) -> None:
+    def _write_feedback_buffers(
+        self, requests: list, pool_indices: torch.Tensor
+    ) -> None:
         batch_size = len(requests)
         if batch_size == 0:
             return
@@ -543,6 +571,7 @@ class QwenTalkerModelRunner(ModelRunner):
         pool_ids: list[int] = []
         overrides: list[torch.Tensor | None] = []
         text_rows: list[torch.Tensor] = []
+        any_missing_pool_idx = False
         for row_idx, sched_req in enumerate(requests):
             data = sched_req.data
             if getattr(data, "pending_feedback_count", 0) <= 0:
@@ -560,13 +589,22 @@ class QwenTalkerModelRunner(ModelRunner):
                 continue
             rows.append(row_idx)
             datas.append(data)
+            any_missing_pool_idx = any_missing_pool_idx or pool_idx is None
             pool_ids.append(0 if pool_idx is None else int(pool_idx))
             overrides.append(override)
             text_rows.append(self._decode_row(next_text, device=device, dtype=dtype))
         if not rows:
             return
 
-        pool_ids_t = torch.tensor(pool_ids, dtype=torch.long, device=device)
+        if len(rows) == batch_size and not any_missing_pool_idx:
+            # Note (wenyao): the readiness gate only runs a decode batch when every
+            # row has feedback and text, so this is the steady state and it stays
+            # free of host-built index tensors. The branch below covers rows the
+            # gate cannot see (a retract snapshot with no pool slot) and pays one
+            # H2D per index tensor, which serializes that step against the forward.
+            pool_ids_t = pool_indices
+        else:
+            pool_ids_t = torch.tensor(pool_ids, dtype=torch.long, device=device)
         feedback_rows = self.model._feedback_slots[pool_ids_t]
         for i, override in enumerate(overrides):
             if override is not None:
@@ -581,9 +619,7 @@ class QwenTalkerModelRunner(ModelRunner):
 
         if len(rows) == batch_size:
             # Note (wenyao): dense steady state: rows is exactly range(batch_size), so
-            # the write is a slice-assign and needs no row-index tensor. The pool_ids
-            # gather above still costs one H2D per step; a persistent pool-id buffer
-            # is deferred to the overlap work that reshapes batch prep.
+            # the write is a slice-assign and needs no row-index tensor.
             feedback_buffer[:batch_size] = combined
             feedback_mask[:batch_size] = True
             return
