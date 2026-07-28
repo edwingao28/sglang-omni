@@ -51,22 +51,16 @@ def _runner(model: SimpleNamespace) -> QwenTalkerModelRunner:
     return runner
 
 
-def _sched_batch(pool_ids: list[int]) -> SimpleNamespace:
-    return SimpleNamespace(
-        reqs=[
-            SimpleNamespace(rid=f"r{i}", req_pool_idx=pool_idx)
-            for i, pool_idx in enumerate(pool_ids)
-        ],
-        req_pool_indices=torch.tensor(pool_ids, dtype=torch.long),
-    )
-
-
-def _emit_requests(n: int) -> list:
+def _emit_requests(pool_ids: list[int]) -> list:
     return [
         SimpleNamespace(
-            data=SimpleNamespace(pending_feedback_count=0, stage_payload=None)
+            data=SimpleNamespace(
+                pending_feedback_count=0,
+                stage_payload=None,
+                req=SimpleNamespace(rid=f"r{i}", req_pool_idx=pool_idx),
+            )
         )
-        for _ in range(n)
+        for i, pool_idx in enumerate(pool_ids)
     ]
 
 
@@ -103,9 +97,9 @@ def _consume_data(
 def test_emit_scatter_lands_at_top_pool_index() -> None:
     model = _model(bs=1)
     runner = _runner(model)
-    requests = _emit_requests(1)
+    requests = _emit_requests([TOP_POOL_IDX])
 
-    _emit_frame(runner, _sched_batch([TOP_POOL_IDX]), requests)
+    runner._emit_code_chunks_and_feedback(requests=requests)
 
     assert torch.equal(model._feedback_slots[TOP_POOL_IDX], model._output_embeds[0])
     assert requests[0].data.feedback_slot_idx == TOP_POOL_IDX
@@ -116,7 +110,7 @@ def test_emit_scatter_covers_every_allocatable_index() -> None:
     model = _model(bs=len(pool_ids))
     runner = _runner(model)
 
-    _emit_frame(runner, _sched_batch(pool_ids), _emit_requests(len(pool_ids)))
+    runner._emit_code_chunks_and_feedback(requests=_emit_requests(pool_ids))
 
     for i, pool_idx in enumerate(pool_ids):
         assert torch.equal(model._feedback_slots[pool_idx], model._output_embeds[i])
@@ -125,14 +119,14 @@ def test_emit_scatter_covers_every_allocatable_index() -> None:
 
 
 def test_emit_ignores_cuda_graph_padded_rows() -> None:
-    # Note (wenyao): a CUDA-graph padded batch carries extra reqs defaulted to
-    # req_pool_idx 0, so the pad rows must stay out of the scatter entirely.
+    # Note (wenyao): a CUDA-graph padded batch leaves the model's fixed row
+    # buffers longer than the real batch, so the pad rows must stay out of the
+    # scatter entirely.
     real_pool_ids = [1, TOP_POOL_IDX]
-    model = _model(bs=len(real_pool_ids))
+    model = _model(bs=len(real_pool_ids) + 2)
     runner = _runner(model)
 
-    schedule_batch = _sched_batch(real_pool_ids + [0, 0])
-    _emit_frame(runner, schedule_batch, _emit_requests(len(real_pool_ids)))
+    runner._emit_code_chunks_and_feedback(requests=_emit_requests(real_pool_ids))
 
     for i, pool_idx in enumerate(real_pool_ids):
         assert torch.equal(model._feedback_slots[pool_idx], model._output_embeds[i])

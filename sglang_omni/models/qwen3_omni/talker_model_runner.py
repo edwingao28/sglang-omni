@@ -139,7 +139,6 @@ class QwenTalkerModelRunner(ModelRunner):
         self.model.code_predictor_forward(layer0_codes, talker_hidden)
         self._stage_token_ids(result, result.next_token_ids)
         self._emit_code_chunks_and_feedback(
-            schedule_batch=schedule_batch,
             requests=requests,
             pool_indices=self._batch_pool_indices(forward_batch, len(requests)),
         )
@@ -154,14 +153,79 @@ class QwenTalkerModelRunner(ModelRunner):
         if not self._feedback_enabled:
             return
 
-        batch_size = len(requests)
-        result.next_token_ids = self.model._sampled_token_ids[:batch_size].clone()
+        result.next_token_ids = self._collect_sampled_token_ids(requests)
         self._stage_token_ids(result, result.next_token_ids)
         self._emit_code_chunks_and_feedback(
-            schedule_batch=schedule_batch,
             requests=requests,
             pool_indices=self._batch_pool_indices(forward_batch, len(requests)),
         )
+
+    def post_decode_launch(
+        self,
+        result: Any,
+        forward_batch: Any,
+        requests: list,
+    ) -> Any:
+        """Async-decode GPU half of ``post_decode``: publish the in-forward
+        sampled ids and emit this step's codec frame + feedback row, with no
+        host sync. The emit MUST stay here: it snapshots ``_output_codes`` and
+        scatters ``_output_embeds`` into the slot table, both fixed buffers the
+        next step's forward overwrites, and running it right after this step's
+        forward on the same stream is what orders those reads before that write.
+
+        Returns the sampled ids as the resolve payload; ``_finalize`` reads them
+        from the staged pinned copy, which the caller's event covers.
+        """
+        if not self._feedback_enabled or not requests:
+            return None
+
+        result.next_token_ids = self._collect_sampled_token_ids(requests)
+        self._stage_token_ids(result, result.next_token_ids)
+        self._emit_code_chunks_and_feedback(
+            requests=requests,
+            pool_indices=self._batch_pool_indices(forward_batch, len(requests)),
+        )
+        return result.next_token_ids
+
+    def post_decode_resolve(
+        self,
+        launch_buf: Any,
+        result: Any,
+        forward_batch: Any,
+        schedule_batch: Any,
+        requests: list,
+    ) -> None:
+        """Async-decode host half: restore the launch-time ids so the shared
+        ``_finalize`` tail reads this step's tokens. Every other host-side step
+        (pinned token-id sync, finish bookkeeping, ``generation_steps``) already
+        lives in that tail, so there is nothing else to collect here.
+        """
+        del forward_batch, schedule_batch, requests
+        if launch_buf is not None:
+            result.next_token_ids = launch_buf
+
+    def lookahead_eligible(self, batch: Any) -> bool:
+        """The feedback talker is always lookahead-eligible.
+
+        The base gate exists because its launch samples one step before resolve
+        appends the token to ``req.output_ids``, so any history-scored sampling
+        term would read a stale view. Talker decode never samples on that path:
+        it samples inside the forward against a device-side repetition mask that
+        is advanced from ``_sampled_token_ids`` (the previous forward's output),
+        and it ignores frequency/presence penalties and ``min_new_tokens``
+        entirely. ``req.output_ids`` is read only when ``prepare_decode_buffers``
+        falls off its fast path — a batch composition change — and there the
+        rebuilt mask can miss the newest token, one step per rebuild.
+        """
+        if not self._feedback_enabled:
+            return super().lookahead_eligible(batch)
+        return True
+
+    def _collect_sampled_token_ids(self, requests: list) -> torch.Tensor:
+        # Note (wenyao): clone, not a view: the next forward writes
+        # _sampled_token_ids in place, and under lookahead that write lands
+        # before this step's resolve reads the ids.
+        return self.model._sampled_token_ids[: len(requests)].clone()
 
     @staticmethod
     def _batch_pool_indices(forward_batch: Any, bs: int) -> torch.Tensor:
@@ -187,7 +251,6 @@ class QwenTalkerModelRunner(ModelRunner):
     def _emit_code_chunks_and_feedback(
         self,
         *,
-        schedule_batch: Any,
         requests: list,
         pool_indices: torch.Tensor,
     ) -> None:
@@ -196,12 +259,19 @@ class QwenTalkerModelRunner(ModelRunner):
         # fresh allocation so its rows survive the next in-graph write to the
         # fixed-address _output_codes.
         codes_snap = self.model._output_codes[:bs].detach().clone()
+        reqs = [sched_req.data.req for sched_req in requests]
+        slot_ids = [req.req_pool_idx for req in reqs]
+        pool_ids = torch.tensor(
+            slot_ids,
+            dtype=torch.long,
+            device=self.model._output_embeds.device,
+        )
         # Note (wenyao): slots must be written before the next forward's in-graph
         # write to _output_embeds; emit runs post-forward on the same stream, so the
         # ordering holds without a sync.
         self.model._feedback_slots[pool_indices] = self.model._output_embeds[:bs]
         for idx, sched_req in enumerate(requests):
-            req = schedule_batch.reqs[idx]
+            req = reqs[idx]
             code_chunk = codes_snap[idx]
             # Tell code2wav whether to forward audio chunks to the Coordinator.
             stage_payload = sched_req.data.stage_payload
