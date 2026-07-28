@@ -206,7 +206,10 @@ class QwenTalkerModelRunner(ModelRunner):
         and it ignores frequency/presence penalties and ``min_new_tokens``
         entirely. ``req.output_ids`` is read only when ``prepare_decode_buffers``
         falls off its fast path — a batch composition change — and there the
-        rebuilt mask can miss the newest token, one step per rebuild.
+        rebuild seeds the mask from a history the launched step has not reached
+        yet. That token stays unpenalized for the whole run of steps until the
+        next rebuild: the fast path only ever adds tokens newer than itself, so
+        nothing goes back for the one the rebuild skipped.
         """
         if not self._feedback_enabled:
             return super().lookahead_eligible(batch)
