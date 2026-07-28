@@ -421,6 +421,14 @@ that happened to contain an older version of the test.
   - talker overlap gate: `SGLANG_OMNI_TALKER_OVERLAP=1` keeps the caller's
     `disable_overlap_schedule` while the default forces it off, with
     CUDA-graph handling unchanged
+  - talker async decode: the launch half publishes the in-forward sampled ids and
+    emits the codec frame + feedback row without sampling or syncing, the resolve
+    half neither re-emits nor re-counts, finished/retracted rows keep their slot but
+    ship no frame, and the feedback talker stays lookahead-eligible under a
+    repetition penalty
+  - talker async wiring: `SGLANG_OMNI_TALKER_OVERLAP=1` reaches both the scheduler's
+    `enable_async_decode` and the late-attached runner's `_async_enabled`, and an
+    imminent retract drains the in-flight step before upstream frees its KV
   - Code2Wav streaming/cleanup behavior plus bounded batching deadlines,
     fire rules, sub-batch decomposition, output equivalence, and lifecycle
   - Code2Wav CUDA Graph lifecycle, exact-shape replay, atomic rollback, memory
