@@ -2068,7 +2068,7 @@ def test_write_feedback_buffers_records_decode_input_history() -> None:
         _feedback_slots=feedback_slots,
     )
 
-    runner._write_feedback_buffers([sched_req])
+    runner._write_feedback_buffers([sched_req], torch.tensor([3], dtype=torch.long))
 
     assert feedback_mask.tolist() == [True]
     assert torch.equal(feedback_buffer[0], torch.tensor([21.0, 32.0]))

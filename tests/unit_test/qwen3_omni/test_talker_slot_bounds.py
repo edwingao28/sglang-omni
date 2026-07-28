@@ -64,15 +64,19 @@ def _emit_requests(pool_ids: list[int]) -> list:
     ]
 
 
-def _emit_frame(
-    runner: QwenTalkerModelRunner, schedule_batch: SimpleNamespace, requests: list
-) -> None:
+def _pool_indices(requests: list) -> torch.Tensor:
+    return torch.tensor(
+        [
+            0 if r.data.req.req_pool_idx is None else int(r.data.req.req_pool_idx)
+            for r in requests
+        ],
+        dtype=torch.long,
+    )
+
+
+def _emit_step(runner, requests: list) -> None:
     runner._emit_code_chunks_and_feedback(
-        schedule_batch=schedule_batch,
-        requests=requests,
-        pool_indices=QwenTalkerModelRunner._batch_pool_indices(
-            schedule_batch, len(requests)
-        ),
+        requests=requests, pool_indices=_pool_indices(requests)
     )
 
 
@@ -99,7 +103,7 @@ def test_emit_scatter_lands_at_top_pool_index() -> None:
     runner = _runner(model)
     requests = _emit_requests([TOP_POOL_IDX])
 
-    runner._emit_code_chunks_and_feedback(requests=requests)
+    _emit_step(runner, requests)
 
     assert torch.equal(model._feedback_slots[TOP_POOL_IDX], model._output_embeds[0])
     assert requests[0].data.feedback_slot_idx == TOP_POOL_IDX
@@ -110,7 +114,7 @@ def test_emit_scatter_covers_every_allocatable_index() -> None:
     model = _model(bs=len(pool_ids))
     runner = _runner(model)
 
-    runner._emit_code_chunks_and_feedback(requests=_emit_requests(pool_ids))
+    _emit_step(runner, _emit_requests(pool_ids))
 
     for i, pool_idx in enumerate(pool_ids):
         assert torch.equal(model._feedback_slots[pool_idx], model._output_embeds[i])
@@ -126,7 +130,7 @@ def test_emit_ignores_cuda_graph_padded_rows() -> None:
     model = _model(bs=len(real_pool_ids) + 2)
     runner = _runner(model)
 
-    runner._emit_code_chunks_and_feedback(requests=_emit_requests(real_pool_ids))
+    _emit_step(runner, _emit_requests(real_pool_ids))
 
     for i, pool_idx in enumerate(real_pool_ids):
         assert torch.equal(model._feedback_slots[pool_idx], model._output_embeds[i])
@@ -142,7 +146,10 @@ def test_consume_gather_reads_top_pool_index() -> None:
     text = torch.full((HIDDEN,), 10.0)
     data = _consume_data(TOP_POOL_IDX, text)
 
-    runner._write_feedback_buffers([SimpleNamespace(data=data)])
+    runner._write_feedback_buffers(
+        [SimpleNamespace(data=data)],
+        _pool_indices([SimpleNamespace(data=data)]),
+    )
 
     assert torch.equal(model._feedback_buffer[0], feedback + text)
     assert model._feedback_mask.tolist() == [True]
@@ -176,7 +183,10 @@ def test_consume_gather_row_zero_fallback_is_discarded() -> None:
     text = torch.full((HIDDEN,), 10.0)
     data = _consume_data(None, text, override=override)
 
-    runner._write_feedback_buffers([SimpleNamespace(data=data)])
+    runner._write_feedback_buffers(
+        [SimpleNamespace(data=data)],
+        _pool_indices([SimpleNamespace(data=data)]),
+    )
 
     assert torch.equal(model._feedback_buffer[0], override + text)
 

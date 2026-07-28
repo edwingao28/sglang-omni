@@ -240,8 +240,8 @@ class QwenTalkerModelRunner(ModelRunner):
         appended past ``bs``.
 
         Building the index from a Python list instead would be a pageable
-        host-to-device copy on every frame, which ends in a stream synchronize and
-        serializes that step against its own forward.
+        host-to-device copy, which ends in a stream synchronize — on the async path
+        that blocks the launch on its own forward and the lookahead overlaps nothing.
         """
         rows = forward_batch.req_pool_indices
         if int(rows.shape[0]) < bs:
@@ -262,19 +262,12 @@ class QwenTalkerModelRunner(ModelRunner):
         # fresh allocation so its rows survive the next in-graph write to the
         # fixed-address _output_codes.
         codes_snap = self.model._output_codes[:bs].detach().clone()
-        reqs = [sched_req.data.req for sched_req in requests]
-        slot_ids = [req.req_pool_idx for req in reqs]
-        pool_ids = torch.tensor(
-            slot_ids,
-            dtype=torch.long,
-            device=self.model._output_embeds.device,
-        )
         # Note (wenyao): slots must be written before the next forward's in-graph
         # write to _output_embeds; emit runs post-forward on the same stream, so the
         # ordering holds without a sync.
         self.model._feedback_slots[pool_indices] = self.model._output_embeds[:bs]
         for idx, sched_req in enumerate(requests):
-            req = reqs[idx]
+            req = sched_req.data.req
             # Note (wenyao): a row that finished or retracted in an earlier step is
             # still carried by this batch; shipping its frame would append audio past
             # the end of the request. The slot write and the counter below stay
@@ -560,7 +553,7 @@ class QwenTalkerModelRunner(ModelRunner):
         return torch.stack(rows, dim=0)
 
     def _write_feedback_buffers(
-        self, requests: list, pool_indices: torch.Tensor | None = None
+        self, requests: list, pool_indices: torch.Tensor
     ) -> None:
         batch_size = len(requests)
         if batch_size == 0:
@@ -602,15 +595,11 @@ class QwenTalkerModelRunner(ModelRunner):
         if not rows:
             return
 
-        if (
-            pool_indices is not None
-            and len(rows) == batch_size
-            and not any_missing_pool_idx
-        ):
+        if len(rows) == batch_size and not any_missing_pool_idx:
             # Note (wenyao): the readiness gate only runs a decode batch when every
-            # row has feedback and text, so this is the steady state and it must stay
-            # free of host-built index tensors. The branch below covers rows the gate
-            # cannot see (a retract snapshot with no pool slot) and pays one
+            # row has feedback and text, so this is the steady state and it stays
+            # free of host-built index tensors. The branch below covers rows the
+            # gate cannot see (a retract snapshot with no pool slot) and pays one
             # host-to-device copy, which serializes that step against the forward.
             pool_ids_t = pool_indices
         else:

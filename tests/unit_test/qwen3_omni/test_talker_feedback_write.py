@@ -57,11 +57,17 @@ def _seed_slots(model: SimpleNamespace, feedbacks: list[torch.Tensor]) -> None:
         model._feedback_slots[POOL_IDS[i]] = feedback
 
 
-def _pool_indices(pool_ids: list[int]) -> torch.Tensor:
-    return torch.tensor(pool_ids, dtype=torch.long)
+def _pool_indices(requests: list) -> torch.Tensor:
+    return torch.tensor(
+        [
+            0 if r.data.req.req_pool_idx is None else int(r.data.req.req_pool_idx)
+            for r in requests
+        ],
+        dtype=torch.long,
+    )
 
 
-def test_dense_write_skips_row_index_tensor(monkeypatch: Any) -> None:
+def test_dense_write_builds_no_index_tensor(monkeypatch: Any) -> None:
     n, hidden = 3, 3
     model = _fake_model(n, hidden)
     runner = _runner(model)
@@ -70,6 +76,43 @@ def test_dense_write_skips_row_index_tensor(monkeypatch: Any) -> None:
     texts = [torch.full((hidden,), float(10 * (i + 1))) for i in range(n)]
     _seed_slots(model, feedbacks)
     requests = [_req_wrap(_data(texts[i], pool_idx=POOL_IDS[i])) for i in range(n)]
+    pool_indices = _pool_indices(requests)
+
+    calls: list = []
+    real_tensor = torch.tensor
+
+    def _spy(*args: Any, **kwargs: Any) -> torch.Tensor:
+        calls.append(args)
+        return real_tensor(*args, **kwargs)
+
+    # Installed after the fixture is built so only the runner's own calls land here.
+    monkeypatch.setattr(talker_model_runner.torch, "tensor", _spy)
+
+    runner._write_feedback_buffers(requests, pool_indices)
+
+    # Note (wenyao): the steady-state write must build no index tensor at all. Each
+    # one would be a pageable H2D, and on the async path that synchronizes the
+    # stream and serializes the launch against its own forward.
+    assert calls == []
+    assert torch.equal(model._feedback_mask, torch.ones(n, dtype=torch.bool))
+    for i in range(n):
+        assert torch.equal(model._feedback_buffer[i], feedbacks[i] + texts[i])
+        assert requests[i].data.pending_feedback_count == 0
+
+
+def test_sparse_write_falls_back_to_host_indices(monkeypatch: Any) -> None:
+    # Only rows the readiness gate cannot see reach this path, and it pays the H2D.
+    n, hidden = 2, 3
+    model = _fake_model(n, hidden)
+    runner = _runner(model)
+
+    feedbacks = [torch.full((hidden,), float(i + 1)) for i in range(n)]
+    _seed_slots(model, feedbacks)
+    requests = [
+        _req_wrap(_data(torch.full((hidden,), 10.0), pool_idx=POOL_IDS[0])),
+        _req_wrap(_data(None, pool_idx=POOL_IDS[1])),
+    ]
+    pool_indices = _pool_indices(requests)
 
     calls: list = []
     real_tensor = torch.tensor
@@ -80,42 +123,10 @@ def test_dense_write_skips_row_index_tensor(monkeypatch: Any) -> None:
 
     monkeypatch.setattr(talker_model_runner.torch, "tensor", _spy)
 
-    runner._write_feedback_buffers(requests)
-
-    # Note (wenyao): the pool-id gather index is the only tensor() the dense path
-    # may build; a second call means the row-index H2D came back.
-    assert len(calls) == 1
-    assert list(calls[0][0]) == POOL_IDS[:n]
-    assert torch.equal(model._feedback_mask, torch.ones(n, dtype=torch.bool))
-    for i in range(n):
-        assert torch.equal(model._feedback_buffer[i], feedbacks[i] + texts[i])
-        assert requests[i].data.pending_feedback_count == 0
-
-
-def test_dense_write_gathers_through_the_batch_pool_indices(monkeypatch: Any) -> None:
-    n, hidden = 3, 3
-    model = _fake_model(n, hidden)
-    runner = _runner(model)
-
-    feedbacks = [torch.full((hidden,), float(i + 1)) for i in range(n)]
-    texts = [torch.full((hidden,), float(10 * (i + 1))) for i in range(n)]
-    _seed_slots(model, feedbacks)
-    requests = [_req_wrap(_data(texts[i], pool_idx=POOL_IDS[i])) for i in range(n)]
-
-    pool_indices = _pool_indices(POOL_IDS[:n])
-    calls: list = []
-    real_tensor = torch.tensor
-    monkeypatch.setattr(
-        talker_model_runner.torch,
-        "tensor",
-        lambda *a, **kw: (calls.append(a), real_tensor(*a, **kw))[1],
-    )
-
     runner._write_feedback_buffers(requests, pool_indices)
 
-    assert calls == []
-    for i in range(n):
-        assert torch.equal(model._feedback_buffer[i], feedbacks[i] + texts[i])
+    assert [list(call[0]) for call in calls] == [[POOL_IDS[0]], [0]]
+    assert model._feedback_mask.tolist() == [True, False]
 
 
 def test_retract_override_ignores_the_batch_pool_indices() -> None:
@@ -136,33 +147,10 @@ def test_retract_override_ignores_the_batch_pool_indices() -> None:
         _req_wrap(_data(torch.full((hidden,), 20.0), pool_idx=POOL_IDS[1])),
     ]
 
-    runner._write_feedback_buffers(requests, _pool_indices([0, 0]))
+    runner._write_feedback_buffers(requests, torch.zeros(2, dtype=torch.long))
 
     assert torch.equal(model._feedback_buffer[0], torch.full((hidden,), 11.0))
     assert torch.equal(model._feedback_buffer[1], torch.full((hidden,), 22.0))
-
-
-def test_sparse_write_ignores_the_batch_pool_indices() -> None:
-    # Note (wenyao): a starved row drops out of the gather, so batch row i and
-    # gather row i stop lining up and the batch's indices cannot be used
-    # positionally.
-    n, hidden = 3, 3
-    model = _fake_model(n, hidden)
-    runner = _runner(model)
-
-    model._feedback_slots[0] = torch.full((hidden,), 99.0)
-    model._feedback_slots[POOL_IDS[0]] = torch.full((hidden,), 1.0)
-    model._feedback_slots[POOL_IDS[2]] = torch.full((hidden,), 3.0)
-    requests = [
-        _req_wrap(_data(torch.full((hidden,), 10.0), pool_idx=POOL_IDS[0])),
-        _req_wrap(_data(None, pool_idx=POOL_IDS[1])),
-        _req_wrap(_data(torch.full((hidden,), 30.0), pool_idx=POOL_IDS[2])),
-    ]
-
-    runner._write_feedback_buffers(requests, _pool_indices([0, 0, 0]))
-
-    assert torch.equal(model._feedback_buffer[0], torch.full((hidden,), 11.0))
-    assert torch.equal(model._feedback_buffer[2], torch.full((hidden,), 33.0))
 
 
 def test_sparse_write_leaves_starved_row_unwritten() -> None:
@@ -179,7 +167,7 @@ def test_sparse_write_leaves_starved_row_unwritten() -> None:
         _req_wrap(_data(texts[2], pool_idx=POOL_IDS[2])),
     ]
 
-    runner._write_feedback_buffers(requests)
+    runner._write_feedback_buffers(requests, _pool_indices(requests))
 
     assert model._feedback_mask.tolist() == [True, False, True]
     assert torch.equal(model._feedback_buffer[0], feedbacks[0] + texts[0])
@@ -201,7 +189,7 @@ def test_write_skips_rows_without_pending_feedback() -> None:
         _req_wrap(_data(texts[1], pool_idx=POOL_IDS[1])),
     ]
 
-    runner._write_feedback_buffers(requests)
+    runner._write_feedback_buffers(requests, _pool_indices(requests))
 
     assert model._feedback_mask.tolist() == [False, True]
     assert torch.equal(model._feedback_buffer[0], torch.zeros(hidden))
@@ -223,7 +211,7 @@ def test_write_reads_feedback_from_the_requests_own_slot() -> None:
         _req_wrap(_data(torch.full((hidden,), 20.0), pool_idx=POOL_IDS[0])),
     ]
 
-    runner._write_feedback_buffers(requests)
+    runner._write_feedback_buffers(requests, _pool_indices(requests))
 
     assert torch.equal(model._feedback_buffer[0], torch.full((hidden,), 12.0))
     assert torch.equal(model._feedback_buffer[1], torch.full((hidden,), 21.0))
@@ -238,7 +226,10 @@ def test_write_prefers_retracted_snapshot_over_slot() -> None:
     data = _data(torch.full((hidden,), 10.0), pool_idx=POOL_IDS[0])
     data.retracted_feedback_embed = torch.full((hidden,), 1.0)
 
-    runner._write_feedback_buffers([_req_wrap(data)])
+    runner._write_feedback_buffers(
+        [_req_wrap(data)],
+        _pool_indices([_req_wrap(data)]),
+    )
 
     assert torch.equal(model._feedback_buffer[0], torch.full((hidden,), 11.0))
     assert data.retracted_feedback_embed is None
@@ -253,7 +244,10 @@ def test_write_records_decode_input_history() -> None:
     model._feedback_slots[POOL_IDS[0]] = torch.full((hidden,), 1.0)
     data = _data(torch.full((hidden,), 20.0), pool_idx=POOL_IDS[0])
 
-    runner._write_feedback_buffers([_req_wrap(data)])
+    runner._write_feedback_buffers(
+        [_req_wrap(data)],
+        _pool_indices([_req_wrap(data)]),
+    )
 
     assert len(data.decode_input_embeds) == 1
     assert torch.equal(data.decode_input_embeds[0], torch.full((hidden,), 21.0))
@@ -269,7 +263,7 @@ def test_consumed_rows_survive_later_buffer_writes() -> None:
     _seed_slots(model, feedbacks)
     requests = [_req_wrap(_data(texts[i], pool_idx=POOL_IDS[i])) for i in range(n)]
 
-    runner._write_feedback_buffers(requests)
+    runner._write_feedback_buffers(requests, _pool_indices(requests))
 
     expected = [feedbacks[i] + texts[i] for i in range(n)]
     model._feedback_buffer.copy_(model._feedback_buffer + 999.0)
@@ -288,7 +282,10 @@ def test_pending_feedback_without_pool_slot_raises() -> None:
     data.req.req_pool_idx = None
 
     with pytest.raises(RuntimeError, match="no pool slot"):
-        runner._write_feedback_buffers([_req_wrap(data)])
+        runner._write_feedback_buffers(
+            [_req_wrap(data)],
+            _pool_indices([_req_wrap(data)]),
+        )
 
 
 def test_readiness_requires_pending_feedback_count() -> None:
