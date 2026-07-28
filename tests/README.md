@@ -475,14 +475,19 @@ that happened to contain an older version of the test.
   - talker feedback slot lifetime: the recorded `feedback_slot_idx` is retired by
     every retract, so a second retract cannot read a pool slot another request now
     owns, and replay past the single retract snapshot raises
+  - talker feedback buffer writes: the steady-state gather and scatter index off
+    the forward batch's own `req_pool_indices` and build no index tensor at all;
+    only rows the readiness gate cannot see fall back to host-built indices
   - talker overlap gate: `SGLANG_OMNI_TALKER_OVERLAP=1` keeps the caller's
     `disable_overlap_schedule` while the default forces it off, with
     CUDA-graph handling unchanged
   - talker async decode: the launch half publishes the in-forward sampled ids and
-    emits the codec frame + feedback row without sampling or syncing, the resolve
-    half neither re-emits nor re-counts, finished/retracted rows keep their slot but
-    ship no frame, and the feedback talker stays lookahead-eligible under a
-    repetition penalty
+    scatters the feedback row without sampling, shipping, or building any index
+    tensor (each one would sync the stream and serialize the launch against its
+    own forward); the resolve half ships the codec frames and drops rows that
+    finished in an earlier step, so a finishing request produces the same frame
+    sequence as the sync path; and the feedback talker stays lookahead-eligible
+    under a repetition penalty
   - talker async wiring: `SGLANG_OMNI_TALKER_OVERLAP=1` reaches both the scheduler's
     `enable_async_decode` and the late-attached runner's `_async_enabled`, and an
     imminent retract drains the in-flight step before upstream frees its KV
