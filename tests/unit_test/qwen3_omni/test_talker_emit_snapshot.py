@@ -33,21 +33,16 @@ def _runner(model: SimpleNamespace) -> QwenTalkerModelRunner:
     return runner
 
 
-def _data() -> SimpleNamespace:
+def _data(i: int) -> SimpleNamespace:
     return SimpleNamespace(
         pending_feedback_count=0,
         stage_payload=None,
+        req=SimpleNamespace(rid=f"r{i}", req_pool_idx=POOL_IDS[i]),
     )
 
 
 def _requests(n: int) -> list:
-    return [SimpleNamespace(data=_data()) for _ in range(n)]
-
-
-def _sched_batch(n: int) -> SimpleNamespace:
-    return SimpleNamespace(
-        reqs=[SimpleNamespace(rid=f"r{i}", req_pool_idx=POOL_IDS[i]) for i in range(n)]
-    )
+    return [SimpleNamespace(data=_data(i)) for i in range(n)]
 
 
 def test_emitted_rows_survive_next_step_inplace_write() -> None:
@@ -59,9 +54,7 @@ def test_emitted_rows_survive_next_step_inplace_write() -> None:
     embeds_before = model._output_embeds.clone()
 
     requests = _requests(n)
-    runner._emit_code_chunks_and_feedback(
-        schedule_batch=_sched_batch(n), requests=requests
-    )
+    runner._emit_code_chunks_and_feedback(requests=requests)
 
     model._output_codes.copy_(model._output_codes + 999)
     model._output_embeds.copy_(model._output_embeds + 999.0)
@@ -77,9 +70,7 @@ def test_emit_writes_feedback_to_pool_indexed_slots() -> None:
     runner = _runner(model)
 
     requests = _requests(n)
-    runner._emit_code_chunks_and_feedback(
-        schedule_batch=_sched_batch(n), requests=requests
-    )
+    runner._emit_code_chunks_and_feedback(requests=requests)
 
     for i in range(n):
         assert torch.equal(model._feedback_slots[POOL_IDS[i]], model._output_embeds[i])
@@ -106,9 +97,7 @@ def test_emit_keeps_one_batched_clone_for_codes() -> None:
     requests = _requests(n)
     torch.Tensor.clone = _counting_clone
     try:
-        runner._emit_code_chunks_and_feedback(
-            schedule_batch=_sched_batch(n), requests=requests
-        )
+        runner._emit_code_chunks_and_feedback(requests=requests)
     finally:
         torch.Tensor.clone = orig_clone
 
@@ -124,15 +113,10 @@ def test_emit_counts_accumulate_across_steps() -> None:
     runner = _runner(model)
 
     requests = _requests(n)
-    schedule_batch = _sched_batch(n)
 
-    runner._emit_code_chunks_and_feedback(
-        schedule_batch=schedule_batch, requests=requests
-    )
+    runner._emit_code_chunks_and_feedback(requests=requests)
     model._output_embeds.copy_(model._output_embeds + 1.0)
-    runner._emit_code_chunks_and_feedback(
-        schedule_batch=schedule_batch, requests=requests
-    )
+    runner._emit_code_chunks_and_feedback(requests=requests)
 
     for i in range(n):
         assert requests[i].data.pending_feedback_count == 2
