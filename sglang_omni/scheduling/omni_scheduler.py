@@ -1297,9 +1297,18 @@ class OmniScheduler:
         if mr_output is None:
             return _FAILED_BATCH_RESULT
         self._emit_stream_output(sched_output, mr_output, skip_rids=skip_rids)
+        next_token_ids = mr_output.next_token_ids
+        # Note (wenyao): same host-copy substitution the sync path makes in
+        # _make_batch_result, and the async path needs it more: a .tolist() on the
+        # device tensor enqueues its copy BEHIND the forward this iteration's
+        # launch already submitted, so the mixin would wait a whole step for a
+        # value the launch had staged before that forward.
+        host_token_ids = mr_output.host_token_ids
+        if host_token_ids is not None:
+            next_token_ids = host_token_ids
         return GenerationBatchResult(
             logits_output=None,
-            next_token_ids=mr_output.next_token_ids,
+            next_token_ids=next_token_ids,
             can_run_cuda_graph=mr_output.can_run_cuda_graph,
         )
 
