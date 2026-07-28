@@ -321,3 +321,41 @@ def test_feedback_talker_is_lookahead_eligible_despite_penalties() -> None:
 
     runner._feedback_enabled = False
     assert runner.lookahead_eligible(batch) is False
+
+
+def test_launch_stages_the_ids_the_resolve_hands_upstream() -> None:
+    # The resolve path gives upstream the staged host copy rather than the device
+    # tensor, because .tolist() on the device tensor enqueues its copy behind the
+    # forward the current launch already submitted. That only works if the launch
+    # staged the copy first.
+    n = 3
+    runner = _runner(_model(n))
+    result = SimpleNamespace(next_token_ids=None)
+
+    runner.post_decode_launch(result, _forward_batch(n), _requests(n))
+
+    staged = runner._resolve_host_token_ids(result)
+    assert staged is not None
+    assert staged.tolist() == [40, 41, 42]
+
+
+def test_launch_never_materializes_ids_on_the_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    n = 2
+    runner = _runner(_model(n))
+    requests = _requests(n)
+    forward_batch = _forward_batch(n)
+    result = SimpleNamespace(next_token_ids=None)
+
+    calls: list = []
+    real_tolist = torch.Tensor.tolist
+    monkeypatch.setattr(
+        torch.Tensor,
+        "tolist",
+        lambda self: calls.append(self) or real_tolist(self),
+    )
+
+    runner.post_decode_launch(result, forward_batch, requests)
+
+    assert calls == []
