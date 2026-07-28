@@ -84,10 +84,13 @@ def _pool_indices(requests: list) -> torch.Tensor:
     )
 
 
-def _emit_step(runner, requests: list) -> None:
-    runner._emit_code_chunks_and_feedback(
+def _emit_step(runner, requests: list) -> torch.Tensor:
+    """Snapshot + scatter, then ship — what the sync post_decode path does."""
+    codes_snap = runner._emit_code_chunks_and_feedback(
         requests=requests, pool_indices=_pool_indices(requests)
     )
+    runner._put_code_chunks(requests, codes_snap)
+    return codes_snap
 
 
 def _emit(
