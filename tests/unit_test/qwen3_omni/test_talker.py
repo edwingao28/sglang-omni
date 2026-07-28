@@ -2326,6 +2326,28 @@ def test_talker_prepare_decode_buffers_steady_state_reuse() -> None:
     assert torch.equal(fake._suppress_mask, fresh._suppress_mask)
 
 
+def test_talker_prepare_decode_buffers_reuse_survives_async_lag() -> None:
+    # Under async decode the token reaches req.output_ids a step after the batch is
+    # built, so an output-length key would fall off the fast path and rebuild the
+    # repetition mask from that same one-token-stale history.
+    fake = _talker_seed_self()
+    requests = [_talker_prep_req("a", penalty=1.5, output_ids=[2])]
+    Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
+    fake._sampling_temperatures[0, 0] = 123.0
+
+    fake._sampled_token_ids[0] = 5
+    requests[0].data.req.decode_batch_idx += 1
+    Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
+
+    assert float(fake._sampling_temperatures[0, 0]) == 123.0
+    assert bool(fake._repetition_mask[0, 2]) and bool(fake._repetition_mask[0, 5])
+
+    # The lagged append lands later and must not look like a second step.
+    requests[0].data.req.output_ids.append(5)
+    Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
+    assert float(fake._sampling_temperatures[0, 0]) == pytest.approx(0.8)
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="sampling staging regression requires CUDA"
 )
