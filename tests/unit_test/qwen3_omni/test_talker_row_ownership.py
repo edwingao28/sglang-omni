@@ -80,6 +80,23 @@ def _sched_batch(reqs: list) -> SimpleNamespace:
     return SimpleNamespace(reqs=list(reqs))
 
 
+def _pool_indices(requests: list) -> torch.Tensor:
+    """The device-side pool index row the runner slices off the forward batch."""
+    return torch.tensor(
+        [
+            0 if r.data.req.req_pool_idx is None else int(r.data.req.req_pool_idx)
+            for r in requests
+        ],
+        dtype=torch.long,
+    )
+
+
+def _emit_step(runner, requests: list) -> None:
+    runner._emit_code_chunks_and_feedback(
+        requests=requests, pool_indices=_pool_indices(requests)
+    )
+
+
 def _pool_req(rid: str, pool_idx: int | None) -> SimpleNamespace:
     return SimpleNamespace(rid=rid, req_pool_idx=pool_idx)
 
@@ -108,7 +125,7 @@ def _emit(
 ) -> None:
     assert data.req is req
     runner.model._output_embeds[0] = embed
-    runner._emit_code_chunks_and_feedback(requests=[_req_wrap(data)])
+    _emit_step(runner, [_req_wrap(data)])
 
 
 def test_recycled_pool_slot_cannot_feed_stale_feedback() -> None:
@@ -129,7 +146,10 @@ def test_recycled_pool_slot_cannot_feed_stale_feedback() -> None:
     assert not QwenTalkerModelRunner._data_has_next_decode_input(new_data)
 
     _emit(runner, new_req, new_data, torch.full((hidden,), 7.0))
-    runner._write_feedback_buffers([_req_wrap(new_data)])
+    runner._write_feedback_buffers(
+        [_req_wrap(new_data)],
+        _pool_indices([_req_wrap(new_data)]),
+    )
 
     assert torch.equal(model._feedback_buffer[0], torch.full((hidden,), 27.0))
 
@@ -147,7 +167,10 @@ def test_retract_replay_reproduces_history_rows() -> None:
         )
         data.pending_feedback_count = 1
         data.pending_text_queue.append(torch.full((hidden,), float(10 * (step + 1))))
-        runner._write_feedback_buffers([_req_wrap(data)])
+        runner._write_feedback_buffers(
+            [_req_wrap(data)],
+            _pool_indices([_req_wrap(data)]),
+        )
     history = [row.clone() for row in data.decode_input_embeds]
     assert len(history) == 2
 
@@ -309,13 +332,13 @@ def test_row_ownership_survives_prep_then_emit() -> None:
     for i in range(n):
         assert requests[i].data.req is schedule_batch.reqs[i]
 
-    runner._write_feedback_buffers(requests)
+    runner._write_feedback_buffers(requests, _pool_indices(requests))
 
     assert torch.equal(model._feedback_mask, torch.ones(n, dtype=torch.bool))
     for i in range(n):
         assert torch.equal(model._feedback_buffer[i], feedbacks[i] + texts[i])
 
-    runner._emit_code_chunks_and_feedback(requests=requests)
+    _emit_step(runner, requests)
 
     sent = runner._outbox.sent
     assert [m.request_id for m in sent] == [f"r{i}" for i in range(n)]
@@ -344,7 +367,7 @@ def test_sparse_feedback_row_stays_unwritten() -> None:
     for i in range(n):
         model._feedback_slots[POOL_BY_RID[f"r{i}"]] = feedbacks[i]
 
-    runner._write_feedback_buffers(requests)
+    runner._write_feedback_buffers(requests, _pool_indices(requests))
 
     assert model._feedback_mask.tolist() == [True, False, True]
     assert torch.equal(model._feedback_buffer[1], torch.zeros(hidden))
@@ -375,7 +398,7 @@ def test_stale_mask_cannot_leak_into_reused_slot() -> None:
     model._feedback_slots[POOL_BY_RID["r0"]] = torch.full((hidden,), 1.0)
     model._feedback_slots[POOL_BY_RID["r1"]] = feedback1
 
-    runner._write_feedback_buffers(requests)
+    runner._write_feedback_buffers(requests, _pool_indices(requests))
 
     assert model._feedback_mask.tolist() == [False, True]
     assert torch.equal(model._feedback_buffer[0], torch.zeros(hidden))
@@ -430,7 +453,7 @@ def test_row_ownership_tracks_current_batch_order_across_steps() -> None:
             for rid in order
         ]
 
-        runner._write_feedback_buffers(requests)
+        runner._write_feedback_buffers(requests, _pool_indices(requests))
 
         assert model._feedback_mask.tolist() == [True] * len(order) + [False] * (
             n - len(order)
@@ -463,7 +486,7 @@ def test_row_ownership_tracks_current_batch_order_across_steps() -> None:
 
         result = SimpleNamespace()
         runner._stage_token_ids(result, tokens)
-        runner._emit_code_chunks_and_feedback(requests=requests)
+        _emit_step(runner, requests)
 
         emitted = runner._outbox.sent[-len(order) :]
         assert [message.request_id for message in emitted] == list(order)

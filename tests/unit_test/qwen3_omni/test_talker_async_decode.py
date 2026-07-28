@@ -61,6 +61,13 @@ def _req(i: int, *, finished: bool = False, retracted: bool = False):
     )
 
 
+def _forward_batch(n: int, *, pad: int = 0) -> SimpleNamespace:
+    # CUDA-graph padding appends rows past the real batch; they must stay out.
+    return SimpleNamespace(
+        req_pool_indices=torch.tensor(POOL_IDS[:n] + [0] * pad, dtype=torch.long)
+    )
+
+
 def _requests(n: int, **kwargs) -> list:
     return [
         SimpleNamespace(
@@ -82,9 +89,7 @@ def test_launch_publishes_tokens_and_emits_without_sampling() -> None:
     requests = _requests(n)
     result = SimpleNamespace(next_token_ids=None)
 
-    launch_buf = runner.post_decode_launch(
-        result, forward_batch=None, requests=requests
-    )
+    launch_buf = runner.post_decode_launch(result, _forward_batch(n), requests)
 
     assert torch.equal(result.next_token_ids, torch.tensor([40, 41, 42]))
     assert launch_buf is result.next_token_ids
@@ -102,9 +107,7 @@ def test_launch_ids_survive_the_next_forward() -> None:
     runner = _runner(model)
     result = SimpleNamespace(next_token_ids=None)
 
-    launch_buf = runner.post_decode_launch(
-        result, forward_batch=None, requests=_requests(2)
-    )
+    launch_buf = runner.post_decode_launch(result, _forward_batch(2), _requests(2))
     model._sampled_token_ids.copy_(torch.tensor([99, 99]))
 
     runner.post_decode_resolve(launch_buf, result, None, None, [])
@@ -117,9 +120,7 @@ def test_resolve_neither_emits_nor_counts_again() -> None:
     requests = _requests(2)
     result = SimpleNamespace(next_token_ids=None)
 
-    launch_buf = runner.post_decode_launch(
-        result, forward_batch=None, requests=requests
-    )
+    launch_buf = runner.post_decode_launch(result, _forward_batch(2), requests)
     emitted_at_launch = len(runner._outbox.sent)
     runner.post_decode_resolve(launch_buf, result, None, None, requests)
 
@@ -132,12 +133,14 @@ def test_launch_matches_the_sync_post_decode() -> None:
     runner_sync = _runner(_model(2))
     sync_result = SimpleNamespace(next_token_ids=None)
     schedule_batch = SimpleNamespace(output_ids=None)
-    runner_sync.post_decode(sync_result, None, schedule_batch, requests_sync)
+    runner_sync.post_decode(
+        sync_result, _forward_batch(2), schedule_batch, requests_sync
+    )
 
     requests_async = _requests(2)
     runner_async = _runner(_model(2))
     async_result = SimpleNamespace(next_token_ids=None)
-    runner_async.post_decode_launch(async_result, None, requests_async)
+    runner_async.post_decode_launch(async_result, _forward_batch(2), requests_async)
 
     assert torch.equal(sync_result.next_token_ids, async_result.next_token_ids)
     assert torch.equal(schedule_batch.output_ids, sync_result.next_token_ids)
@@ -165,7 +168,7 @@ def test_done_rows_keep_their_slot_but_ship_no_frame(state: str) -> None:
         done.is_retracted = True
     result = SimpleNamespace(next_token_ids=None)
 
-    runner.post_decode_launch(result, forward_batch=None, requests=requests)
+    runner.post_decode_launch(result, _forward_batch(n), requests)
 
     assert [msg.request_id for msg in runner._outbox.sent] == ["r1"]
     # The slot and the counter stay live: the retract snapshot reads both.
@@ -178,7 +181,7 @@ def test_launch_is_inert_without_feedback() -> None:
     runner = _runner(_model(1), feedback_enabled=False)
     result = SimpleNamespace(next_token_ids=None)
 
-    assert runner.post_decode_launch(result, None, _requests(1)) is None
+    assert runner.post_decode_launch(result, _forward_batch(1), _requests(1)) is None
     assert result.next_token_ids is None
     assert runner._outbox.sent == []
 

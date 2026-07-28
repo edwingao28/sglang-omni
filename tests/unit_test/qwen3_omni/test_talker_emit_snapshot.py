@@ -45,6 +45,23 @@ def _requests(n: int) -> list:
     return [SimpleNamespace(data=_data(i)) for i in range(n)]
 
 
+def _pool_indices(requests: list) -> torch.Tensor:
+    """The device-side pool index row the runner slices off the forward batch."""
+    return torch.tensor(
+        [
+            0 if r.data.req.req_pool_idx is None else int(r.data.req.req_pool_idx)
+            for r in requests
+        ],
+        dtype=torch.long,
+    )
+
+
+def _emit_step(runner, requests: list) -> None:
+    runner._emit_code_chunks_and_feedback(
+        requests=requests, pool_indices=_pool_indices(requests)
+    )
+
+
 def test_emitted_rows_survive_next_step_inplace_write() -> None:
     n, hidden, code_groups = 4, 3, 2
     model = _fake_model(n, hidden, code_groups)
@@ -54,7 +71,7 @@ def test_emitted_rows_survive_next_step_inplace_write() -> None:
     embeds_before = model._output_embeds.clone()
 
     requests = _requests(n)
-    runner._emit_code_chunks_and_feedback(requests=requests)
+    _emit_step(runner, requests)
 
     model._output_codes.copy_(model._output_codes + 999)
     model._output_embeds.copy_(model._output_embeds + 999.0)
@@ -70,7 +87,7 @@ def test_emit_writes_feedback_to_pool_indexed_slots() -> None:
     runner = _runner(model)
 
     requests = _requests(n)
-    runner._emit_code_chunks_and_feedback(requests=requests)
+    _emit_step(runner, requests)
 
     for i in range(n):
         assert torch.equal(model._feedback_slots[POOL_IDS[i]], model._output_embeds[i])
@@ -97,7 +114,7 @@ def test_emit_keeps_one_batched_clone_for_codes() -> None:
     requests = _requests(n)
     torch.Tensor.clone = _counting_clone
     try:
-        runner._emit_code_chunks_and_feedback(requests=requests)
+        _emit_step(runner, requests)
     finally:
         torch.Tensor.clone = orig_clone
 
@@ -114,9 +131,9 @@ def test_emit_counts_accumulate_across_steps() -> None:
 
     requests = _requests(n)
 
-    runner._emit_code_chunks_and_feedback(requests=requests)
+    _emit_step(runner, requests)
     model._output_embeds.copy_(model._output_embeds + 1.0)
-    runner._emit_code_chunks_and_feedback(requests=requests)
+    _emit_step(runner, requests)
 
     for i in range(n):
         assert requests[i].data.pending_feedback_count == 2
