@@ -8,6 +8,7 @@ import os
 from collections import deque
 from typing import Any
 
+from sglang.srt.managers import scheduler as _upstream_scheduler
 from sglang.srt.managers.scheduler import Scheduler as _Upstream
 
 from sglang_omni.models.qwen3_omni.config import MIN_PARTIAL_START_CHUNKS
@@ -132,6 +133,33 @@ class QwenTalkerScheduler(OmniScheduler):
             self._rollback_decode_prep_after_skip(batch)
             return None
         return batch
+
+    def update_running_batch(self, batch: Any) -> Any:
+        # Note (wenyao): retract_decode frees the KV and sets is_retracted before it
+        # hands the request back, and the async resolve then skips retracted rows —
+        # so a step that was launched but not yet resolved loses the token it already
+        # emitted a codec frame for, and the replay desyncs against the text queue.
+        # Land the in-flight step while the request still counts as running.
+        if self._async_pending_batch() is not None and self._retract_is_imminent(batch):
+            self._resolve_pending_async()
+        return _Upstream.update_running_batch(self, batch)
+
+    def _retract_is_imminent(self, batch: Any) -> bool:
+        """Upstream's own retract trigger, read before it mutates the batch.
+
+        ``check_decode_mem`` is evaluated here on the unfiltered batch, so this can
+        only be true more often than the upstream check that follows it — draining a
+        step early costs one round of overlap, missing one corrupts the replay.
+        """
+        if batch is None or not batch.reqs:
+            return False
+        interval = _upstream_scheduler.TEST_RETRACT_INTERVAL
+        if (
+            _upstream_scheduler.TEST_RETRACT
+            and getattr(self, "forward_ct", 0) % interval == 0
+        ):
+            return True
+        return not batch.check_decode_mem()
 
     def _add_request_to_queue(self, req: Any, is_retracted: bool = False) -> None:
         # Note (wenyao): retract has already freed req_pool_idx but nothing has
