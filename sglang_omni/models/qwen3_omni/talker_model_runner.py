@@ -138,10 +138,11 @@ class QwenTalkerModelRunner(ModelRunner):
             talker_hidden = talker_hidden.unsqueeze(1)
         self.model.code_predictor_forward(layer0_codes, talker_hidden)
         self._stage_token_ids(result, result.next_token_ids)
-        self._emit_code_chunks_and_feedback(
+        codes_snap = self._emit_code_chunks_and_feedback(
             requests=requests,
             pool_indices=self._batch_pool_indices(forward_batch, len(requests)),
         )
+        self._put_code_chunks(requests, codes_snap)
 
     def post_decode(
         self,
@@ -155,10 +156,11 @@ class QwenTalkerModelRunner(ModelRunner):
 
         result.next_token_ids = self._collect_sampled_token_ids(requests)
         self._stage_token_ids(result, result.next_token_ids)
-        self._emit_code_chunks_and_feedback(
+        codes_snap = self._emit_code_chunks_and_feedback(
             requests=requests,
             pool_indices=self._batch_pool_indices(forward_batch, len(requests)),
         )
+        self._put_code_chunks(requests, codes_snap)
 
     def post_decode_launch(
         self,
@@ -167,25 +169,26 @@ class QwenTalkerModelRunner(ModelRunner):
         requests: list,
     ) -> Any:
         """Async-decode GPU half of ``post_decode``: publish the in-forward
-        sampled ids and emit this step's codec frame + feedback row, with no
-        host sync. The emit MUST stay here: it snapshots ``_output_codes`` and
-        scatters ``_output_embeds`` into the slot table, both fixed buffers the
-        next step's forward overwrites, and running it right after this step's
-        forward on the same stream is what orders those reads before that write.
+        sampled ids and snapshot this step's codec frame + feedback row, with no
+        host sync. The snapshot and slot scatter MUST stay here: they read
+        ``_output_codes`` and ``_output_embeds``, fixed buffers the next step's
+        forward overwrites, and running them right after this step's forward on
+        the same stream is what orders those reads before that write.
 
-        Returns the sampled ids as the resolve payload; ``_finalize`` reads them
-        from the staged pinned copy, which the caller's event covers.
+        Shipping the frame is NOT done here — see ``post_decode_resolve``.
+        Returns ``(sampled ids, codec frames)``; ``_finalize`` reads the ids from
+        the staged pinned copy, which the caller's event covers.
         """
         if not self._feedback_enabled or not requests:
             return None
 
         result.next_token_ids = self._collect_sampled_token_ids(requests)
         self._stage_token_ids(result, result.next_token_ids)
-        self._emit_code_chunks_and_feedback(
+        codes_snap = self._emit_code_chunks_and_feedback(
             requests=requests,
             pool_indices=self._batch_pool_indices(forward_batch, len(requests)),
         )
-        return result.next_token_ids
+        return result.next_token_ids, codes_snap
 
     def post_decode_resolve(
         self,
@@ -195,14 +198,22 @@ class QwenTalkerModelRunner(ModelRunner):
         schedule_batch: Any,
         requests: list,
     ) -> None:
-        """Async-decode host half: restore the launch-time ids so the shared
-        ``_finalize`` tail reads this step's tokens. Every other host-side step
-        (pinned token-id sync, finish bookkeeping, ``generation_steps``) already
-        lives in that tail, so there is nothing else to collect here.
+        """Async-decode host half: restore the launch-time ids and ship this
+        step's codec frames.
+
+        The put waits until here because a finish is only detected in the
+        resolve that follows it: a request whose step F samples codec EOS is
+        still in step F+1's already-launched batch, so putting at launch ships
+        one frame more than the sync path does. By resolve time that row is
+        flagged, and skipping it here makes the codec stream drop exactly the
+        rows the token stream drops.
         """
-        del forward_batch, schedule_batch, requests
-        if launch_buf is not None:
-            result.next_token_ids = launch_buf
+        del forward_batch, schedule_batch
+        if launch_buf is None:
+            return
+        next_token_ids, codes_snap = launch_buf
+        result.next_token_ids = next_token_ids
+        self._put_code_chunks(requests, codes_snap, skip_done=True)
 
     def lookahead_eligible(self, batch: Any) -> bool:
         """The feedback talker is always lookahead-eligible.
@@ -256,7 +267,12 @@ class QwenTalkerModelRunner(ModelRunner):
         *,
         requests: list,
         pool_indices: torch.Tensor,
-    ) -> None:
+    ) -> torch.Tensor:
+        """Snapshot this step's codec frames and scatter its feedback rows.
+
+        Returns the codec frames; shipping them is the caller's call, because the
+        sync path ships immediately and the async path ships one resolve later.
+        """
         bs = len(requests)
         # Note (wenyao): one batched clone, not one per row: the snapshot must be a
         # fresh allocation so its rows survive the next in-graph write to the
@@ -266,41 +282,49 @@ class QwenTalkerModelRunner(ModelRunner):
         # write to _output_embeds; emit runs post-forward on the same stream, so the
         # ordering holds without a sync.
         self.model._feedback_slots[pool_indices] = self.model._output_embeds[:bs]
-        for idx, sched_req in enumerate(requests):
-            req = sched_req.data.req
-            # Note (wenyao): a row that finished or retracted in an earlier step is
-            # still carried by this batch; shipping its frame would append audio past
-            # the end of the request. The slot write and the counter below stay
-            # unconditional so the retract snapshot still sees a consistent row.
-            if not self._req_is_done(req):
-                code_chunk = codes_snap[idx]
-                # Tell code2wav whether to forward audio chunks to the Coordinator.
-                stage_payload = sched_req.data.stage_payload
-                is_streaming = bool(
-                    stage_payload is not None
-                    and (stage_payload.request.params or {}).get("stream", False)
-                )
-                self._outbox.put(
-                    OutgoingMessage(
-                        request_id=req.rid,
-                        type="stream",
-                        data=code_chunk,
-                        target=self._code2wav_target,
-                        metadata={"stream": is_streaming},
-                    )
-                )
+        for sched_req in requests:
             sched_req.data.pending_feedback_count += 1
             # Note (wenyao): retract frees req_pool_idx, so the slot this frame was
             # written into is only recoverable from the request's own record. Read
             # off the request rather than pool_indices: that is a device tensor and
             # touching it on the host would sync.
-            sched_req.data.feedback_slot_idx = req.req_pool_idx
+            sched_req.data.feedback_slot_idx = sched_req.data.req.req_pool_idx
+        return codes_snap
+
+    def _put_code_chunks(
+        self,
+        requests: list,
+        codes_snap: torch.Tensor,
+        *,
+        skip_done: bool = False,
+    ) -> None:
+        for idx, sched_req in enumerate(requests):
+            req = sched_req.data.req
+            if skip_done and self._req_is_done(req):
+                continue
+            # Tell code2wav whether to forward audio chunks to the Coordinator.
+            stage_payload = sched_req.data.stage_payload
+            is_streaming = bool(
+                stage_payload is not None
+                and (stage_payload.request.params or {}).get("stream", False)
+            )
+            self._outbox.put(
+                OutgoingMessage(
+                    request_id=req.rid,
+                    type="stream",
+                    data=codes_snap[idx],
+                    target=self._code2wav_target,
+                    metadata={"stream": is_streaming},
+                )
+            )
 
     def _req_is_done(self, req: Any) -> bool:
-        """Whether this row was finished or retracted by an earlier step.
+        """Whether this row finished or retracted in an earlier step.
 
-        Same predicate the base resolve uses to build its skip set, so the codec
-        stream and the token stream drop the same rows.
+        Same predicate the base resolve builds its skip set from (``base.py``
+        ``execute_resolve``), so the codec stream and the token stream drop the
+        same rows. Only meaningful on the resolve side: at launch time the step
+        that finishes a request has not been processed yet.
         """
         try:
             finished = bool(req.finished())
