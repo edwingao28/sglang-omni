@@ -431,6 +431,10 @@ that happened to contain an older version of the test.
     finished in an earlier step, so a finishing request produces the same frame
     sequence as the sync path; and the feedback talker stays lookahead-eligible
     under a repetition penalty
+  - async resolve hands upstream the staged pinned host copy of the token ids,
+    the way the sync path already does in `_make_batch_result`, so upstream's
+    `.tolist()` never enqueues a device copy behind the forward the launch just
+    submitted; runners that stage nothing keep the device tensor
   - talker async wiring: `SGLANG_OMNI_TALKER_OVERLAP=1` reaches both the scheduler's
     `enable_async_decode` and the late-attached runner's `_async_enabled`, and an
     imminent retract drains the in-flight step before upstream frees its KV
