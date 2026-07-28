@@ -241,26 +241,43 @@ class QwenTalkerModelRunner(ModelRunner):
         self.model._feedback_slots[pool_ids] = self.model._output_embeds[:bs]
         for idx, sched_req in enumerate(requests):
             req = reqs[idx]
-            code_chunk = codes_snap[idx]
-            # Tell code2wav whether to forward audio chunks to the Coordinator.
-            stage_payload = sched_req.data.stage_payload
-            is_streaming = bool(
-                stage_payload is not None
-                and (stage_payload.request.params or {}).get("stream", False)
-            )
-            self._outbox.put(
-                OutgoingMessage(
-                    request_id=req.rid,
-                    type="stream",
-                    data=code_chunk,
-                    target=self._code2wav_target,
-                    metadata={"stream": is_streaming},
+            # Note (wenyao): a row that finished or retracted in an earlier step is
+            # still carried by this batch; shipping its frame would append audio past
+            # the end of the request. The slot write and the counter below stay
+            # unconditional so the retract snapshot still sees a consistent row.
+            if not self._req_is_done(req):
+                code_chunk = codes_snap[idx]
+                # Tell code2wav whether to forward audio chunks to the Coordinator.
+                stage_payload = sched_req.data.stage_payload
+                is_streaming = bool(
+                    stage_payload is not None
+                    and (stage_payload.request.params or {}).get("stream", False)
                 )
-            )
+                self._outbox.put(
+                    OutgoingMessage(
+                        request_id=req.rid,
+                        type="stream",
+                        data=code_chunk,
+                        target=self._code2wav_target,
+                        metadata={"stream": is_streaming},
+                    )
+                )
             sched_req.data.pending_feedback_count += 1
             # Note (wenyao): retract frees req_pool_idx, so the slot this frame was
             # written into is only recoverable from the request's own record.
             sched_req.data.feedback_slot_idx = slot_ids[idx]
+
+    def _req_is_done(self, req: Any) -> bool:
+        """Whether this row was finished or retracted by an earlier step.
+
+        Same predicate the base resolve uses to build its skip set, so the codec
+        stream and the token stream drop the same rows.
+        """
+        try:
+            finished = bool(req.finished())
+        except AttributeError:
+            finished = False
+        return finished or self._req_is_retracted(req)
 
     def snapshot_feedback_for_retract(self, req: Any) -> None:
         """Copy an unconsumed feedback row out of its slot before the slot is reused.
