@@ -952,6 +952,11 @@ class Qwen3OmniTalker(nn.Module):
             dtype=torch.bool,
             device=device,
         )
+        # Note (wenyao): the value the decode fast path writes into the mask, held
+        # on the device. Assigning a Python True through advanced indexing makes
+        # torch build the scalar host-side and copy it in, which blocks the host
+        # once the async loop lets it run ahead of the stream.
+        self._mask_set_value = torch.ones((), dtype=torch.bool, device=device)
         self._repetition_penalties = torch.ones(
             max_batch_size,
             1,
@@ -1077,7 +1082,13 @@ class Qwen3OmniTalker(nn.Module):
 
         rep_rows = self._decode_prep_rep_rows
         if rep_rows is not None:
-            self._repetition_mask[rep_rows, self._sampled_token_ids[rep_rows]] = True
+            # Note (wenyao): index_put_ with a device-resident value, not
+            # ``mask[rows, toks] = True`` — the scalar form hands torch a Python
+            # bool it has to materialize on the host and copy in, and that copy is
+            # the one host-blocking op left on the launch path.
+            self._repetition_mask.index_put_(
+                (rep_rows, self._sampled_token_ids[rep_rows]), self._mask_set_value
+            )
         for row_idx in range(len(prev_steps)):
             prev_steps[row_idx] += 1
         return True
