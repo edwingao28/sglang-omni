@@ -79,14 +79,11 @@ def _emit(
     data: SimpleNamespace,
     value: float,
 ) -> None:
+    # The emit reads req_pool_idx off data.req, so the batch row and the request
+    # record must be the same object.
+    assert data.req is req
     runner.model._output_embeds[0] = torch.full((HIDDEN,), value)
-    # Note (wenyao): batch and data.req must be the same object so the two sources
-    # of req_pool_idx cannot diverge.
-    runner._emit_code_chunks_and_feedback(
-        schedule_batch=SimpleNamespace(reqs=[req]),
-        requests=[SimpleNamespace(data=data)],
-        pool_indices=torch.tensor([req.req_pool_idx], dtype=torch.long),
-    )
+    runner._emit_code_chunks_and_feedback(requests=[SimpleNamespace(data=data)])
 
 
 def _retract_scheduler(

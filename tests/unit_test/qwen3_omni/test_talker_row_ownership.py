@@ -127,8 +127,9 @@ def _emit(
     data: SimpleNamespace,
     embed: torch.Tensor,
 ) -> None:
+    assert data.req is req
     runner.model._output_embeds[0] = embed
-    _emit_frame(runner, _sched_batch([req]), [_req_wrap(data)])
+    runner._emit_code_chunks_and_feedback(requests=[_req_wrap(data)])
 
 
 def test_recycled_pool_slot_cannot_feed_stale_feedback() -> None:
@@ -336,7 +337,7 @@ def test_row_ownership_survives_prep_then_emit() -> None:
     for i in range(n):
         assert torch.equal(model._feedback_buffer[i], feedbacks[i] + texts[i])
 
-    _emit_frame(runner, schedule_batch, requests)
+    runner._emit_code_chunks_and_feedback(requests=requests)
 
     sent = runner._outbox.sent
     assert [m.request_id for m in sent] == [f"r{i}" for i in range(n)]
@@ -484,7 +485,7 @@ def test_row_ownership_tracks_current_batch_order_across_steps() -> None:
 
         result = SimpleNamespace()
         runner._stage_token_ids(result, tokens)
-        _emit_frame(runner, schedule_batch, requests)
+        runner._emit_code_chunks_and_feedback(requests=requests)
 
         emitted = runner._outbox.sent[-len(order) :]
         assert [message.request_id for message in emitted] == list(order)
