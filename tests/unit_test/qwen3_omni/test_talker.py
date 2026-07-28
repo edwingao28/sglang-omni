@@ -2193,7 +2193,7 @@ def _talker_seed_self(
         _sampling_staging_event=(torch.cuda.Event() if device.type == "cuda" else None),
         _sampled_token_ids=torch.zeros(max_bs, dtype=torch.long, device=device),
         _decode_prep_rids=None,
-        _decode_prep_out_lens=[],
+        _decode_prep_step_ids=[],
         _decode_prep_rep_rows=None,
     )
     fake._reuse_decode_buffers = Qwen3OmniTalker._reuse_decode_buffers.__get__(fake)
@@ -2213,7 +2213,11 @@ def _talker_seed_req(seed: int | None, rid: str) -> SimpleNamespace:
         sampling_seed=seed,
     )
     req = SimpleNamespace(
-        sampling_params=sp, output_ids=[], _codec_suppress_tokens=None, rid=rid
+        sampling_params=sp,
+        output_ids=[],
+        _codec_suppress_tokens=None,
+        rid=rid,
+        decode_batch_idx=0,
     )
     return SimpleNamespace(data=SimpleNamespace(req=req, suppress_tokens=None))
 
@@ -2273,10 +2277,19 @@ def _talker_prep_req(
         output_ids=list(output_ids or []),
         _codec_suppress_tokens=None,
         rid=rid,
+        decode_batch_idx=0,
     )
     return SimpleNamespace(
         data=SimpleNamespace(req=req, suppress_tokens=list(suppress or []) or None)
     )
+
+
+def _advance_decode_step(requests: list[SimpleNamespace], tokens: list[int]) -> None:
+    """One committed decode step: the scheduler bumps decode_batch_idx when it
+    builds the next batch, and the sampled token lands in output_ids."""
+    for sched_req, token in zip(requests, tokens):
+        sched_req.data.req.decode_batch_idx += 1
+        sched_req.data.req.output_ids.append(token)
 
 
 def test_talker_prepare_decode_buffers_steady_state_reuse() -> None:
@@ -2299,8 +2312,7 @@ def test_talker_prepare_decode_buffers_steady_state_reuse() -> None:
 
     fake._sampled_token_ids[0] = 5
     fake._sampled_token_ids[1] = 6
-    requests[0].data.req.output_ids.append(5)
-    requests[1].data.req.output_ids.append(6)
+    _advance_decode_step(requests, [5, 6])
     Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
 
     assert float(fake._sampling_temperatures[0, 0]) == 123.0
@@ -2345,8 +2357,7 @@ def test_talker_prepare_decode_buffers_cuda_matches_fresh_rebuild() -> None:
 
     Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
     fake._sampled_token_ids[:2] = torch.tensor([5, 6], device=device)
-    requests[0].data.req.output_ids.append(5)
-    requests[1].data.req.output_ids.append(6)
+    _advance_decode_step(requests, [5, 6])
     Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
 
     requests = [
@@ -2375,8 +2386,7 @@ def test_talker_prepare_decode_buffers_cuda_matches_fresh_rebuild() -> None:
     ]
     Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
     fake._sampled_token_ids[:2] = torch.tensor([4, 5], device=device)
-    requests[0].data.req.output_ids.append(4)
-    requests[1].data.req.output_ids.append(5)
+    _advance_decode_step(requests, [4, 5])
     Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
 
     fresh = _talker_seed_self(device=device)
@@ -2409,18 +2419,14 @@ def test_talker_prepare_decode_buffers_rebuild_triggers() -> None:
         fake._sampling_temperatures[0, 0] = 123.0
         return fake, requests
 
-    def _advance(requests: list[SimpleNamespace]) -> None:
-        for sched_req in requests:
-            sched_req.data.req.output_ids.append(5)
-
     fake, requests = _prepared()
-    _advance(requests)
+    _advance_decode_step(requests, [5, 5])
     Qwen3OmniTalker.prepare_decode_buffers(fake, list(reversed(requests)))
     assert float(fake._sampling_temperatures[0, 0]) == pytest.approx(0.8)
 
     fake, requests = _prepared()
-    _advance(requests)
-    requests[0].data.req.output_ids.append(6)
+    _advance_decode_step(requests, [5, 5])
+    requests[0].data.req.decode_batch_idx += 1
     Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
     assert float(fake._sampling_temperatures[0, 0]) == pytest.approx(0.8)
 
@@ -2441,7 +2447,7 @@ def test_talker_prefill_forward_invalidates_next_decode_reuse() -> None:
     Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
     fake._sampling_temperatures[0, 0] = 123.0
     fake._sampled_token_ids[0] = 3
-    requests[0].data.req.output_ids.append(3)
+    _advance_decode_step(requests, [3])
 
     fake._uses_mrope = False
     fake.model = lambda **_: torch.zeros(1, 2)
