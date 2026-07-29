@@ -8,6 +8,8 @@ This module mirrors HF's talker prefill layout, then keeps HF's
 from __future__ import annotations
 
 import json
+import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -22,10 +24,26 @@ from sglang_omni.models.qwen3_omni.pending_text_queue import (
 )
 from sglang_omni.models.weight_loader import resolve_model_path
 
+logger = logging.getLogger(__name__)
+
 _THINKER_EMBED_CANDIDATE_KEYS = (
     "thinker.model.embed_tokens.weight",
     "model.embed_tokens.weight",
 )
+
+_EMBED_PRELOAD_MODES = ("off", "device")
+
+
+def _embed_preload_mode() -> str:
+    mode = os.environ.get("SGLANG_OMNI_TALKER_EMBED_PRELOAD", "off").strip().lower()
+    if mode not in _EMBED_PRELOAD_MODES:
+        logger.warning(
+            "Ignoring SGLANG_OMNI_TALKER_EMBED_PRELOAD=%r (expected one of %s)",
+            mode,
+            ", ".join(_EMBED_PRELOAD_MODES),
+        )
+        return "off"
+    return mode
 
 
 def _read_rows_from_safetensor(
@@ -191,6 +209,34 @@ class TalkerPrefillBuilder:
             tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
         ) = None
 
+        self._embed_table: torch.Tensor | None = None
+        if _embed_preload_mode() == "device":
+            self._preload_embed_table()
+
+    def _preload_embed_table(self) -> None:
+        table = None
+        try:
+            shard_path, tensor_name = _resolve_embed_source(self._model_path)
+            with safe_open(str(shard_path), framework="pt", device="cpu") as handle:
+                table = handle.get_tensor(tensor_name)
+            self._embed_table = table.to(device=self._device, dtype=self._dtype)
+        except Exception as exc:
+            size_hint = ""
+            if table is not None:
+                nbytes = table.numel() * self._dtype.itemsize
+                size_hint = (
+                    f" The table is {tuple(table.shape)} x {self._dtype}"
+                    f" = {nbytes / 2**30:.2f} GiB on {self._device}."
+                )
+            logger.warning(
+                "Talker thinker-embedding preload failed (%s); using lazy row loads."
+                "%s It must fit alongside the model weights and KV cache, which are"
+                " already allocated at this point; lower the memory fraction or unset"
+                " SGLANG_OMNI_TALKER_EMBED_PRELOAD to keep lazy loading.",
+                exc,
+                size_hint,
+            )
+
     def build_prompt_prefill(
         self,
         payload,
@@ -330,14 +376,19 @@ class TalkerPrefillBuilder:
 
     def get_tts_special_embeds(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self._tts_special_cache is None:
-            special_rows = load_thinker_embedding_rows(
-                self._model_path,
-                [
-                    self._tts_bos_token_id,
-                    self._tts_eos_token_id,
-                    self._tts_pad_token_id,
-                ],
-            ).to(device=self._device, dtype=self._dtype)
+            special_ids = [
+                self._tts_bos_token_id,
+                self._tts_eos_token_id,
+                self._tts_pad_token_id,
+            ]
+            if self._embed_table is not None:
+                special_rows = self._load_prompt_token_embeddings(
+                    torch.tensor(special_ids, dtype=torch.long)
+                )
+            else:
+                special_rows = load_thinker_embedding_rows(
+                    self._model_path, special_ids
+                ).to(device=self._device, dtype=self._dtype)
             projected = self._model.text_projection(special_rows)
             self._tts_special_cache = projected.chunk(3, dim=0)
         return self._tts_special_cache
@@ -387,6 +438,11 @@ class TalkerPrefillBuilder:
         return prompt_ids, prompt_embed, prompt_hidden, prompt_model_inputs
 
     def _load_prompt_token_embeddings(self, token_ids: torch.Tensor) -> torch.Tensor:
+        table = self._embed_table
+        if table is not None:
+            row_ids = token_ids.to(dtype=torch.long).view(-1)
+            return table.index_select(0, row_ids.to(table.device))
+
         token_ids = token_ids.to(dtype=torch.long).view(-1).cpu()
         unique_ids, inverse = torch.unique(token_ids, sorted=False, return_inverse=True)
         missing_ids = [
