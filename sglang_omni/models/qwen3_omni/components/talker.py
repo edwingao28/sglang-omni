@@ -1153,27 +1153,37 @@ class Qwen3OmniTalker(nn.Module):
                 self._seed_suppress_row(pool_idx, suppress_tokens)
 
     def _seed_suppress_row(self, pool_idx: int, suppress_tokens) -> None:
-        """Write one request's suppress row with no host-to-device copy.
+        """Seed one request's suppress row, which the caller has already cleared.
 
         The suppress set is derived from the model config, so every request in a
-        deployment carries the same one. The first request builds a device-resident
-        row template — one bounded H2D for the process — and every later request
-        that matches it is a device-to-device copy. A request carrying a different
-        set rebuilds the template, which is the old per-prefill H2D and is the
-        fallback, not the steady state.
+        deployment carries the same one. The first request pays a build sized by the
+        set, and every later request matching it is a device-to-device copy of the
+        row that one produced.
         """
         sup_vocab = self._suppress_mask.shape[1]
+        # Note (wenyao): sorted, so two orderings of one set share the template
+        # rather than missing the cache forever and rebuilding on every prefill.
         key = tuple(
-            t for t in (int(tok) for tok in suppress_tokens) if 0 <= t < sup_vocab
+            sorted(
+                {t for t in (int(tok) for tok in suppress_tokens) if 0 <= t < sup_vocab}
+            )
         )
         if not key:
             return
-        if key != self._suppress_row_key:
-            template = torch.zeros(sup_vocab, dtype=torch.bool, device="cpu")
-            template[torch.tensor(key, dtype=torch.long, device="cpu")] = True
-            self._suppress_row_template = template.to(self._suppress_mask.device)
-            self._suppress_row_key = key
-        self._suppress_mask[pool_idx].copy_(self._suppress_row_template)
+        row = self._suppress_mask[pool_idx]
+        if key == self._suppress_row_key:
+            row.copy_(self._suppress_row_template)
+            return
+        # Note (wenyao): a sparse index tensor, not a dense row — a deployment whose
+        # requests really do carry different sets would otherwise pay a vocab-wide
+        # H2D per prefill instead of one sized by the set.
+        row.index_fill_(
+            0,
+            torch.tensor(key, dtype=torch.long, device=self._suppress_mask.device),
+            True,
+        )
+        self._suppress_row_template = row.clone()
+        self._suppress_row_key = key
 
     def _reuse_decode_buffers(self, requests: list) -> bool:
         # Note (wenyao): sampling params are static per request, and the masks are

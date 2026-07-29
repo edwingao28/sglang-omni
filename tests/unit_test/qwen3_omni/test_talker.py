@@ -2644,13 +2644,13 @@ def test_talker_records_the_sampled_token_without_a_host_scalar(monkeypatch) -> 
 def _spy_host_to_device(monkeypatch) -> list[str]:
     """Record every host-to-device transfer, however it is spelled.
 
-    Watching only ``torch.tensor(..., device=...)`` lets a ``.to(device)`` or
-    ``.cuda()`` regression through, and these tests run on CPU, where the device a
-    tensor lands on proves nothing — so the interception has to be structural.
-    The pinned non-blocking staging copy is the sanctioned form and is not counted.
+    Watching only ``torch.tensor(..., device=...)`` lets a ``.to(device)``, a
+    ``.cuda()`` or another device-taking factory through, and these tests run on
+    CPU, where the device a tensor lands on proves nothing — so the interception
+    has to be structural. The pinned non-blocking staging copy is the sanctioned
+    form and is not counted.
     """
     calls: list[str] = []
-    real_tensor = torch.tensor
     real_to = torch.Tensor.to
     real_cuda = torch.Tensor.cuda
     real_copy = torch.Tensor.copy_
@@ -2660,10 +2660,15 @@ def _spy_host_to_device(monkeypatch) -> list[str]:
             return True
         return any(isinstance(a, (torch.device, str, torch.Tensor)) for a in args)
 
-    def _spy_tensor(*args, **kwargs):
-        if kwargs.get("device") is not None:
-            calls.append(f"torch.tensor(device={kwargs['device']})")
-        return real_tensor(*args, **kwargs)
+    def _spy_factory(name: str):
+        real = getattr(torch, name)
+
+        def _spy(*args, **kwargs):
+            if kwargs.get("device") is not None:
+                calls.append(f"torch.{name}(device={kwargs['device']})")
+            return real(*args, **kwargs)
+
+        return _spy
 
     def _spy_to(self, *args, **kwargs):
         if _names_a_device(args, kwargs):
@@ -2682,7 +2687,8 @@ def _spy_host_to_device(monkeypatch) -> list[str]:
             calls.append(f"Tensor.copy_({src.device} -> {self.device})")
         return real_copy(self, src, *args, **kwargs)
 
-    monkeypatch.setattr(torch, "tensor", _spy_tensor)
+    for factory in ("tensor", "as_tensor", "zeros", "ones", "full", "empty"):
+        monkeypatch.setattr(torch, factory, _spy_factory(factory))
     monkeypatch.setattr(torch.Tensor, "to", _spy_to)
     monkeypatch.setattr(torch.Tensor, "cuda", _spy_cuda)
     monkeypatch.setattr(torch.Tensor, "copy_", _spy_copy)
@@ -2706,18 +2712,39 @@ def test_talker_prefill_masks_do_no_host_copy(monkeypatch) -> None:
     assert not fake._repetition_mask[2].any()
 
 
-def test_talker_prefill_masks_seed_an_unmatched_suppress_set() -> None:
-    # Two requests with different suppress sets: the template only covers one of
-    # them, and the other has to fall back to a fresh build rather than inherit it.
+def test_talker_prefill_masks_reuse_the_template_across_orderings(monkeypatch) -> None:
+    # The suppress set arrives as a list, so the cache key has to be order-free.
+    # Keying on input order would miss forever and rebuild on every prefill.
+    fake = _talker_seed_self()
+    Qwen3OmniTalker.prepare_prefill_masks(
+        fake, [_talker_prep_req("a", pool_idx=1, suppress=[3, 5])]
+    )
+
+    calls = _spy_host_to_device(monkeypatch)
+    Qwen3OmniTalker.prepare_prefill_masks(
+        fake, [_talker_prep_req("b", pool_idx=2, suppress=[5, 3])]
+    )
+
+    assert calls == []
+    assert fake._suppress_mask[2].nonzero().flatten().tolist() == [3, 5]
+
+
+def test_talker_prefill_masks_seed_an_unmatched_suppress_set(monkeypatch) -> None:
+    # Two requests with different suppress sets: the template covers only one of
+    # them, and the other falls back to a fresh build rather than inheriting it.
     fake = _talker_seed_self()
     a = _talker_prep_req("a", pool_idx=1, suppress=[3])
     b = _talker_prep_req("b", pool_idx=2, suppress=[5, 6, 99])
 
+    calls = _spy_host_to_device(monkeypatch)
     Qwen3OmniTalker.prepare_prefill_masks(fake, [a, b])
 
     assert fake._suppress_mask[1].nonzero().flatten().tolist() == [3]
     # 99 is past the vocab and must be dropped, not wrapped or raised on.
     assert fake._suppress_mask[2].nonzero().flatten().tolist() == [5, 6]
+    # Each miss ships one index tensor sized by the set. A dense row build would
+    # show up here as a device-taking zeros/full and cost a vocab-wide copy.
+    assert calls == ["torch.tensor(device=cpu)"] * 2
 
 
 def test_talker_composition_change_does_no_mask_work(monkeypatch) -> None:
@@ -2942,8 +2969,9 @@ def test_talker_post_prefill_records_the_prefill_token() -> None:
 
 
 def test_talker_post_prefill_without_a_sampled_token_is_a_no_op() -> None:
-    # A prefill that produced no token (chunked prefill) returns before every
-    # side effect, including the mask write.
+    # base skips its sampling block for a prefill-only batch (base.py, on
+    # schedule_batch.is_prefill_only), so post_prefill can be handed no token. It
+    # must return before every side effect, including the mask write.
     fake = _talker_seed_self()
     req = _talker_emit_req("a", pool_idx=1, penalty=1.5)
     runner = _talker_runner(fake, bs=1)
@@ -2964,9 +2992,11 @@ def test_talker_post_prefill_without_a_sampled_token_is_a_no_op() -> None:
 
 
 def test_talker_masks_are_untouched_when_feedback_is_disabled() -> None:
-    # With feedback off the talker runs the base sampling path, which applies the
-    # codec suppress list to the logits itself (base._sample_next_token_ids), so
-    # these masks must be neither seeded nor read.
+    # With feedback off, every seeding hook returns early and the masks stay empty.
+    # Nothing downstream depends on them: the prefill token is sampled by base,
+    # which applies the codec suppress list to the logits itself
+    # (_sample_next_token_ids), and the decode forward still gathers these rows but
+    # reads all-False, which is no penalty and no suppression.
     fake = _talker_seed_self()
     req = _talker_emit_req("a", pool_idx=1, penalty=1.5, suppress=[3])
     runner = _talker_runner(fake, bs=1)

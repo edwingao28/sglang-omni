@@ -205,6 +205,7 @@ def _runner_through_init(
     expose_alloc_size: bool = True,
     expose_pool: bool = True,
     free_slots: Any = None,
+    drop_table: str | None = None,
 ) -> QwenTalkerModelRunner:
     mask_rows = slot_rows if mask_rows is None else mask_rows
     model = SimpleNamespace(
@@ -212,6 +213,8 @@ def _runner_through_init(
         _repetition_mask=torch.zeros(mask_rows, VOCAB, dtype=torch.bool),
         _suppress_mask=torch.zeros(mask_rows, VOCAB, dtype=torch.bool),
     )
+    if drop_table is not None:
+        delattr(model, drop_table)
     # Mirrors ReqToTokenPool: size rows allocatable from [1, size], _alloc_size total.
     pool = SimpleNamespace(
         size=pool_size,
@@ -266,15 +269,26 @@ def test_startup_guard_rejects_tables_undersized_by_many_rows() -> None:
 def test_startup_guard_logs_instead_of_silently_skipping(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # An upstream rename of req_to_token_pool leaves every index site working and only
-    # this check quiet, so the skip has to announce itself.
+    # An upstream rename of a slot table leaves every index site working and only the
+    # size check quiet, so that skip has to announce itself.
     with caplog.at_level(logging.WARNING, logger=talker_model_runner.__name__):
         _runner_through_init(
-            MAX_RUNNING_REQUESTS, MAX_RUNNING_REQUESTS, expose_pool=False
+            MAX_RUNNING_REQUESTS, MAX_RUNNING_REQUESTS, drop_table="_feedback_slots"
         )
 
     assert "bound check skipped" in caplog.text
-    assert "req_to_token_pool" in caplog.text
+    assert "_feedback_slots" in caplog.text
+
+
+def test_startup_guard_raises_when_the_pool_itself_is_missing() -> None:
+    # Unlike a renamed table, a missing pool leaves the row-0 reservation
+    # unprovable, and that failure mode is silent at runtime.
+    with pytest.raises(RuntimeError, match="cannot verify the request pool"):
+        _runner_through_init(
+            feedback_slot_rows(MAX_RUNNING_REQUESTS),
+            MAX_RUNNING_REQUESTS,
+            expose_pool=False,
+        )
 
 
 def test_startup_guard_falls_back_to_size_when_alloc_size_absent() -> None:

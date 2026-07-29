@@ -47,26 +47,35 @@ class QwenTalkerModelRunner(ModelRunner):
         divergence into a startup error instead of an async device-side index assert
         that only sustained slot churn reaches.
         """
+        pool = getattr(self.tp_worker.model_runner, "req_to_token_pool", None)
+        if pool is None:
+            # Note (wenyao): raise rather than warn, unlike the table check below. A
+            # missing pool leaves the row-0 reservation unprovable, and that failure
+            # is silent at runtime — a request handed row 0 loses its repetition
+            # history every step with nothing to show for it.
+            raise RuntimeError(
+                "Talker cannot verify the request pool: "
+                "model_runner.req_to_token_pool not found. The sampling masks are "
+                "keyed by req_pool_idx and clear row 0 every decode step, so the "
+                "pool's reservation of that row has to be provable at startup"
+            )
+        self._check_pool_reserves_row_zero(pool)
+
         tables = {
             name: getattr(self.model, name, None) for name in POOL_KEYED_TALKER_TABLES
         }
-        pool = getattr(self.tp_worker.model_runner, "req_to_token_pool", None)
-        # Note (wenyao): a skip must be audible. If either attribute is ever renamed
-        # upstream the index sites keep working and only this check goes quiet, which
+        # Note (wenyao): a skip must be audible. If a table is ever renamed upstream
+        # the index sites keep working and only this size check goes quiet, which
         # puts us back on an async device assert with no startup signal.
         missing_tables = [f"model.{name}" for name, t in tables.items() if t is None]
-        if missing_tables or pool is None:
-            missing = missing_tables + (
-                ["model_runner.req_to_token_pool"] if pool is None else []
-            )
+        if missing_tables:
             logger.warning(
                 "Talker feedback slot bound check skipped: %s not found. A slot table "
                 "too small for the request pool would now fail as a device-side index "
                 "assert under load instead of at startup.",
-                " and ".join(missing),
+                " and ".join(missing_tables),
             )
             return
-        self._check_pool_reserves_row_zero(pool)
         # Note (wenyao): prefer the pool's own row count so this stays an independent
         # check rather than a restatement of the model's sizing formula.
         required = getattr(pool, "_alloc_size", None)
