@@ -15,6 +15,10 @@ from sglang_omni.scheduling.messages import OutgoingMessage
 
 logger = logging.getLogger(__name__)
 
+# Note (wenyao): every model table addressed by req_pool_idx belongs here, so the
+# startup bound check below covers all of them and none can drift out of it silently.
+POOL_KEYED_TALKER_TABLES = ("_feedback_slots", "_repetition_mask", "_suppress_mask")
+
 
 class QwenTalkerModelRunner(ModelRunner):
 
@@ -35,29 +39,31 @@ class QwenTalkerModelRunner(ModelRunner):
             self._check_feedback_slots_cover_pool()
 
     def _check_feedback_slots_cover_pool(self) -> None:
-        """Cross-check the req_pool_idx-keyed feedback table against the real pool.
+        """Cross-check the req_pool_idx-keyed model tables against the real pool.
 
-        The model allocates ``_feedback_slots`` in its own ``__init__``, before
+        The model allocates them in its own ``__init__``, before
         ``req_to_token_pool`` exists, so it has to size from server args. This is the
         first point where both are visible; checking once here turns any future
         divergence into a startup error instead of an async device-side index assert
         that only sustained slot churn reaches.
         """
-        slots = getattr(self.model, "_feedback_slots", None)
+        tables = {
+            name: getattr(self.model, name, None) for name in POOL_KEYED_TALKER_TABLES
+        }
         pool = getattr(self.tp_worker.model_runner, "req_to_token_pool", None)
         # Note (wenyao): a skip must be audible. If either attribute is ever renamed
         # upstream the index sites keep working and only this check goes quiet, which
         # puts us back on an async device assert with no startup signal.
-        if slots is None or pool is None:
-            missing = "model._feedback_slots" if slots is None else ""
-            if pool is None:
-                missing = f"{missing} and " if missing else ""
-                missing += "model_runner.req_to_token_pool"
+        missing_tables = [f"model.{name}" for name, t in tables.items() if t is None]
+        if missing_tables or pool is None:
+            missing = missing_tables + (
+                ["model_runner.req_to_token_pool"] if pool is None else []
+            )
             logger.warning(
                 "Talker feedback slot bound check skipped: %s not found. A slot table "
                 "too small for the request pool would now fail as a device-side index "
                 "assert under load instead of at startup.",
-                missing,
+                " and ".join(missing),
             )
             return
         # Note (wenyao): prefer the pool's own row count so this stays an independent
@@ -71,13 +77,14 @@ class QwenTalkerModelRunner(ModelRunner):
                 "of the model's own sizing formula.",
                 type(pool).__name__,
             )
-        if slots.shape[0] < required:
-            raise RuntimeError(
-                "Talker feedback slots are too small for the request pool: "
-                f"_feedback_slots has {slots.shape[0]} rows but req_to_token_pool "
-                f"of size {pool.size} allocates req_pool_idx in [1, {pool.size}], "
-                f"needing {required} rows"
-            )
+        for name, table in tables.items():
+            if table.shape[0] < required:
+                raise RuntimeError(
+                    f"Talker {name} is too small for the request pool: it has "
+                    f"{table.shape[0]} rows but req_to_token_pool of size "
+                    f"{pool.size} allocates req_pool_idx in [1, {pool.size}], "
+                    f"needing {required} rows"
+                )
 
     def execute(self, scheduler_output: Any):
         return super().execute(scheduler_output)
@@ -91,6 +98,17 @@ class QwenTalkerModelRunner(ModelRunner):
         return self._run_projected_prefill_forward(
             forward_batch, schedule_batch, requests
         )
+
+    def before_prefill(
+        self,
+        forward_batch: Any,
+        schedule_batch: Any,
+        requests: list,
+    ) -> None:
+        del forward_batch, schedule_batch
+        if not self._feedback_enabled:
+            return
+        self.model.prepare_prefill_masks(requests)
 
     def before_decode(
         self,
@@ -138,9 +156,16 @@ class QwenTalkerModelRunner(ModelRunner):
         self.model.code_predictor_forward(layer0_codes, talker_hidden)
         schedule_batch.output_ids = result.next_token_ids
         self._stage_token_ids(result, result.next_token_ids)
+        pool_indices = self._batch_pool_indices(forward_batch, len(requests))
+        # Note (wenyao): decode records its own tokens inside the forward, but a
+        # prefill samples outside it, so its token has to be added to the
+        # repetition mask here or it stays unpenalized for the whole request.
+        self.model.record_sampled_tokens(
+            pool_indices, result.next_token_ids.reshape(-1)
+        )
         codes_snap = self._emit_code_chunks_and_feedback(
             requests=requests,
-            pool_indices=self._batch_pool_indices(forward_batch, len(requests)),
+            pool_indices=pool_indices,
         )
         self._put_code_chunks(requests, codes_snap)
 
@@ -223,14 +248,11 @@ class QwenTalkerModelRunner(ModelRunner):
         appends the token to ``req.output_ids``, so any history-scored sampling
         term would read a stale view. Talker decode never samples on that path:
         it samples inside the forward against a device-side repetition mask that
-        is advanced from ``_sampled_token_ids`` (the previous forward's output),
-        and it ignores frequency/presence penalties and ``min_new_tokens``
-        entirely. ``req.output_ids`` is read only when ``prepare_decode_buffers``
-        falls off its fast path — a batch composition change — and there the
-        rebuild seeds the mask from a history the launched step has not reached
-        yet. That token stays unpenalized for the whole run of steps until the
-        next rebuild: the fast path only ever adds tokens newer than itself, so
-        nothing goes back for the one the rebuild skipped.
+        the same forward then advances with the token it just sampled, and it
+        ignores frequency/presence penalties and ``min_new_tokens`` entirely. The
+        mask is keyed by ``req_pool_idx`` and never rebuilt from
+        ``req.output_ids`` once a request is decoding, so there is no host-side
+        history for the lag to make stale.
         """
         if not self._feedback_enabled:
             return super().lookahead_eligible(batch)

@@ -15,6 +15,7 @@ from torch import nn
 
 import sglang_omni.models.qwen3_omni.components.talker as talker_module
 from sglang_omni.model_runner.thinker_model_runner import ThinkerModelRunner
+from sglang_omni.models.qwen3_omni.components.feedback_slots import feedback_slot_rows
 from sglang_omni.models.qwen3_omni.components.talker import (
     Qwen3OmniTalker,
     _bind_default_weight_loaders,
@@ -2179,11 +2180,12 @@ def _talker_seed_self(
     vocab: int = 8,
     device: torch.device | None = None,
 ) -> SimpleNamespace:
-    """Minimal stand-in carrying only the buffers prepare_decode_buffers writes."""
+    """Minimal stand-in carrying the sampling buffers and the pool-keyed masks."""
     device = device or torch.device("cpu")
+    mask_rows = feedback_slot_rows(max_bs)
     fake = SimpleNamespace(
-        _repetition_mask=torch.zeros(max_bs, vocab, dtype=torch.bool, device=device),
-        _suppress_mask=torch.zeros(max_bs, vocab, dtype=torch.bool, device=device),
+        _repetition_mask=torch.zeros(mask_rows, vocab, dtype=torch.bool, device=device),
+        _suppress_mask=torch.zeros(mask_rows, vocab, dtype=torch.bool, device=device),
         _repetition_penalties=torch.ones(max_bs, 1, device=device),
         _sampling_temperatures=torch.ones(max_bs, 1, device=device),
         _sampling_top_ps=torch.ones(max_bs, device=device),
@@ -2203,12 +2205,13 @@ def _talker_seed_self(
         _mask_set_value=torch.ones((), dtype=torch.bool, device=device),
         _decode_prep_rids=None,
         _decode_prep_step_ids=[],
-        _decode_prep_rep_rows=None,
     )
     fake._reuse_decode_buffers = Qwen3OmniTalker._reuse_decode_buffers.__get__(fake)
     fake.invalidate_decode_buffers = Qwen3OmniTalker.invalidate_decode_buffers.__get__(
         fake
     )
+    fake.record_sampled_tokens = Qwen3OmniTalker.record_sampled_tokens.__get__(fake)
+    fake.prepare_prefill_masks = Qwen3OmniTalker.prepare_prefill_masks.__get__(fake)
     return fake
 
 
@@ -2264,6 +2267,7 @@ def test_talker_prepare_decode_buffers_unseeded_seed_is_rank_shared() -> None:
 def _talker_prep_req(
     rid: str,
     *,
+    pool_idx: int = 1,
     penalty: float = 1.0,
     temperature: float = 0.8,
     top_p: float = 0.9,
@@ -2286,6 +2290,7 @@ def _talker_prep_req(
         output_ids=list(output_ids or []),
         _codec_suppress_tokens=None,
         rid=rid,
+        req_pool_idx=pool_idx,
         decode_batch_idx=0,
     )
     return SimpleNamespace(
@@ -2301,12 +2306,195 @@ def _advance_decode_step(requests: list[SimpleNamespace], tokens: list[int]) -> 
         sched_req.data.req.output_ids.append(token)
 
 
+def _pool_rows(requests: list[SimpleNamespace], pad: int = 0) -> torch.Tensor:
+    """The req_pool_indices a forward batch would carry, CUDA-graph padding last."""
+    rows = [sched_req.data.req.req_pool_idx for sched_req in requests] + [0] * pad
+    return torch.tensor(rows, dtype=torch.long)
+
+
+def _talker_prefill(
+    fake: SimpleNamespace, requests: list[SimpleNamespace], sampled: list[int]
+) -> None:
+    """Admit a prefilling batch: clear/seed its rows, then record its own token."""
+    Qwen3OmniTalker.prepare_prefill_masks(fake, requests)
+    Qwen3OmniTalker.record_sampled_tokens(
+        fake, _pool_rows(requests), torch.tensor(sampled, dtype=torch.long)
+    )
+    for sched_req, token in zip(requests, sampled):
+        sched_req.data.req.output_ids.append(token)
+
+
+def _talker_decode(
+    fake: SimpleNamespace,
+    requests: list[SimpleNamespace],
+    sampled: list[int],
+    *,
+    pad: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """One decode step. Returns the mask rows the forward would have applied."""
+    Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
+    pool_rows = _pool_rows(requests, pad=pad)
+    applied = (
+        fake._repetition_mask[pool_rows].clone(),
+        fake._suppress_mask[pool_rows].clone(),
+    )
+    fake._sampled_token_ids[: len(sampled)] = torch.tensor(sampled, dtype=torch.long)
+    Qwen3OmniTalker.record_sampled_tokens(
+        fake,
+        pool_rows,
+        torch.tensor(sampled + [0] * pad, dtype=torch.long),
+    )
+    _advance_decode_step(requests, sampled)
+    return applied
+
+
+def _apply_masks(
+    logits: torch.Tensor,
+    rep: torch.Tensor,
+    sup: torch.Tensor,
+    penalties: torch.Tensor,
+) -> torch.Tensor:
+    """The logit transform _sample_decode_tokens performs, in isolation."""
+    penalized = torch.where(logits > 0, logits / penalties, logits * penalties)
+    return torch.where(rep, penalized, logits).masked_fill(sup, float("-inf"))
+
+
+def _reference_masks(
+    requests: list[SimpleNamespace], vocab: int, pad: int = 0
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Batch-row masks the old rebuild would have built from host state.
+
+    Reference semantics, without the stale-history hole: every token the request
+    has generated so far is penalized, and its suppress set is masked out.
+    """
+    rep = torch.zeros(len(requests) + pad, vocab, dtype=torch.bool)
+    sup = torch.zeros(len(requests) + pad, vocab, dtype=torch.bool)
+    for row_idx, sched_req in enumerate(requests):
+        data = sched_req.data
+        req = data.req
+        if float(req.sampling_params.repetition_penalty) != 1.0:
+            for token in req.output_ids:
+                if 0 <= int(token) < vocab:
+                    rep[row_idx, int(token)] = True
+        for token in data.suppress_tokens or req._codec_suppress_tokens or ():
+            if 0 <= int(token) < vocab:
+                sup[row_idx, int(token)] = True
+    return rep, sup
+
+
+def _assert_decode_step_matches_reference(
+    fake: SimpleNamespace,
+    requests: list[SimpleNamespace],
+    sampled: list[int],
+    vocab: int,
+    pad: int = 0,
+) -> None:
+    """Run one decode step and check it penalizes what the old rebuild did.
+
+    Compared at the logits the forward produces rather than at raw mask bits: a
+    row whose repetition penalty is 1.0 leaves the logits untouched however its
+    mask reads, so the recorded-anyway bits on those rows are not a difference.
+    """
+    rows = len(requests) + pad
+    rep_ref, sup_ref = _reference_masks(requests, vocab, pad=pad)
+    penalties = torch.ones(rows, 1)
+    for row_idx, sched_req in enumerate(requests):
+        penalties[row_idx, 0] = float(
+            sched_req.data.req.sampling_params.repetition_penalty
+        )
+    applied = _talker_decode(fake, requests, sampled, pad=pad)
+    logits = torch.linspace(-2.0, 2.0, rows * vocab).reshape(rows, vocab)
+    torch.testing.assert_close(
+        _apply_masks(logits, applied[0], applied[1], penalties),
+        _apply_masks(logits, rep_ref, sup_ref, penalties),
+    )
+
+
+def test_talker_pool_keyed_masks_match_the_old_rebuild_semantics() -> None:
+    # A scripted run over every lifecycle event the batch-row rebuild used to
+    # cover: admission, steady decode, a composition change, a finish, pool-index
+    # reuse by a new request, and a retract replay.
+    vocab = 8
+    fake = _talker_seed_self(vocab=vocab)
+
+    a = _talker_prep_req("a", pool_idx=1, penalty=1.5, suppress=[7])
+    b = _talker_prep_req("b", pool_idx=2, penalty=1.0)
+    _talker_prefill(fake, [a, b], [2, 4])
+
+    _assert_decode_step_matches_reference(fake, [a, b], [3, 5], vocab)
+    _assert_decode_step_matches_reference(fake, [a, b], [1, 6], vocab)
+
+    # b finishes; a keeps decoding alone. The composition change must not disturb
+    # a's accumulated history.
+    _assert_decode_step_matches_reference(fake, [a], [6], vocab)
+
+    # A new request takes b's freed pool index and must not inherit its bits.
+    c = _talker_prep_req("c", pool_idx=2, penalty=1.5, suppress=[0])
+    _talker_prefill(fake, [c], [4])
+    _assert_decode_step_matches_reference(fake, [a, c], [5, 3], vocab)
+
+    # a retracts and replays: the pool hands it a different index, and its history
+    # has to be seeded back into the cleared row.
+    a.data.req.req_pool_idx = 3
+    a.data.req.decode_batch_idx = 0
+    fake.invalidate_decode_buffers()
+    Qwen3OmniTalker.prepare_prefill_masks(fake, [a])
+    _assert_decode_step_matches_reference(fake, [a, c], [2, 1], vocab)
+
+
+def test_talker_prefill_masks_clear_a_reused_pool_row() -> None:
+    # The admission clear is the only reset in the design, so a pool index handed
+    # to a new request must come back empty.
+    fake = _talker_seed_self()
+    old = _talker_prep_req("old", pool_idx=2, penalty=1.5, suppress=[3])
+    _talker_prefill(fake, [old], [5])
+    _talker_decode(fake, [old], [6])
+    assert fake._repetition_mask[2].any() and fake._suppress_mask[2].any()
+
+    new = _talker_prep_req("new", pool_idx=2, penalty=1.5)
+    Qwen3OmniTalker.prepare_prefill_masks(fake, [new])
+    assert not fake._repetition_mask[2].any()
+    assert not fake._suppress_mask[2].any()
+
+
+def test_talker_prefill_masks_seed_a_retract_replay() -> None:
+    fake = _talker_seed_self()
+    req = _talker_prep_req(
+        "a", pool_idx=1, penalty=1.5, output_ids=[2, 5], suppress=[3]
+    )
+    Qwen3OmniTalker.prepare_prefill_masks(fake, [req])
+    assert bool(fake._repetition_mask[1, 2]) and bool(fake._repetition_mask[1, 5])
+    assert bool(fake._suppress_mask[1, 3])
+
+
+def test_talker_pad_row_stays_empty() -> None:
+    # CUDA-graph padding rows carry req_pool_idx 0 and a garbage token, so row 0
+    # must survive a run unpenalized or every padded batch mis-samples.
+    vocab = 8
+    fake = _talker_seed_self(vocab=vocab)
+    req = _talker_prep_req("a", pool_idx=1, penalty=1.5, suppress=[7])
+    _talker_prefill(fake, [req], [2])
+    for token in (3, 4, 5):
+        applied = _talker_decode(fake, [req], [token], pad=2)
+
+    assert not fake._repetition_mask[0].any()
+    assert not fake._suppress_mask[0].any()
+    assert not applied[0][1:].any() and not applied[1][1:].any()
+
+    logits = torch.randn(3, vocab)
+    penalties = torch.full((3, 1), 1.5)
+    torch.testing.assert_close(
+        _apply_masks(logits, applied[0], applied[1], penalties)[1:], logits[1:]
+    )
+
+
 def test_talker_prepare_decode_buffers_steady_state_reuse() -> None:
     fake = _talker_seed_self()
     requests = [
-        _talker_prep_req("a", penalty=1.5, output_ids=[2], suppress=[3]),
-        _talker_prep_req("b", penalty=1.0, output_ids=[4]),
+        _talker_prep_req("a", pool_idx=1, penalty=1.5, suppress=[3]),
+        _talker_prep_req("b", pool_idx=2, penalty=1.0),
     ]
+    _talker_prefill(fake, requests, [2, 4])
     Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
 
     assert float(fake._repetition_penalties[0, 0]) == pytest.approx(1.5)
@@ -2314,42 +2502,29 @@ def test_talker_prepare_decode_buffers_steady_state_reuse() -> None:
     assert float(fake._sampling_top_ps[0]) == pytest.approx(0.9)
     assert int(fake._sampling_top_ks[0]) == 20
     assert float(fake._sampling_min_ps[0]) == pytest.approx(0.0)
-    assert bool(fake._repetition_mask[0, 2]) and bool(fake._suppress_mask[0, 3])
-    assert not fake._repetition_mask[1].any()
+    assert bool(fake._repetition_mask[1, 2]) and bool(fake._suppress_mask[1, 3])
+    assert not fake._suppress_mask[2].any()
 
     fake._sampling_temperatures[0, 0] = 123.0
-
-    fake._sampled_token_ids[0] = 5
-    fake._sampled_token_ids[1] = 6
     _advance_decode_step(requests, [5, 6])
     Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
 
     assert float(fake._sampling_temperatures[0, 0]) == 123.0
-    assert bool(fake._repetition_mask[0, 2]) and bool(fake._repetition_mask[0, 5])
-    assert not fake._repetition_mask[1].any()
-    assert bool(fake._suppress_mask[0, 3])
-
-    fresh = _talker_seed_self()
-    Qwen3OmniTalker.prepare_decode_buffers(fresh, requests)
-    assert torch.equal(fake._repetition_mask, fresh._repetition_mask)
-    assert torch.equal(fake._suppress_mask, fresh._suppress_mask)
 
 
 def test_talker_prepare_decode_buffers_reuse_survives_async_lag() -> None:
     # Under async decode the token reaches req.output_ids a step after the batch is
-    # built, so an output-length key would fall off the fast path and rebuild the
-    # repetition mask from that same one-token-stale history.
+    # built, so an output-length key would fall off the fast path and restage the
+    # sampling params every step.
     fake = _talker_seed_self()
     requests = [_talker_prep_req("a", penalty=1.5, output_ids=[2])]
     Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
     fake._sampling_temperatures[0, 0] = 123.0
 
-    fake._sampled_token_ids[0] = 5
     requests[0].data.req.decode_batch_idx += 1
     Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
 
     assert float(fake._sampling_temperatures[0, 0]) == 123.0
-    assert bool(fake._repetition_mask[0, 2]) and bool(fake._repetition_mask[0, 5])
 
     # The lagged append lands later and must not look like a second step.
     requests[0].data.req.output_ids.append(5)
@@ -2433,21 +2608,17 @@ def test_talker_prepare_decode_buffers_cuda_matches_fresh_rebuild() -> None:
         "_sampling_seeds",
         "_sampling_staging_cpu",
         "_sampling_staging_gpu",
-        "_repetition_mask",
-        "_suppress_mask",
     ):
         torch.testing.assert_close(getattr(fake, name), getattr(fresh, name))
 
 
-def test_talker_decode_reuse_marks_the_mask_without_a_host_scalar(monkeypatch) -> None:
-    # The fast path is the first CUDA work of a decode step. Writing the mask as
+def test_talker_records_the_sampled_token_without_a_host_scalar(monkeypatch) -> None:
+    # The record runs inside the captured decode forward. Writing the mask as
     # `mask[rows, toks] = True` hands torch a Python bool it materializes on the
     # host and copies in, which blocks once the async loop lets the host run ahead.
     fake = _talker_seed_self()
-    requests = [_talker_prep_req("a", penalty=1.5, output_ids=[2])]
-    Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
-    fake._sampled_token_ids[0] = 5
-    requests[0].data.req.decode_batch_idx += 1
+    requests = [_talker_prep_req("a", pool_idx=1, penalty=1.5)]
+    _talker_prefill(fake, requests, [2])
 
     setitem_values: list = []
     real_setitem = torch.Tensor.__setitem__
@@ -2458,11 +2629,52 @@ def test_talker_decode_reuse_marks_the_mask_without_a_host_scalar(monkeypatch) -
         or real_setitem(self, key, value),
     )
 
-    assert fake._reuse_decode_buffers(requests) is True
+    Qwen3OmniTalker.record_sampled_tokens(
+        fake, _pool_rows(requests), torch.tensor([5], dtype=torch.long)
+    )
 
     assert setitem_values == []
-    # Same bits the scalar form wrote: the seeded token and the new one.
-    assert bool(fake._repetition_mask[0, 2]) and bool(fake._repetition_mask[0, 5])
+    # Same bits the scalar form wrote: the prefill token and the new one.
+    assert bool(fake._repetition_mask[1, 2]) and bool(fake._repetition_mask[1, 5])
+
+
+def test_talker_composition_change_does_no_mask_work(monkeypatch) -> None:
+    # A batch composition change is the rebuild path. It used to rebuild both
+    # masks from host lists — three pageable H2D copies plus two scalar-True
+    # writes, each a blocking synchronize on the decode launch path.
+    fake = _talker_seed_self()
+    a = _talker_prep_req("a", pool_idx=1, penalty=1.5, suppress=[3])
+    b = _talker_prep_req("b", pool_idx=2, penalty=1.5, suppress=[3])
+    _talker_prefill(fake, [a, b], [2, 4])
+    _talker_decode(fake, [a, b], [5, 6])
+
+    device_kwargs: list = []
+    real_tensor = torch.tensor
+
+    def _spy_tensor(*args, **kwargs):
+        if "device" in kwargs:
+            device_kwargs.append(kwargs["device"])
+        return real_tensor(*args, **kwargs)
+
+    mask_writes: list = []
+    real_setitem = torch.Tensor.__setitem__
+
+    def _spy_setitem(self, key, value):
+        if self is fake._repetition_mask or self is fake._suppress_mask:
+            mask_writes.append(key)
+        return real_setitem(self, key, value)
+
+    monkeypatch.setattr(torch, "tensor", _spy_tensor)
+    monkeypatch.setattr(torch.Tensor, "__setitem__", _spy_setitem)
+
+    # b drops out: the rebuild path runs.
+    Qwen3OmniTalker.prepare_decode_buffers(fake, [a])
+
+    assert device_kwargs == []
+    assert mask_writes == []
+    # a keeps every token it generated, including the one from before the change.
+    assert bool(fake._repetition_mask[1, 2]) and bool(fake._repetition_mask[1, 5])
+    assert bool(fake._suppress_mask[1, 3])
 
 
 def test_talker_prepare_decode_buffers_rebuild_triggers() -> None:
@@ -2506,6 +2718,7 @@ def test_talker_prefill_forward_invalidates_next_decode_reuse() -> None:
     fake._sampled_token_ids[0] = 3
     _advance_decode_step(requests, [3])
 
+    fake.record_sampled_tokens = Qwen3OmniTalker.record_sampled_tokens.__get__(fake)
     fake._uses_mrope = False
     fake.model = lambda **_: torch.zeros(1, 2)
     fake._manual_extend_logits = lambda hidden_states, forward_batch: SimpleNamespace(
@@ -2526,6 +2739,7 @@ def test_talker_prefill_forward_invalidates_next_decode_reuse() -> None:
         forward_mode=FakeForwardMode(is_extend=False),
         mrope_positions=None,
         positions=positions,
+        req_pool_indices=torch.tensor([1], dtype=torch.long),
     )
 
     Qwen3OmniTalker.forward(

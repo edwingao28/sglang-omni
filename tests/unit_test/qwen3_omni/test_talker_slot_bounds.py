@@ -23,6 +23,7 @@ from sglang_omni.models.qwen3_omni.talker_model_runner import QwenTalkerModelRun
 MAX_RUNNING_REQUESTS = 4
 TOP_POOL_IDX = MAX_RUNNING_REQUESTS
 HIDDEN = 3
+VOCAB = 8
 
 
 def _model(bs: int) -> SimpleNamespace:
@@ -198,11 +199,17 @@ def _runner_through_init(
     slot_rows: int,
     pool_size: int,
     *,
+    mask_rows: int | None = None,
     feedback_enabled: bool = True,
     expose_alloc_size: bool = True,
     expose_pool: bool = True,
 ) -> QwenTalkerModelRunner:
-    model = SimpleNamespace(_feedback_slots=torch.zeros(slot_rows, HIDDEN))
+    mask_rows = slot_rows if mask_rows is None else mask_rows
+    model = SimpleNamespace(
+        _feedback_slots=torch.zeros(slot_rows, HIDDEN),
+        _repetition_mask=torch.zeros(mask_rows, VOCAB, dtype=torch.bool),
+        _suppress_mask=torch.zeros(mask_rows, VOCAB, dtype=torch.bool),
+    )
     # Mirrors ReqToTokenPool: size rows allocatable from [1, size], _alloc_size total.
     pool = SimpleNamespace(size=pool_size)
     if expose_alloc_size:
@@ -225,6 +232,17 @@ def test_startup_guard_accepts_pool_sized_slots() -> None:
     )
 
     assert runner.model._feedback_slots.shape[0] == MAX_RUNNING_REQUESTS + 1
+
+
+def test_startup_guard_rejects_sampling_masks_missing_the_reserved_row() -> None:
+    # The repetition/suppress masks are addressed by the same index, so a table that
+    # only covers max_running_requests rows must be rejected the same way.
+    with pytest.raises(RuntimeError, match="_repetition_mask is too small"):
+        _runner_through_init(
+            feedback_slot_rows(MAX_RUNNING_REQUESTS),
+            MAX_RUNNING_REQUESTS,
+            mask_rows=MAX_RUNNING_REQUESTS,
+        )
 
 
 def test_startup_guard_rejects_slots_missing_the_reserved_row() -> None:

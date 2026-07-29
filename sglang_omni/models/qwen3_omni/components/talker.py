@@ -946,8 +946,11 @@ class Qwen3OmniTalker(nn.Module):
             dtype=torch.long,
             device=device,
         )
+        # Note (wenyao): the sampling masks are keyed by req_pool_idx, not by batch
+        # position, so a batch composition change carries no mask work at all.
+        mask_rows = feedback_slot_rows(max_batch_size)
         self._repetition_mask = torch.zeros(
-            max_batch_size,
+            mask_rows,
             config.text_config.vocab_size,
             dtype=torch.bool,
             device=device,
@@ -964,7 +967,7 @@ class Qwen3OmniTalker(nn.Module):
             device=device,
         )
         self._suppress_mask = torch.zeros(
-            max_batch_size,
+            mask_rows,
             config.text_config.vocab_size,
             dtype=torch.bool,
             device=device,
@@ -1018,7 +1021,6 @@ class Qwen3OmniTalker(nn.Module):
         )
         self._decode_prep_rids: list | None = None
         self._decode_prep_step_ids: list[int] = []
-        self._decode_prep_rep_rows: torch.Tensor | None = None
         self._output_codes = torch.zeros(
             max_batch_size,
             config.num_code_groups,
@@ -1061,9 +1063,102 @@ class Qwen3OmniTalker(nn.Module):
             next_code = next_code.unsqueeze(-1)
         return next_code
 
+    def record_sampled_tokens(
+        self, pool_rows: torch.Tensor, token_ids: torch.Tensor
+    ) -> None:
+        """Add a step's sampled tokens to their requests' repetition mask rows.
+
+        Runs right after the tokens are sampled, while they are still aligned with
+        the batch that produced them, which is what lets the mask survive a batch
+        composition change untouched.
+        """
+        # Note (wenyao): index_put_ with a device-resident value, not
+        # ``mask[rows, toks] = True`` — the scalar form hands torch a Python bool it
+        # has to materialize on the host and copy in, and that copy is host-blocking.
+        self._repetition_mask.index_put_((pool_rows, token_ids), self._mask_set_value)
+        # Note (wenyao): CUDA-graph padding rows carry req_pool_idx 0 and a garbage
+        # token, so the write above can dirty the row every padded gather reads.
+        self._repetition_mask[0].zero_()
+
+    def prepare_prefill_masks(self, requests: list) -> None:
+        """Clear and seed the pool-keyed sampling masks for a prefilling batch.
+
+        Note (wenyao): the only place a mask row is ever cleared. Every admission
+        reaches decode through a prefill — a fresh request and a retract replay
+        alike — so the row a finished request left dirty is cleared before the pool
+        hands it to the next one, and no finish-time hook is needed.
+        """
+        if not requests:
+            return
+
+        device = self._repetition_mask.device
+        rep_vocab = self._repetition_mask.shape[1]
+        sup_vocab = self._suppress_mask.shape[1]
+
+        pool_rows: list[int] = []
+        rep_rows: list[int] = []
+        rep_toks: list[int] = []
+        sup_rows: list[int] = []
+        sup_toks: list[int] = []
+        for sched_req in requests:
+            data = sched_req.data
+            req = data.req
+            pool_idx = getattr(req, "req_pool_idx", None)
+            if pool_idx is None:
+                raise RuntimeError(
+                    "Talker prefill reached the sampling masks before the request "
+                    f"pool assigned {req.rid} a req_pool_idx: the masks are keyed by "
+                    "that index and cannot be cleared for an unassigned row"
+                )
+            pool_idx = int(pool_idx)
+            pool_rows.append(pool_idx)
+
+            # Note (wenyao): a retract replay re-prefills a request that already
+            # generated tokens, so its history has to be seeded back into the row
+            # the clear above just emptied.
+            if float(req.sampling_params.repetition_penalty) != 1.0 and req.output_ids:
+                unique = {
+                    t
+                    for t in (int(tok) for tok in req.output_ids)
+                    if 0 <= t < rep_vocab
+                }
+                rep_rows.extend([pool_idx] * len(unique))
+                rep_toks.extend(unique)
+
+            suppress_tokens = data.suppress_tokens or req._codec_suppress_tokens
+            if suppress_tokens:
+                valid_sup = [
+                    t
+                    for t in (int(tok) for tok in suppress_tokens)
+                    if 0 <= t < sup_vocab
+                ]
+                sup_rows.extend([pool_idx] * len(valid_sup))
+                sup_toks.extend(valid_sup)
+
+        rows = torch.tensor(pool_rows, dtype=torch.long, device=device)
+        self._repetition_mask.index_fill_(0, rows, False)
+        self._suppress_mask.index_fill_(0, rows, False)
+        if rep_rows:
+            rep_pairs = torch.tensor(
+                rep_rows + rep_toks, dtype=torch.long, device=device
+            )
+            self._repetition_mask.index_put_(
+                (rep_pairs[: len(rep_rows)], rep_pairs[len(rep_rows) :]),
+                self._mask_set_value,
+            )
+        if sup_rows:
+            sup_pairs = torch.tensor(
+                sup_rows + sup_toks, dtype=torch.long, device=device
+            )
+            self._suppress_mask.index_put_(
+                (sup_pairs[: len(sup_rows)], sup_pairs[len(sup_rows) :]),
+                self._mask_set_value,
+            )
+
     def _reuse_decode_buffers(self, requests: list) -> bool:
-        # Note (akazaakane): sampling params/suppress mask are static per
-        # request, so only the repetition mask needs updating here.
+        # Note (wenyao): sampling params are static per request, and the masks are
+        # maintained per pool row by the forward, so this path only decides whether
+        # the staged sampling params can stand.
         prev_rids = self._decode_prep_rids
         if prev_rids is None or len(prev_rids) != len(requests):
             return False
@@ -1080,22 +1175,14 @@ class Qwen3OmniTalker(nn.Module):
             if int(req.decode_batch_idx) != prev_steps[row_idx] + 1:
                 return False
 
-        rep_rows = self._decode_prep_rep_rows
-        if rep_rows is not None:
-            # Note (wenyao): index_put_ with a device-resident value, not
-            # ``mask[rows, toks] = True`` — the scalar form hands torch a Python
-            # bool it has to materialize on the host and copy in, and that copy is
-            # the one host-blocking op left on the launch path.
-            self._repetition_mask.index_put_(
-                (rep_rows, self._sampled_token_ids[rep_rows]), self._mask_set_value
-            )
         for row_idx in range(len(prev_steps)):
             prev_steps[row_idx] += 1
         return True
 
     def invalidate_decode_buffers(self) -> None:
-        # Note (akazaakane): a prefill's sampled token bypasses
-        # _sampled_token_ids, so the fast path must not run right after one.
+        # Note (wenyao): a prefill can change which request owns which row, so the
+        # next decode must restage sampling params rather than trust the cached
+        # rid/step list.
         self._decode_prep_rids = None
 
     def prepare_decode_buffers(self, requests: list) -> None:
@@ -1106,27 +1193,15 @@ class Qwen3OmniTalker(nn.Module):
         if self._reuse_decode_buffers(requests):
             return
 
-        device = self._repetition_mask.device
-        rep_vocab = self._repetition_mask.shape[1]
-        sup_vocab = self._suppress_mask.shape[1]
-
-        self._repetition_mask[:batch_size] = False
-        self._suppress_mask[:batch_size] = False
-
         rep_penalties: list[float] = []
         temperatures: list[float] = []
         top_ps: list[float] = []
         top_ks: list[int] = []
         min_ps: list[float] = []
         sampling_seeds: list[int] = []
-        rep_rows: list[int] = []
-        rep_toks: list[int] = []
-        sup_rows: list[int] = []
-        sup_toks: list[int] = []
 
-        for row_idx, sched_req in enumerate(requests):
-            data = sched_req.data
-            req = data.req
+        for sched_req in requests:
+            req = sched_req.data.req
             sp = req.sampling_params
 
             penalty = float(sp.repetition_penalty)
@@ -1144,27 +1219,6 @@ class Qwen3OmniTalker(nn.Module):
                 seed = resolve_row_seed(seed)
                 sp.sampling_seed = seed
             sampling_seeds.append(seed)
-
-            if penalty != 1.0 and req.output_ids:
-                unique = {
-                    t
-                    for t in (int(tok) for tok in req.output_ids)
-                    if 0 <= t < rep_vocab
-                }
-                if unique:
-                    rep_rows.extend([row_idx] * len(unique))
-                    rep_toks.extend(unique)
-
-            suppress_tokens = data.suppress_tokens or req._codec_suppress_tokens
-            if suppress_tokens:
-                valid_sup = [
-                    t
-                    for t in (int(tok) for tok in suppress_tokens)
-                    if 0 <= t < sup_vocab
-                ]
-                if valid_sup:
-                    sup_rows.extend([row_idx] * len(valid_sup))
-                    sup_toks.extend(valid_sup)
 
         if self._sampling_staging_event is not None:
             # Note (akazaakane): guards the prior async copy still reading
@@ -1198,34 +1252,10 @@ class Qwen3OmniTalker(nn.Module):
         self._sampling_top_ks[:batch_size].copy_(staging_gpu[4, :batch_size])
         self._sampling_seeds[:batch_size].copy_(staging_gpu[5, :batch_size])
 
-        if rep_rows:
-            rep_pairs = torch.tensor(
-                rep_rows + rep_toks, dtype=torch.long, device=device
-            )
-            self._repetition_mask[
-                rep_pairs[: len(rep_rows)], rep_pairs[len(rep_rows) :]
-            ] = True
-
-        if sup_rows:
-            sup_pairs = torch.tensor(
-                sup_rows + sup_toks, dtype=torch.long, device=device
-            )
-            self._suppress_mask[
-                sup_pairs[: len(sup_rows)], sup_pairs[len(sup_rows) :]
-            ] = True
-
         self._decode_prep_rids = [sched_req.data.req.rid for sched_req in requests]
         self._decode_prep_step_ids = [
             int(sched_req.data.req.decode_batch_idx) for sched_req in requests
         ]
-        rep_active_rows = [
-            row_idx for row_idx, penalty in enumerate(rep_penalties) if penalty != 1.0
-        ]
-        self._decode_prep_rep_rows = (
-            torch.tensor(rep_active_rows, dtype=torch.long, device=device)
-            if rep_active_rows
-            else None
-        )
 
     def prepare_input_embeds(
         self,
@@ -1328,6 +1358,9 @@ class Qwen3OmniTalker(nn.Module):
             )
             batch_size = sampled_token_ids.shape[0]
             self._sampled_token_ids[:batch_size].copy_(sampled_token_ids)
+            self.record_sampled_tokens(
+                forward_batch.req_pool_indices[:batch_size], sampled_token_ids
+            )
             self.code_predictor_forward(
                 sampled_token_ids.unsqueeze(1),
                 hidden_states.unsqueeze(1),
@@ -1372,14 +1405,15 @@ class Qwen3OmniTalker(nn.Module):
         batch_size = logits.shape[0]
         logits = logits.clone()
 
+        # Note (wenyao): CUDA-graph padding rows carry req_pool_idx 0, which the
+        # request pool never allocates, so they gather the permanently empty row 0.
+        pool_rows = forward_batch.req_pool_indices[:batch_size]
         penalties = self._repetition_penalties[:batch_size].to(dtype=logits.dtype)
         penalized_logits = torch.where(
             logits > 0, logits / penalties, logits * penalties
         )
-        logits = torch.where(
-            self._repetition_mask[:batch_size], penalized_logits, logits
-        )
-        logits = logits.masked_fill(self._suppress_mask[:batch_size], float("-inf"))
+        logits = torch.where(self._repetition_mask[pool_rows], penalized_logits, logits)
+        logits = logits.masked_fill(self._suppress_mask[pool_rows], float("-inf"))
 
         logits_output = LogitsProcessorOutput(
             next_token_logits=logits,
