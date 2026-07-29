@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from collections import deque
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -203,6 +204,7 @@ def _runner_through_init(
     feedback_enabled: bool = True,
     expose_alloc_size: bool = True,
     expose_pool: bool = True,
+    free_slots: Any = None,
 ) -> QwenTalkerModelRunner:
     mask_rows = slot_rows if mask_rows is None else mask_rows
     model = SimpleNamespace(
@@ -211,7 +213,12 @@ def _runner_through_init(
         _suppress_mask=torch.zeros(mask_rows, VOCAB, dtype=torch.bool),
     )
     # Mirrors ReqToTokenPool: size rows allocatable from [1, size], _alloc_size total.
-    pool = SimpleNamespace(size=pool_size)
+    pool = SimpleNamespace(
+        size=pool_size,
+        free_slots=(
+            list(range(1, pool_size + 1)) if free_slots is None else free_slots
+        ),
+    )
     if expose_alloc_size:
         pool._alloc_size = pool_size + 1
     inner_runner = SimpleNamespace(model=model)
@@ -275,6 +282,40 @@ def test_startup_guard_falls_back_to_size_when_alloc_size_absent() -> None:
         _runner_through_init(
             MAX_RUNNING_REQUESTS, MAX_RUNNING_REQUESTS, expose_alloc_size=False
         )
+
+
+def test_startup_guard_rejects_a_pool_that_can_allocate_row_zero() -> None:
+    # The decode fast path clears row 0 every step because CUDA-graph pad rows write
+    # into it. A pool that hands index 0 to a request would erase that request's
+    # repetition history silently, so it has to fail at startup.
+    with pytest.raises(RuntimeError, match="can allocate req_pool_idx 0"):
+        _runner_through_init(
+            feedback_slot_rows(MAX_RUNNING_REQUESTS),
+            MAX_RUNNING_REQUESTS,
+            free_slots=list(range(0, MAX_RUNNING_REQUESTS)),
+        )
+
+
+def test_startup_guard_rejects_a_pool_whose_reservation_is_unprovable() -> None:
+    # Neither a non-empty free_slots nor _alloc_size: nothing shows row 0 is
+    # reserved, and an unprovable reservation is a failure, not a skip.
+    with pytest.raises(RuntimeError, match="Cannot prove"):
+        _runner_through_init(
+            feedback_slot_rows(MAX_RUNNING_REQUESTS),
+            MAX_RUNNING_REQUESTS,
+            expose_alloc_size=False,
+            free_slots=[],
+        )
+
+
+def test_startup_guard_reads_tensor_free_slots() -> None:
+    runner = _runner_through_init(
+        feedback_slot_rows(MAX_RUNNING_REQUESTS),
+        MAX_RUNNING_REQUESTS,
+        free_slots=torch.arange(1, MAX_RUNNING_REQUESTS + 1),
+    )
+
+    assert runner.model._feedback_slots.shape[0] == MAX_RUNNING_REQUESTS + 1
 
 
 def test_startup_guard_skipped_when_feedback_disabled() -> None:

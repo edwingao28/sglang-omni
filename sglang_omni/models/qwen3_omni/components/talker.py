@@ -972,6 +972,11 @@ class Qwen3OmniTalker(nn.Module):
             dtype=torch.bool,
             device=device,
         )
+        # Note (wenyao): built on the first prefill rather than from the config here,
+        # so it stays a copy of whatever the request builder derived and cannot drift
+        # from it.
+        self._suppress_row_template: torch.Tensor | None = None
+        self._suppress_row_key: tuple[int, ...] | None = None
         self._sampling_temperatures = torch.ones(
             max_batch_size,
             1,
@@ -1071,6 +1076,10 @@ class Qwen3OmniTalker(nn.Module):
         Runs right after the tokens are sampled, while they are still aligned with
         the batch that produced them, which is what lets the mask survive a batch
         composition change untouched.
+
+        Ordering invariant: the forward's mask gather (``_sample_decode_tokens``)
+        must run before this write, or the step penalizes the very token it is
+        sampling.
         """
         # Note (wenyao): index_put_ with a device-resident value, not
         # ``mask[rows, toks] = True`` — the scalar form hands torch a Python bool it
@@ -1091,69 +1100,80 @@ class Qwen3OmniTalker(nn.Module):
         if not requests:
             return
 
-        device = self._repetition_mask.device
         rep_vocab = self._repetition_mask.shape[1]
-        sup_vocab = self._suppress_mask.shape[1]
-
-        pool_rows: list[int] = []
-        rep_rows: list[int] = []
-        rep_toks: list[int] = []
-        sup_rows: list[int] = []
-        sup_toks: list[int] = []
         for sched_req in requests:
             data = sched_req.data
             req = data.req
             pool_idx = getattr(req, "req_pool_idx", None)
             if pool_idx is None:
+                # Note (wenyao): batch-fatal on purpose. A request that reaches the
+                # talker without a pool slot is an upstream allocation invariant
+                # already broken, not bad per-request input, and the rows the rest
+                # of this batch would write are addressed by the same index.
                 raise RuntimeError(
                     "Talker prefill reached the sampling masks before the request "
                     f"pool assigned {req.rid} a req_pool_idx: the masks are keyed by "
                     "that index and cannot be cleared for an unassigned row"
                 )
             pool_idx = int(pool_idx)
-            pool_rows.append(pool_idx)
+            # Note (wenyao): a per-row zero_, not one index_fill_ over a row-index
+            # tensor built here — that tensor is a pageable H2D on the prefill
+            # launch path. Extend batches are small, so the extra kernels are cheap.
+            self._repetition_mask[pool_idx].zero_()
+            self._suppress_mask[pool_idx].zero_()
 
             # Note (wenyao): a retract replay re-prefills a request that already
             # generated tokens, so its history has to be seeded back into the row
-            # the clear above just emptied.
+            # the clear above just emptied. This is the one host build left on the
+            # path: it is per-request history, so no template can stand in for it,
+            # and only a retract replay reaches it.
             if float(req.sampling_params.repetition_penalty) != 1.0 and req.output_ids:
-                unique = {
-                    t
-                    for t in (int(tok) for tok in req.output_ids)
-                    if 0 <= t < rep_vocab
-                }
-                rep_rows.extend([pool_idx] * len(unique))
-                rep_toks.extend(unique)
+                unique = sorted(
+                    {
+                        t
+                        for t in (int(tok) for tok in req.output_ids)
+                        if 0 <= t < rep_vocab
+                    }
+                )
+                if unique:
+                    self._repetition_mask[pool_idx].index_fill_(
+                        0,
+                        torch.tensor(
+                            unique,
+                            dtype=torch.long,
+                            device=self._repetition_mask.device,
+                        ),
+                        True,
+                    )
 
-            suppress_tokens = data.suppress_tokens or req._codec_suppress_tokens
+            suppress_tokens = data.suppress_tokens or getattr(
+                req, "_codec_suppress_tokens", None
+            )
             if suppress_tokens:
-                valid_sup = [
-                    t
-                    for t in (int(tok) for tok in suppress_tokens)
-                    if 0 <= t < sup_vocab
-                ]
-                sup_rows.extend([pool_idx] * len(valid_sup))
-                sup_toks.extend(valid_sup)
+                self._seed_suppress_row(pool_idx, suppress_tokens)
 
-        rows = torch.tensor(pool_rows, dtype=torch.long, device=device)
-        self._repetition_mask.index_fill_(0, rows, False)
-        self._suppress_mask.index_fill_(0, rows, False)
-        if rep_rows:
-            rep_pairs = torch.tensor(
-                rep_rows + rep_toks, dtype=torch.long, device=device
-            )
-            self._repetition_mask.index_put_(
-                (rep_pairs[: len(rep_rows)], rep_pairs[len(rep_rows) :]),
-                self._mask_set_value,
-            )
-        if sup_rows:
-            sup_pairs = torch.tensor(
-                sup_rows + sup_toks, dtype=torch.long, device=device
-            )
-            self._suppress_mask.index_put_(
-                (sup_pairs[: len(sup_rows)], sup_pairs[len(sup_rows) :]),
-                self._mask_set_value,
-            )
+    def _seed_suppress_row(self, pool_idx: int, suppress_tokens) -> None:
+        """Write one request's suppress row with no host-to-device copy.
+
+        The suppress set is derived from the model config, so every request in a
+        deployment carries the same one. The first request builds a device-resident
+        row template — one bounded H2D for the process — and every later request
+        that matches it is a device-to-device copy. A request carrying a different
+        set rebuilds the template, which is the old per-prefill H2D and is the
+        fallback, not the steady state.
+        """
+        sup_vocab = self._suppress_mask.shape[1]
+        key = tuple(
+            t for t in (int(tok) for tok in suppress_tokens) if 0 <= t < sup_vocab
+        )
+        if not key:
+            return
+        if key != self._suppress_row_key:
+            template = torch.zeros(sup_vocab, dtype=torch.bool, device="cpu")
+            template[torch.tensor(key, dtype=torch.long, device="cpu")] = True
+            self._suppress_row_template = template.to(self._suppress_mask.device)
+            self._suppress_row_key = key
+        self._suppress_mask[pool_idx].copy_(self._suppress_row_template)
 
     def _reuse_decode_buffers(self, requests: list) -> bool:
         # Note (wenyao): sampling params are static per request, and the masks are
@@ -1408,6 +1428,9 @@ class Qwen3OmniTalker(nn.Module):
         # Note (wenyao): CUDA-graph padding rows carry req_pool_idx 0, which the
         # request pool never allocates, so they gather the permanently empty row 0.
         pool_rows = forward_batch.req_pool_indices[:batch_size]
+        # Note (wenyao): batch-row-keyed, unlike the pool-row-keyed gathers below.
+        # A pad row is stale here, but it gathers the permanently empty row 0, so
+        # torch.where takes the unpenalized branch and the stale value never lands.
         penalties = self._repetition_penalties[:batch_size].to(dtype=logits.dtype)
         penalized_logits = torch.where(
             logits > 0, logits / penalties, logits * penalties

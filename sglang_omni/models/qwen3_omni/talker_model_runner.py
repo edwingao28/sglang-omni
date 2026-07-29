@@ -66,6 +66,7 @@ class QwenTalkerModelRunner(ModelRunner):
                 " and ".join(missing),
             )
             return
+        self._check_pool_reserves_row_zero(pool)
         # Note (wenyao): prefer the pool's own row count so this stays an independent
         # check rather than a restatement of the model's sizing formula.
         required = getattr(pool, "_alloc_size", None)
@@ -85,6 +86,39 @@ class QwenTalkerModelRunner(ModelRunner):
                     f"{pool.size} allocates req_pool_idx in [1, {pool.size}], "
                     f"needing {required} rows"
                 )
+
+    @staticmethod
+    def _check_pool_reserves_row_zero(pool: Any) -> None:
+        """Prove the pool never hands req_pool_idx 0 to a request.
+
+        Row 0 is the CUDA-graph pad row, and the decode fast path clears it every
+        step (``record_sampled_tokens``) because padded rows write garbage tokens
+        into it. A pool that could allocate index 0 would therefore erase one live
+        request's repetition history on every step, silently. Unprovable is a
+        failure, not a skip: the damage is invisible at runtime.
+        """
+        free_slots = getattr(pool, "free_slots", None)
+        if free_slots is not None and len(free_slots) > 0:
+            if isinstance(free_slots, torch.Tensor):
+                lowest = int(free_slots.min())
+            else:
+                lowest = min(int(slot) for slot in free_slots)
+            if lowest >= 1:
+                return
+            raise RuntimeError(
+                f"{type(pool).__name__} can allocate req_pool_idx {lowest}: the "
+                "talker sampling masks reserve row 0 as the CUDA-graph pad row and "
+                "clear it every decode step, so a request holding that row would "
+                "lose its repetition history silently"
+            )
+        if getattr(pool, "_alloc_size", None) == pool.size + 1:
+            return
+        raise RuntimeError(
+            f"Cannot prove {type(pool).__name__} reserves req_pool_idx 0: it exposes "
+            "neither a non-empty free_slots nor _alloc_size == size + 1. The talker "
+            "sampling masks clear row 0 every decode step, so a pool that allocates "
+            "it would silently drop a request's repetition history"
+        )
 
     def execute(self, scheduler_output: Any):
         return super().execute(scheduler_output)
@@ -250,9 +284,14 @@ class QwenTalkerModelRunner(ModelRunner):
         it samples inside the forward against a device-side repetition mask that
         the same forward then advances with the token it just sampled, and it
         ignores frequency/presence penalties and ``min_new_tokens`` entirely. The
-        mask is keyed by ``req_pool_idx`` and never rebuilt from
-        ``req.output_ids`` once a request is decoding, so there is no host-side
-        history for the lag to make stale.
+        mask is keyed by ``req_pool_idx``, so there is no host-side history for
+        the lag to make stale.
+
+        One path does rebuild the mask from ``req.output_ids``: a retract replay
+        re-prefills through ``prepare_prefill_masks``. It reads a settled
+        ``output_ids`` only because ``QwenTalkerScheduler.update_running_batch``
+        resolves the in-flight step before letting upstream retract run, so the
+        lagged token is appended before the rebuild sees the list.
         """
         if not self._feedback_enabled:
             return super().lookahead_eligible(batch)
