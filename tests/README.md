@@ -65,6 +65,7 @@ tests/
     │   ├── test_streaming.py
     │   ├── test_talker.py
     │   ├── test_talker_prefill_embed_cache.py
+    │   ├── test_talker_prefill_embed_preload.py
     │   ├── test_talker_emit_snapshot.py
     │   ├── test_talker_feedback_write.py
     │   ├── test_talker_row_ownership.py
