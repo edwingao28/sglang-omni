@@ -38,7 +38,7 @@ _ASYNC_DECODE_FACTORIES = frozenset(
 _ASYNC_DECODE_SUPPORTED_MODELS = (
     "Higgs TTS, MOSS-TTS-Local, MOSS-Transcribe-Diarize, and Fun-ASR"
 )
-_QWEN_PARTIAL_START_TALKER_FACTORY = (
+_QWEN_TALKER_AR_FACTORY = (
     "sglang_omni.models.qwen3_omni.stages.create_talker_ar_executor_from_config"
 )
 
@@ -773,6 +773,32 @@ def apply_cuda_graph_cli_overrides(
     return pipeline_config
 
 
+def _resolve_talker_ar_stages(
+    pipeline_config: PipelineConfig,
+    *,
+    flag_name: str,
+    reason: str,
+) -> list[StageConfig]:
+    """Resolve the talker stage(s) for a talker_ar-only CLI flag.
+
+    Shared by --talker-partial-start and --talker-async-decode: both only
+    support the talker_ar factory.
+    """
+    stage_name = _resolve_talker_stage(pipeline_config, flag_name=flag_name)
+    matching_stages = _find_matching_stages(
+        pipeline_config,
+        stage_name=stage_name,
+        reason=reason,
+    )
+    for stage in matching_stages:
+        if stage.factory != _QWEN_TALKER_AR_FACTORY:
+            raise typer.BadParameter(
+                f"{flag_name} currently supports only Qwen3-Omni talker; "
+                f"stage {stage.name!r} uses factory {stage.factory!r}"
+            )
+    return matching_stages
+
+
 def apply_partial_start_cli_overrides(
     pipeline_config: PipelineConfig,
     *,
@@ -781,21 +807,11 @@ def apply_partial_start_cli_overrides(
     mode = _normalize_stage_toggle_mode("talker_partial_start", talker_partial_start)
     if mode == "default":
         return pipeline_config
-    stage_name = _resolve_talker_stage(
+    matching_stages = _resolve_talker_ar_stages(
         pipeline_config,
         flag_name="--talker-partial-start",
-    )
-    matching_stages = _find_matching_stages(
-        pipeline_config,
-        stage_name=stage_name,
         reason=f"talker partial-start mode to {mode!r}",
     )
-    for stage in matching_stages:
-        if stage.factory != _QWEN_PARTIAL_START_TALKER_FACTORY:
-            raise typer.BadParameter(
-                "--talker-partial-start currently supports only Qwen3-Omni "
-                f"talker; stage {stage.name!r} uses factory {stage.factory!r}"
-            )
     _apply_factory_args_updates(
         pipeline_config,
         matching_stages,
@@ -811,21 +827,11 @@ def apply_talker_async_decode_cli_overrides(
 ) -> PipelineConfig:
     if talker_async_decode is None:
         return pipeline_config
-    stage_name = _resolve_talker_stage(
+    matching_stages = _resolve_talker_ar_stages(
         pipeline_config,
         flag_name="--talker-async-decode",
-    )
-    matching_stages = _find_matching_stages(
-        pipeline_config,
-        stage_name=stage_name,
         reason=f"talker async-decode mode to {talker_async_decode!r}",
     )
-    for stage in matching_stages:
-        if stage.factory != _QWEN_PARTIAL_START_TALKER_FACTORY:
-            raise typer.BadParameter(
-                "--talker-async-decode currently supports only Qwen3-Omni "
-                f"talker; stage {stage.name!r} uses factory {stage.factory!r}"
-            )
     _apply_factory_args_updates(
         pipeline_config,
         matching_stages,
@@ -1165,7 +1171,10 @@ def serve(
             "--talker_async_decode/--no_talker_async_decode",
             help=(
                 "Async decode (one-step lookahead) for the Qwen3-Omni talker "
-                "stage. Omit this flag to use the pipeline config default (off)."
+                "stage. Omit this flag to use the pipeline config default (off). "
+                "Only takes effect once the decode batch reaches 2 requests; "
+                "the talker has no --async-lookahead-min-batch-size override, so "
+                "smaller batches always run synchronously regardless of this flag."
             ),
         ),
     ] = None,
