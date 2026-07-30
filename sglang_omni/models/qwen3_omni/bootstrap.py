@@ -118,6 +118,7 @@ def create_talker_scheduler(
     total_gpu_memory_fraction: float | None = None,
     enable_partial_start: bool = False,
     partial_start_min_chunks: int = 5,
+    enable_async_decode: bool = False,
 ):
     """Create the Qwen talker scheduler."""
     del speech_enabled
@@ -130,7 +131,6 @@ def create_talker_scheduler(
     from sglang_omni.models.qwen3_omni.talker_scheduler import (
         QwenTalkerScheduler,
         configure_talker_server_args,
-        talker_overlap_requested,
     )
     from sglang_omni.scheduling.bootstrap import create_sglang_infrastructure
     from sglang_omni.scheduling.sglang_backend import SGLangOutputProcessor
@@ -138,8 +138,9 @@ def create_talker_scheduler(
     want_cuda_graph = configure_talker_server_args(
         server_args,
         feedback_enabled=feedback_enabled,
+        enable_async_decode=enable_async_decode,
     )
-    enable_async_decode = feedback_enabled and talker_overlap_requested()
+    enable_async_decode = feedback_enabled and enable_async_decode
 
     (
         model_worker,

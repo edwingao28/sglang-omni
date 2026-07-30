@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Talker async-decode wiring and the retract drain that protects it.
 
-``SGLANG_OMNI_TALKER_OVERLAP`` has to reach two places to do anything: the
-scheduler's ``enable_async_decode`` (which selects the lookahead event loop) and
-the model runner's ``_async_enabled``, which the runner attaches too late for the
+``enable_async_decode`` has to reach two places to do anything: the scheduler's
+``enable_async_decode`` (which selects the lookahead event loop) and the model
+runner's ``_async_enabled``, which the runner attaches too late for the
 scheduler constructor to set. With the loop live, a retract must not find a
 launched-but-unresolved step: ``retract_decode`` frees the KV and flags the request
 before handing it back, after which the resolve drops that row and its token.
@@ -11,6 +11,7 @@ before handing it back, after which the resolve drops that row and its token.
 
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -20,8 +21,6 @@ from sglang.srt.managers.scheduler import Scheduler as _Upstream
 
 from sglang_omni.models.qwen3_omni import bootstrap as qwen_bootstrap
 from sglang_omni.models.qwen3_omni.talker_scheduler import QwenTalkerScheduler
-
-_ENV = "SGLANG_OMNI_TALKER_OVERLAP"
 
 
 class _Config:
@@ -89,35 +88,76 @@ def _server_args() -> SimpleNamespace:
     )
 
 
-@pytest.mark.parametrize(
-    ("env_value", "expected"), [(None, False), ("0", False), ("1", True)]
-)
-def test_env_flag_reaches_scheduler_and_runner(
-    monkeypatch: pytest.MonkeyPatch, env_value: str | None, expected: bool
-) -> None:
-    if env_value is None:
-        monkeypatch.delenv(_ENV, raising=False)
-    else:
-        monkeypatch.setenv(_ENV, env_value)
+def test_enable_async_decode_defaults_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
     seen = _install_stubs(monkeypatch)
 
     scheduler = qwen_bootstrap.create_talker_scheduler(_server_args())
 
-    assert seen["scheduler_kwargs"]["enable_async_decode"] is expected
-    assert scheduler._model_runner._async_enabled is expected
+    assert seen["scheduler_kwargs"]["enable_async_decode"] is False
+    assert scheduler._model_runner._async_enabled is False
+
+
+@pytest.mark.parametrize("enable_async_decode", [False, True])
+def test_enable_async_decode_reaches_scheduler_and_runner(
+    monkeypatch: pytest.MonkeyPatch, enable_async_decode: bool
+) -> None:
+    seen = _install_stubs(monkeypatch)
+
+    scheduler = qwen_bootstrap.create_talker_scheduler(
+        _server_args(), enable_async_decode=enable_async_decode
+    )
+
+    assert seen["scheduler_kwargs"]["enable_async_decode"] is enable_async_decode
+    assert scheduler._model_runner._async_enabled is enable_async_decode
 
 
 def test_feedback_disabled_keeps_async_off(monkeypatch: pytest.MonkeyPatch) -> None:
     # Without the feedback path there is no launch/resolve split to run.
-    monkeypatch.setenv(_ENV, "1")
     seen = _install_stubs(monkeypatch)
 
     scheduler = qwen_bootstrap.create_talker_scheduler(
-        _server_args(), feedback_enabled=False
+        _server_args(), feedback_enabled=False, enable_async_decode=True
     )
 
     assert seen["scheduler_kwargs"]["enable_async_decode"] is False
     assert scheduler._model_runner._async_enabled is False
+
+
+def _new_scheduler_for_start(*, enable_async_decode: bool) -> QwenTalkerScheduler:
+    # Note (wenyao): __new__ + minimal attrs, not a real __init__, which needs a
+    # full server_args/model_config/tp_worker fixture this test doesn't need.
+    scheduler = object.__new__(QwenTalkerScheduler)
+    scheduler.enable_async_decode = enable_async_decode
+    scheduler.enable_overlap = False
+    scheduler._shutdown_lock = threading.Lock()
+    scheduler._shutdown_callback = None
+    scheduler._request_build_executor = None
+    return scheduler
+
+
+@pytest.mark.parametrize(
+    ("enable_async_decode", "expected_loop"),
+    [(True, "_event_loop_async_decode"), (False, "_event_loop_normal")],
+)
+def test_start_selects_loop_from_enable_async_decode(
+    monkeypatch: pytest.MonkeyPatch, enable_async_decode: bool, expected_loop: str
+) -> None:
+    scheduler = _new_scheduler_for_start(enable_async_decode=enable_async_decode)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        QwenTalkerScheduler,
+        "_event_loop_async_decode",
+        lambda self: calls.append("_event_loop_async_decode"),
+    )
+    monkeypatch.setattr(
+        QwenTalkerScheduler,
+        "_event_loop_normal",
+        lambda self: calls.append("_event_loop_normal"),
+    )
+
+    scheduler.start()
+
+    assert calls == [expected_loop]
 
 
 def _drain_scheduler(monkeypatch: pytest.MonkeyPatch, *, pending: bool) -> Any:

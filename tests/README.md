@@ -421,7 +421,7 @@ that happened to contain an older version of the test.
   - talker feedback buffer writes: the steady-state gather and scatter index off
     the forward batch's own `req_pool_indices` and build no index tensor at all;
     only rows the readiness gate cannot see fall back to host-built indices
-  - talker overlap gate: `SGLANG_OMNI_TALKER_OVERLAP=1` keeps the caller's
+  - talker overlap gate: `enable_async_decode=True` keeps the caller's
     `disable_overlap_schedule` while the default forces it off, with
     CUDA-graph handling unchanged
   - talker async decode: the launch half publishes the in-forward sampled ids and
@@ -435,9 +435,14 @@ that happened to contain an older version of the test.
     the way the sync path already does in `_make_batch_result`, so upstream's
     `.tolist()` never enqueues a device copy behind the forward the launch just
     submitted; runners that stage nothing keep the device tensor
-  - talker async wiring: `SGLANG_OMNI_TALKER_OVERLAP=1` reaches both the scheduler's
-    `enable_async_decode` and the late-attached runner's `_async_enabled`, and an
-    imminent retract drains the in-flight step before upstream frees its KV
+  - talker async wiring: the `enable_async_decode` config arg reaches both the
+    scheduler's `enable_async_decode` and the late-attached runner's
+    `_async_enabled`, and an imminent retract drains the in-flight step before
+    upstream frees its KV; `start()` selects the async-decode event loop from
+    that same attribute
+  - talker async decode CLI: `--talker-async-decode/--no-talker-async-decode`
+    overrides the talker stage's `enable_async_decode` factory arg, which
+    defaults off
   - Code2Wav streaming/cleanup behavior plus bounded batching deadlines,
     fire rules, sub-batch decomposition, output equivalence, and lifecycle
   - Code2Wav CUDA Graph lifecycle, exact-shape replay, atomic rollback, memory

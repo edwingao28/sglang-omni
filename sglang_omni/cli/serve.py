@@ -804,6 +804,36 @@ def apply_partial_start_cli_overrides(
     return pipeline_config
 
 
+def apply_talker_async_decode_cli_overrides(
+    pipeline_config: PipelineConfig,
+    *,
+    talker_async_decode: bool | None,
+) -> PipelineConfig:
+    if talker_async_decode is None:
+        return pipeline_config
+    stage_name = _resolve_talker_stage(
+        pipeline_config,
+        flag_name="--talker-async-decode",
+    )
+    matching_stages = _find_matching_stages(
+        pipeline_config,
+        stage_name=stage_name,
+        reason=f"talker async-decode mode to {talker_async_decode!r}",
+    )
+    for stage in matching_stages:
+        if stage.factory != _QWEN_PARTIAL_START_TALKER_FACTORY:
+            raise typer.BadParameter(
+                "--talker-async-decode currently supports only Qwen3-Omni "
+                f"talker; stage {stage.name!r} uses factory {stage.factory!r}"
+            )
+    _apply_factory_args_updates(
+        pipeline_config,
+        matching_stages,
+        {"enable_async_decode": talker_async_decode},
+    )
+    return pipeline_config
+
+
 def _apply_factory_args_updates(
     pipeline_config: PipelineConfig,
     stages: list[StageConfig],
@@ -1128,6 +1158,17 @@ def serve(
             ),
         ),
     ] = "default",
+    talker_async_decode: Annotated[
+        bool | None,
+        typer.Option(
+            "--talker-async-decode/--no-talker-async-decode",
+            "--talker_async_decode/--no_talker_async_decode",
+            help=(
+                "Async decode (one-step lookahead) for the Qwen3-Omni talker "
+                "stage. Omit this flag to use the pipeline config default (off)."
+            ),
+        ),
+    ] = None,
     thinker_torch_compile: Annotated[
         str,
         typer.Option(
@@ -1352,6 +1393,10 @@ def serve(
     merged_config = apply_partial_start_cli_overrides(
         merged_config,
         talker_partial_start=talker_partial_start,
+    )
+    merged_config = apply_talker_async_decode_cli_overrides(
+        merged_config,
+        talker_async_decode=talker_async_decode,
     )
 
     if _should_print_merged_config(colocate=colocate, log_level=log_level):
