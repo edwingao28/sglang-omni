@@ -2910,6 +2910,30 @@ def test_talker_forward_gathers_the_mask_before_recording_the_token() -> None:
     assert bool(fake._repetition_mask[1, 5])
 
 
+def test_talker_decode_sample_gathers_masks_by_pool_row() -> None:
+    # The one read side of the pool-keyed masks, and the only consumer of
+    # forward_batch.req_pool_indices. Every other test either stubs
+    # _sample_decode_tokens out or gathers the rows itself, so keying it by batch
+    # row instead would read the empty pad row and go unnoticed. Asserted through
+    # argmax: the request holds pool row 1 while its batch row is 0, so the two
+    # keyings disagree, and a penalty that lands moves the winner off token 0.
+    fake = _talker_seed_self()
+    fake._sampler = None
+    fake._repetition_penalties[0, 0] = 2.0
+    forward_batch = SimpleNamespace(req_pool_indices=torch.tensor([1]))
+    logits = torch.tensor([[3.0, 2.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]])
+
+    fake._repetition_mask[1, 0] = True
+    sampled = Qwen3OmniTalker._sample_decode_tokens(fake, logits, forward_batch)
+    # 3.0 / 2.0 = 1.5, below token 1's untouched 2.0.
+    assert sampled.tolist() == [1]
+
+    fake._repetition_mask[1, 0] = False
+    fake._suppress_mask[1, 0] = True
+    sampled = Qwen3OmniTalker._sample_decode_tokens(fake, logits, forward_batch)
+    assert sampled.tolist() == [1]
+
+
 def _talker_emit_req(rid: str, pool_idx: int, **kwargs) -> SimpleNamespace:
     """A sched_req carrying the fields the runner's emit/put path dereferences."""
     sched_req = _talker_prep_req(rid, pool_idx=pool_idx, **kwargs)
