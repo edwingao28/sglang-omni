@@ -759,3 +759,64 @@ def test_eos_chunk_is_skipped_and_never_decoded() -> None:
     audio = np.frombuffer(message.data.data["audio_waveform"], dtype=np.float32)
     assert model.calls == [(1, 2, 2)]
     assert audio.shape == (4,)
+
+
+def _initial_chunk_scheduler(model, *, initial_chunk_size: int) -> Code2WavScheduler:
+    return Code2WavScheduler(
+        model,
+        device="cpu",
+        stream_chunk_size=10,
+        initial_chunk_size=initial_chunk_size,
+        left_context_size=25,
+    )
+
+
+def test_qwen_code2wav_initial_chunk_flushes_early_with_full_left_context() -> None:
+    model = FakeCode2WavModel(total_upsample=2)
+    scheduler = _initial_chunk_scheduler(model, initial_chunk_size=4)
+    scheduler._stream_payloads["req-1"] = make_qwen_payload(request_id="req-1")
+    _feed(scheduler, "req-1", tuple(range(1, 15)), stream=True)
+
+    # chunk 0 = 4 frames, chunk 1 = whole initial chunk as left context + 10 new
+    assert model.calls == [(1, 2, 4), (1, 2, 14)]
+    first = np.frombuffer(
+        scheduler.outbox.get_nowait().data["audio_waveform"], dtype=np.float32
+    )
+    second = np.frombuffer(
+        scheduler.outbox.get_nowait().data["audio_waveform"], dtype=np.float32
+    )
+    assert first.shape == (8,)
+    assert second.shape == (20,)
+
+
+def test_qwen_code2wav_initial_chunk_default_keeps_steady_threshold() -> None:
+    model = FakeCode2WavModel(total_upsample=2)
+    scheduler = Code2WavScheduler(model, device="cpu")
+    scheduler._stream_payloads["req-1"] = make_qwen_payload(request_id="req-1")
+    _feed(scheduler, "req-1", tuple(range(1, 11)), stream=True)
+
+    assert scheduler._default_initial_chunk_size == 0
+    assert model.calls == [(1, 2, 10)]
+
+
+@pytest.mark.parametrize("requested", [2, 0, None])
+def test_qwen_code2wav_stage_initial_chunk_wins_when_frames_precede_payload(
+    requested: int | None,
+) -> None:
+    """Frames reach code2wav before the payload, so only the stage value counts."""
+    model = FakeCode2WavModel(total_upsample=2)
+    scheduler = _initial_chunk_scheduler(model, initial_chunk_size=4)
+    params = None if requested is None else {"initial_codec_chunk_frames": requested}
+    payload = make_qwen_payload(request_id="req-1", params=params)
+    scheduler._stream_payloads["req-1"] = payload
+
+    _feed(scheduler, "req-1", tuple(range(1, 13)), stream=True)
+    scheduler.on_streaming_new_request("req-1", payload)
+
+    assert model.calls == [(1, 2, 4)]
+
+
+def test_qwen_code2wav_graph_keys_follow_initial_chunk_windows() -> None:
+    assert code2wav_scheduler._serial_threshold_graph_keys(10, 25, 4) == tuple(
+        GraphKey(batch_size=1, frames=frames) for frames in (4, 14, 24, 34, 35)
+    )
