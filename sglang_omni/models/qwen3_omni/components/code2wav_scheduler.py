@@ -34,17 +34,17 @@ logger = logging.getLogger(__name__)
 def _serial_threshold_graph_keys(
     stream_chunk_size: int,
     left_context_size: int,
+    initial_chunk_size: int = 0,
 ) -> tuple[GraphKey, ...]:
-    # Each serial threshold decode advances by one chunk while its context grows
-    # to the configured cap.
-    frames = (
-        *range(
-            stream_chunk_size,
-            stream_chunk_size + left_context_size,
-            stream_chunk_size,
-        ),
-        stream_chunk_size + left_context_size,
-    )
+    frames: list[int] = []
+    start = 0
+    new_frames = initial_chunk_size or stream_chunk_size
+    while True:
+        frames.append(min(left_context_size, start) + new_frames)
+        if start >= left_context_size and new_frames == stream_chunk_size:
+            break
+        start += new_frames
+        new_frames = stream_chunk_size
     return tuple(
         GraphKey(batch_size=1, frames=window_frames) for window_frames in frames
     )
@@ -82,6 +82,7 @@ def load_code2wav_model(
 class Code2WavStreamState:
     chunks: list[torch.Tensor] = field(default_factory=list)
     emitted: int = 0
+    initial_chunk_frames: int = 0
     audio_parts: list[np.ndarray] = field(default_factory=list)
     stream_enabled: bool | None = None
     due_since: float | None = None
@@ -95,6 +96,7 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         model: Any,
         device: str,
         stream_chunk_size: int = 10,
+        initial_chunk_size: int = 0,
         left_context_size: int = 25,
         sample_rate: int = 24000,
         codec_eos_token_id: int = 2150,
@@ -112,6 +114,9 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         self._model = model
         self._device = torch.device(device)
         self._stream_chunk_size = max(int(stream_chunk_size), 1)
+        self._default_initial_chunk_size = max(
+            0, min(int(initial_chunk_size), self._stream_chunk_size)
+        )
         self._left_context_size = max(int(left_context_size), 0)
         self._codec_eos_token_id = codec_eos_token_id
         self._total_upsample = int(model.total_upsample)
@@ -143,7 +148,9 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
 
     def create_stream_state(self, request_id: str) -> Code2WavStreamState:
         del request_id
-        return Code2WavStreamState()
+        return Code2WavStreamState(
+            initial_chunk_frames=self._default_initial_chunk_size
+        )
 
     def latch_stream_contract(
         self,
@@ -154,10 +161,20 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         origin: str,
     ) -> None:
         del request_id
+        # Note (wenyao): the payload always arrives after every codec frame and
+        # after stream_done on this stage, so a per-request first-chunk size
+        # could never reach the threshold that consumed it. The first chunk is
+        # governed by the stage-level initial_chunk_size seeded in
+        # create_stream_state.
         if origin != "stream metadata":
             return
         if state.stream_enabled is None:
             state.stream_enabled = bool(source["stream"])
+
+    def _threshold(self, state: Code2WavStreamState) -> int:
+        if state.emitted == 0 and state.initial_chunk_frames > 0:
+            return state.initial_chunk_frames
+        return self._stream_chunk_size
 
     def validate_chunk(
         self, request_id: str, state: Code2WavStreamState, codes: torch.Tensor
@@ -175,7 +192,7 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
 
     def should_decode(self, state: Code2WavStreamState, *, is_final: bool) -> bool:
         del is_final
-        return self._ready(state) >= self._stream_chunk_size
+        return self._ready(state) >= self._threshold(state)
 
     def decode_delta(
         self, request_id: str, state: Code2WavStreamState, *, is_final: bool
@@ -195,7 +212,7 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
                 "window_frames": end - start + context,
                 "active_request_count": len(self._stream_states),
                 "threshold_ready_request_count": sum(
-                    self._ready(ready_state) >= self._stream_chunk_size
+                    self._ready(ready_state) >= self._threshold(ready_state)
                     for _, ready_state in self._stream_state_items()
                 ),
                 "inbox_depth": self.inbox.qsize(),
@@ -363,7 +380,7 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         due: dict[tuple[int, int], list[tuple[str, Code2WavStreamState]]] = {}
         for rid, state in self._stream_state_items():
             ready = self._ready(state)
-            if state.emitted == 0 and ready >= self._stream_chunk_size:
+            if state.emitted == 0 and ready >= self._threshold(state):
                 first_ready.append((rid, state))
                 continue
             if state.emitted > 0 and ready >= self._stream_chunk_size:
@@ -518,6 +535,7 @@ def create_code2wav_scheduler(
     dtype: str | None = None,
     gpu_id: int | None = None,
     stream_chunk_size: int = 10,
+    initial_chunk_size: int = 0,
     left_context_size: int = 25,
     enable_batching: bool = False,
     max_batch_wait_ms: int = 0,
@@ -541,6 +559,7 @@ def create_code2wav_scheduler(
         concrete_device = torch.device("cuda", torch.cuda.current_device())
     device = str(concrete_device)
     stream_chunk_size = max(int(stream_chunk_size), 1)
+    initial_chunk_size = max(0, min(int(initial_chunk_size), stream_chunk_size))
     left_context_size = max(int(left_context_size), 0)
     model = load_code2wav_model(model_path, device=device, dtype=dtype)
     cuda_graph_runner = None
@@ -553,6 +572,7 @@ def create_code2wav_scheduler(
             graph_keys=_serial_threshold_graph_keys(
                 stream_chunk_size,
                 left_context_size,
+                initial_chunk_size,
             ),
         )
         logger.info(
@@ -567,6 +587,7 @@ def create_code2wav_scheduler(
         model,
         device=device,
         stream_chunk_size=stream_chunk_size,
+        initial_chunk_size=initial_chunk_size,
         left_context_size=left_context_size,
         enable_batching=enable_batching,
         max_batch_wait_ms=max_batch_wait_ms,
