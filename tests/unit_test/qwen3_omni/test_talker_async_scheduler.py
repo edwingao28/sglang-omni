@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Talker async-decode wiring and the retract drain that protects it.
 
-``SGLANG_OMNI_TALKER_OVERLAP`` has to reach two places to do anything: the
-scheduler's ``enable_async_decode`` (which selects the lookahead event loop) and
-the model runner's ``_async_enabled``, which the runner attaches too late for the
-scheduler constructor to set. With the loop live, a retract must not find a
-launched-but-unresolved step: ``retract_decode`` frees the KV and flags the request
-before handing it back, after which the resolve drops that row and its token.
+``SGLANG_OMNI_TALKER_OVERLAP`` reaches the scheduler as ``enable_async_decode``,
+which selects the lookahead event loop, and the runner is bound afterwards because
+it needs the scheduler-owned outbox. Propagation from that binding to the runner's
+``_async_enabled`` is covered against a real scheduler in
+``tests/unit_test/pipeline/test_scheduler.py``. With the loop live, a retract must
+not find a launched-but-unresolved step: ``retract_decode`` frees the KV and flags
+the request before handing it back, after which the resolve drops that row and its
+token.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from sglang.srt.managers.scheduler import Scheduler as _Upstream
 
 from sglang_omni.models.qwen3_omni import bootstrap as qwen_bootstrap
 from sglang_omni.models.qwen3_omni.talker_scheduler import QwenTalkerScheduler
+from tests.unit_test.fakes import FakeServerArgs
 
 _ENV = "SGLANG_OMNI_TALKER_OVERLAP"
 
@@ -46,6 +49,9 @@ def _install_stubs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         def __init__(self, **kwargs: Any) -> None:
             seen["scheduler_kwargs"] = kwargs
             self.outbox = SimpleNamespace()
+
+        def bind_model_runner(self, model_runner: Any) -> None:
+            seen["bound_runner"] = model_runner
 
     class _Runner:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -78,8 +84,8 @@ def _install_stubs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return seen
 
 
-def _server_args() -> SimpleNamespace:
-    return SimpleNamespace(
+def _server_args() -> FakeServerArgs:
+    return FakeServerArgs(
         disable_cuda_graph=True,
         disable_overlap_schedule=False,
         disable_radix_cache=False,
@@ -99,10 +105,10 @@ def test_env_flag_reaches_scheduler_and_runner(
         monkeypatch.setenv(_ENV, env_value)
     seen = _install_stubs(monkeypatch)
 
-    scheduler = qwen_bootstrap.create_talker_scheduler(_server_args())
+    qwen_bootstrap.create_talker_scheduler(_server_args())
 
     assert seen["scheduler_kwargs"]["enable_async_decode"] is expected
-    assert scheduler._model_runner._async_enabled is expected
+    assert seen["bound_runner"] is not None
 
 
 def test_feedback_disabled_keeps_async_off(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -110,12 +116,10 @@ def test_feedback_disabled_keeps_async_off(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv(_ENV, "1")
     seen = _install_stubs(monkeypatch)
 
-    scheduler = qwen_bootstrap.create_talker_scheduler(
-        _server_args(), feedback_enabled=False
-    )
+    qwen_bootstrap.create_talker_scheduler(_server_args(), feedback_enabled=False)
 
     assert seen["scheduler_kwargs"]["enable_async_decode"] is False
-    assert scheduler._model_runner._async_enabled is False
+    assert seen["bound_runner"] is not None
 
 
 def _drain_scheduler(monkeypatch: pytest.MonkeyPatch, *, pending: bool) -> Any:
