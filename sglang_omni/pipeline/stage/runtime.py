@@ -1586,7 +1586,19 @@ class Stage:
     def _on_profiler_start(self, msg: ProfilerStartMessage) -> None:
         run_id = msg.run_id
         if msg.enable_torch and not TorchProfiler.is_active():
-            base_tpl = msg.trace_path_template.format(run_id=run_id, stage=self.name)
+            try:
+                base_tpl = msg.trace_path_template.format(
+                    run_id=run_id, stage=self.name
+                )
+            except Exception:
+                # Note (wenyao): a raise here kills every stage worker.
+                logger.warning(
+                    "Stage %s ignoring unusable trace_path_template %r",
+                    self.name,
+                    msg.trace_path_template,
+                    exc_info=True,
+                )
+                base_tpl = f"{run_id}_{self.name}"
             template = f"{base_tpl}_pid{os.getpid()}"
             prof_dir = os.environ.get("SGLANG_TORCH_PROFILER_DIR")
             if prof_dir and not os.path.isabs(template):

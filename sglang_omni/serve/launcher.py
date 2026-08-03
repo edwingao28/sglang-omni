@@ -228,6 +228,16 @@ def _mount_profiler_routes(
         if req.enable_torch:
             if req.trace_path_template is not None:
                 tpl = req.trace_path_template
+                try:
+                    tpl.format(run_id=run_id, stage="")
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"invalid trace_path_template {tpl!r}: {exc}. "
+                            "Only {run_id} and {stage} may be substituted."
+                        ),
+                    ) from exc
             elif profiler_dir is not None:
                 tpl = _default_template(profiler_dir, run_id)
             else:
