@@ -211,6 +211,7 @@ def _code2wav_stage(*, gpu: int, process: str) -> StageConfig:
         factory_args={
             "device": "cuda",
             "enable_cuda_graph": True,
+            "stream_chunk_size": 25,
             # Note (wenyao): decode the first chunk at 2 frames instead of
             # waiting for a full steady chunk; 0 restores the old behaviour.
             "initial_chunk_size": 2,
