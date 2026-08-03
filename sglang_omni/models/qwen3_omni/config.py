@@ -190,7 +190,7 @@ def _talker_stage(
             "speech_enabled": True,
             "feedback_enabled": True,
             "enable_partial_start": enable_partial_start,
-            "partial_start_min_chunks": 5,
+            "partial_start_min_chunks": 3,
         },
         gpu=gpu,
         runtime_arg_map={"max_seq_len": "talker_max_seq_len"},
