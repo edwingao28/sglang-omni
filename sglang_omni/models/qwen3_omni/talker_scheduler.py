@@ -51,6 +51,15 @@ def configure_talker_server_args(
         if want_cuda_graph:
             overrides["disable_cuda_graph"] = True
     override_server_args(server_args, "qwen3_omni.talker", **overrides)
+    logger.info(
+        "talker overlap gate: SGLANG_OMNI_TALKER_OVERLAP=%s -> requested=%s, "
+        "feedback_enabled=%s, async_decode=%s, disable_overlap_schedule=%s",
+        os.environ.get("SGLANG_OMNI_TALKER_OVERLAP", "<unset>"),
+        overlap_requested,
+        feedback_enabled,
+        feedback_enabled and overlap_requested,
+        overrides.get("disable_overlap_schedule", False),
+    )
     return want_cuda_graph
 
 
