@@ -553,21 +553,34 @@ def test_run_batch_resolve_hands_upstream_the_staged_host_copy() -> None:
 
 
 def test_run_batch_resolve_keeps_device_ids_when_nothing_was_staged() -> None:
-    # Runners that never stage (the launch/resolve pair is optional) keep the
-    # previous behaviour untouched.
     device_ids = torch.tensor([5], dtype=torch.long)
-    pending = SimpleNamespace(batch_result=SimpleNamespace(next_token_ids=device_ids))
     scheduler = object.__new__(OmniScheduler)
     scheduler._model_runner = SimpleNamespace(
-        execute_resolve=lambda step: ModelRunnerOutput(
-            outputs={}, can_run_cuda_graph=False, host_token_ids=None
+        execute_resolve=lambda step: SimpleNamespace(
+            next_token_ids=device_ids, can_run_cuda_graph=False, host_token_ids=None
         )
     )
     scheduler._emit_stream_output = lambda *args, **kwargs: None
 
-    result = scheduler._run_batch_resolve(None, None, pending)
+    result = scheduler._run_batch_resolve(None, None, None)
 
     assert result.next_token_ids is device_ids
+
+
+def test_run_batch_resolve_prefers_the_staged_host_copy() -> None:
+    device_ids = torch.tensor([5], dtype=torch.long)
+    host_ids = [5]
+    scheduler = object.__new__(OmniScheduler)
+    scheduler._model_runner = SimpleNamespace(
+        execute_resolve=lambda step: SimpleNamespace(
+            next_token_ids=device_ids, can_run_cuda_graph=False, host_token_ids=host_ids
+        )
+    )
+    scheduler._emit_stream_output = lambda *args, **kwargs: None
+
+    result = scheduler._run_batch_resolve(None, None, None)
+
+    assert result.next_token_ids is host_ids
 
 
 def test_make_batch_result_requires_declared_host_token_ids() -> None:
