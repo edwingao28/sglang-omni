@@ -29,6 +29,7 @@ from sglang_omni.pipeline.tp_control import TPLeaderFanout, TPWorkMessage
 from sglang_omni.profiler.event_recorder import emit as _emit_event
 from sglang_omni.profiler.event_recorder import get_recorder as _get_recorder
 from sglang_omni.profiler.event_recorder import set_active_stage as _set_active_stage
+from sglang_omni.profiler.path_template import format_trace_path_template
 from sglang_omni.profiler.torch_profiler import TorchProfiler
 from sglang_omni.proto import (
     AdminMessage,
@@ -1587,11 +1588,13 @@ class Stage:
         run_id = msg.run_id
         if msg.enable_torch and not TorchProfiler.is_active():
             try:
-                base_tpl = msg.trace_path_template.format(
-                    run_id=run_id, stage=self.name
+                base_tpl = format_trace_path_template(
+                    msg.trace_path_template,
+                    run_id=run_id,
+                    stage=self.name,
                 )
-            except Exception:
-                # Note (wenyao): a raise here kills every stage worker.
+            except ValueError:
+                # A malformed profiler control message must not stop the stage worker.
                 logger.warning(
                     "Stage %s ignoring unusable trace_path_template %r",
                     self.name,
