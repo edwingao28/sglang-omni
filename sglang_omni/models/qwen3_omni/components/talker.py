@@ -14,6 +14,7 @@ from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.utils import add_prefix
 from torch import nn
 
+from sglang_omni.models.qwen3_omni.components.feedback_slots import feedback_slot_rows
 from sglang_omni.models.qwen3_omni.components.thinker_model import (
     Qwen3OmniMoeThinkerTextAttention,
     Qwen3OmniMoeThinkerTextDecoderLayer,
@@ -467,17 +468,7 @@ class Qwen3OmniMoeTalkerTextModel(nn.Module):
         self.layers_to_capture = []
         max_batch_size = get_global_server_args().max_running_requests
         self._cp_enabled = True
-        self._feedback_buffer = torch.zeros(
-            max_batch_size,
-            config.hidden_size,
-            device=self.codec_embedding.weight.device,
-            dtype=self.codec_embedding.weight.dtype,
-        )
-        self._feedback_mask = torch.zeros(
-            max_batch_size,
-            dtype=torch.bool,
-            device=self.codec_embedding.weight.device,
-        )
+        self._init_feedback_state(max_batch_size=max_batch_size)
 
         # Disable fused_qk_norm_rope so the separate QK-norm + RoPE path is
         # used.  The fp32 weight promotion + cast_x_before_out_mul is applied
@@ -485,6 +476,36 @@ class Qwen3OmniMoeTalkerTextModel(nn.Module):
         for idx in range(self.start_layer, self.end_layer):
             self.layers[idx].self_attn.use_fused_qk_norm_rope = False
             self.layers[idx].self_attn.compatible_with_fused_qk_norm_rope = False
+
+    def _init_feedback_state(self, max_batch_size: int) -> None:
+        # Note (wenyao): the pool-keyed row count is derived here, not passed in, so no
+        # caller can size the slot table independently of the pool's own convention.
+        req_pool_size = feedback_slot_rows(max_batch_size)
+        device = self.codec_embedding.weight.device
+        dtype = self.codec_embedding.weight.dtype
+        self._feedback_buffer = torch.zeros(
+            max_batch_size,
+            self.config.hidden_size,
+            device=device,
+            dtype=dtype,
+        )
+        self._feedback_mask = torch.zeros(
+            max_batch_size,
+            dtype=torch.bool,
+            device=device,
+        )
+        self._feedback_slots = torch.zeros(
+            req_pool_size,
+            self.config.hidden_size,
+            device=device,
+            dtype=dtype,
+        )
+        # Note (wenyao): consume adds slot rows straight into _feedback_buffer without
+        # per-row dtype/device checks, so pin the invariant once here.
+        assert (
+            self._feedback_slots.dtype == self._feedback_buffer.dtype
+            and self._feedback_slots.device == self._feedback_buffer.device
+        ), "Talker feedback slots must match the feedback buffer dtype/device"
 
     def get_input_embeddings(self):
         return self.codec_embedding
@@ -879,6 +900,7 @@ class Qwen3OmniTalker(nn.Module):
         self._cp_enabled = self.model._cp_enabled
         self._feedback_buffer = self.model._feedback_buffer
         self._feedback_mask = self.model._feedback_mask
+        self._feedback_slots = self.model._feedback_slots
         self._predictor_input_buffer = torch.zeros(
             max_batch_size,
             predictor_len,

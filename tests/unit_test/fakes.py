@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import contextlib
+import threading
 from types import SimpleNamespace
+from typing import Any
 
 
 class FakeExecutionBridge:
@@ -40,3 +42,13 @@ class FakeServerArgs(SimpleNamespace):
         del source
         for name, value in fields.items():
             setattr(self, name, value)
+
+
+def init_terminal_output_state(scheduler: Any) -> None:
+    scheduler._request_admission_lock = threading.RLock()
+    scheduler.is_entry_rank = True
+    scheduler._model_runner = None
+    scheduler._stream_output_builder = None
+    scheduler._request_finished_callback = None
+    scheduler._completed_request_ids = {}
+    scheduler._pending_stream_ingress = {}
