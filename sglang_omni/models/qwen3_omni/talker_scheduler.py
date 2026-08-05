@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections import deque
 from typing import Any
+
+from sglang.srt.managers.scheduler import Scheduler as _Upstream
 
 from sglang_omni.models.qwen3_omni.config import MIN_PARTIAL_START_CHUNKS
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
@@ -30,8 +33,10 @@ def configure_talker_server_args(
         "disable_radix_cache": True,
         "chunked_prefill_size": 0,
     }
+    overlap_requested = os.environ.get("SGLANG_OMNI_TALKER_OVERLAP", "0") == "1"
     if feedback_enabled:
-        overrides["disable_overlap_schedule"] = True
+        if not overlap_requested:
+            overrides["disable_overlap_schedule"] = True
         if want_cuda_graph:
             overrides["disable_cuda_graph"] = True
     override_server_args(server_args, "qwen3_omni.talker", **overrides)
@@ -117,6 +122,30 @@ class QwenTalkerScheduler(OmniScheduler):
             self._rollback_decode_prep_after_skip(batch)
             return None
         return batch
+
+    def _add_request_to_queue(self, req: Any, is_retracted: bool = False) -> None:
+        # Note (wenyao): retract has already freed req_pool_idx but nothing has
+        # emitted into that feedback slot yet, so this is the last point where an
+        # unconsumed feedback row can still be read back for replay.
+        if is_retracted or bool(getattr(req, "is_retracted", False)):
+            runner = getattr(self, "_model_runner", None)
+            if runner is not None:
+                try:
+                    runner.snapshot_feedback_for_retract(req)
+                except Exception as exc:
+                    # Note (wenyao): retract runs inside get_next_batch_to_run, which
+                    # the event loop calls outside any try, so an error escaping here
+                    # kills the scheduler thread and every co-resident request. Fail
+                    # this request the way a batch failure does and keep the stage up.
+                    logger.exception(
+                        "Talker retract feedback snapshot failed for request=%s; "
+                        "aborting that request alone",
+                        req.rid,
+                    )
+                    self._emit_request_error(req.rid, exc)
+                    self.abort(req.rid, defer_running_cleanup=False)
+                    return
+        return _Upstream._add_request_to_queue(self, req, is_retracted=is_retracted)
 
     def _rollback_decode_prep_after_skip(self, batch: Any) -> None:
         # Note(Chenchen Hong, Xuesong): This is talker-only. It does not fully
