@@ -132,9 +132,17 @@ class QwenTalkerModelRunner(ModelRunner):
             feedback_row = embeds_snap[idx]
             if coalesce > 1:
                 pending = sched_req.data.pending_codec_rows
-                pending.append(code_chunk)
+                # Note (wenyao): flush before appending so the newest row (the
+                # only one that can be EOS) never leaves in a threshold flush;
+                # on_request_finished pops it on a codec-EOS finish, keeping
+                # 2-D chunks EOS-free without a sender-side sync. This costs
+                # one extra talker step of latency per flush (incl. the first);
+                # the delay-free variant (append, then flush pending[:-1]) was
+                # rejected because k-1-row chunks break the first_frames /
+                # code2wav initial-chunk alignment.
                 if len(pending) >= self._coalesce_threshold(sched_req.data):
                     self._flush_codec_rows(req.rid, sched_req.data)
+                pending.append(code_chunk)
             else:
                 self._outbox.put(
                     OutgoingMessage(
@@ -184,8 +192,11 @@ class QwenTalkerModelRunner(ModelRunner):
 
     def on_request_finished(self, request_id: str, req_data: Any) -> None:
         # Note (wenyao): runs before the terminal payload is enqueued on the
-        # same outbox, so buffered tail frames (incl. the EOS row) stay ahead
-        # of stream completion.
+        # same outbox, so buffered tail frames stay ahead of stream completion.
+        # A "stop" finish means codec EOS for talker requests; the trailing
+        # pending row is that EOS row — drop it instead of decoding it.
+        if req_data.finish_reason == "stop" and req_data.pending_codec_rows:
+            req_data.pending_codec_rows.pop()
         self._flush_codec_rows(request_id, req_data)
 
     def sample_before_post_prefill(

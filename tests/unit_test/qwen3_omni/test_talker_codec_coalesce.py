@@ -4,7 +4,6 @@ from __future__ import annotations
 from collections import deque
 from types import SimpleNamespace
 
-import numpy as np
 import torch
 
 from sglang_omni.models.qwen3_omni.components.code2wav_scheduler import (
@@ -51,6 +50,7 @@ def _data() -> SimpleNamespace:
         pending_codec_rows=[],
         codec_first_flush_done=False,
         stage_payload=None,
+        finish_reason=None,
     )
 
 
@@ -87,19 +87,19 @@ def test_coalesce_buffers_until_threshold_then_emits_stacked_rows() -> None:
     runner = _runner(_fake_model(n, 4, 2), coalesce=k)
     requests, batch = _requests(n), _sched_batch(n)
 
-    seen = _run_steps(runner, requests, batch, steps=k - 1)
+    seen = _run_steps(runner, requests, batch, steps=k)
     assert runner._outbox.sent == []
-    assert all(len(r.data.pending_codec_rows) == k - 1 for r in requests)
+    assert all(len(r.data.pending_codec_rows) == k for r in requests)
 
     seen += _run_steps(runner, requests, batch, steps=1)
     assert len(runner._outbox.sent) == n
-    assert all(not r.data.pending_codec_rows for r in requests)
+    assert all(len(r.data.pending_codec_rows) == 1 for r in requests)
     msg = next(m for m in runner._outbox.sent if m.request_id == "r0")
     assert msg.type == "stream"
     assert msg.target == "code2wav"
     assert msg.metadata == {"stream": False}
     assert msg.data.shape == (k, 2)
-    assert torch.equal(msg.data, torch.stack(seen, dim=0))
+    assert torch.equal(msg.data, torch.stack(seen[:k], dim=0))
 
 
 def test_coalesced_rows_survive_next_step_inplace_write() -> None:
@@ -173,25 +173,65 @@ def test_ingest_unbinds_coalesced_chunk_and_decodes() -> None:
     assert all(chunk.ndim == 1 for chunk in state.chunks)
 
 
-def test_ingest_drops_eos_row_inside_coalesced_chunk() -> None:
-    model = FakeCode2WavModel(total_upsample=2)
-    scheduler = _make_scheduler(model)
-    scheduler._stream_payloads["req-1"] = make_qwen_payload(request_id="req-1")
-    eos = scheduler._codec_eos_token_id
-    scheduler._handle_stream_chunk(
-        "req-1",
-        StreamItem(
-            0,
-            torch.tensor([[1, 10], [eos, 0], [2, 20]]),
-            "talker",
-            metadata={"stream": False},
-        ),
+class _SyncGuardTensor(torch.Tensor):
+    def item(self):
+        raise AssertionError("D2H .item() on coalesced chunk")
+
+    def tolist(self):
+        raise AssertionError("D2H .tolist() on coalesced chunk")
+
+
+def test_ingest_2d_chunk_does_not_sync() -> None:
+    scheduler = _make_scheduler(FakeCode2WavModel(total_upsample=2))
+    state = scheduler.create_stream_state("req-1")
+    codes = torch.Tensor._make_subclass(
+        _SyncGuardTensor, torch.tensor([[1, 10], [2, 20]])
     )
-    assert model.calls == [(1, 2, 2)]
-    scheduler._on_done("req-1")
-    message = scheduler.outbox.get_nowait()
-    audio = np.frombuffer(message.data.data["audio_waveform"], dtype=np.float32)
-    assert audio.shape == (4,)
+    scheduler.ingest("req-1", state, codes)
+    assert len(state.chunks) == 2
+
+
+def test_ingest_1d_row_still_drops_eos() -> None:
+    scheduler = _make_scheduler(FakeCode2WavModel(total_upsample=2))
+    state = scheduler.create_stream_state("req-1")
+    scheduler.ingest("req-1", state, torch.tensor([scheduler._codec_eos_token_id, 0]))
+    assert state.chunks == []
+
+
+def test_stop_finish_pops_trailing_eos_row_before_tail_flush() -> None:
+    n, k = 1, 5
+    runner = _runner(_fake_model(n, 4, 2), coalesce=k)
+    requests, batch = _requests(n), _sched_batch(n)
+    seen = _run_steps(runner, requests, batch, steps=3)
+    requests[0].data.finish_reason = "stop"
+    runner.on_request_finished("r0", requests[0].data)
+    assert len(runner._outbox.sent) == 1
+    msg = runner._outbox.sent[0]
+    assert msg.data.shape == (2, 2)
+    assert torch.equal(msg.data, torch.stack(seen[:2], dim=0))
+    assert not requests[0].data.pending_codec_rows
+
+
+def test_stop_finish_at_threshold_never_leaks_eos_into_chunk() -> None:
+    n, k = 1, 3
+    runner = _runner(_fake_model(n, 4, 2), coalesce=k)
+    requests, batch = _requests(n), _sched_batch(n)
+    seen = _run_steps(runner, requests, batch, steps=k + 1)
+    requests[0].data.finish_reason = "stop"
+    runner.on_request_finished("r0", requests[0].data)
+    assert len(runner._outbox.sent) == 1
+    assert torch.equal(runner._outbox.sent[0].data, torch.stack(seen[:k], dim=0))
+    assert not requests[0].data.pending_codec_rows
+
+
+def test_length_finish_flushes_tail_unpopped() -> None:
+    n, k = 1, 5
+    runner = _runner(_fake_model(n, 4, 2), coalesce=k)
+    requests, batch = _requests(n), _sched_batch(n)
+    seen = _run_steps(runner, requests, batch, steps=3)
+    requests[0].data.finish_reason = "length"
+    runner.on_request_finished("r0", requests[0].data)
+    assert torch.equal(runner._outbox.sent[0].data, torch.stack(seen, dim=0))
 
 
 def test_first_flush_uses_smaller_threshold_then_steady_state() -> None:
@@ -199,7 +239,7 @@ def test_first_flush_uses_smaller_threshold_then_steady_state() -> None:
     runner = _runner(_fake_model(n, 4, 2), coalesce=k, first_frames=first)
     requests, batch = _requests(n), _sched_batch(n)
 
-    _run_steps(runner, requests, batch, steps=first)
+    _run_steps(runner, requests, batch, steps=first + 1)
     assert len(runner._outbox.sent) == n
     assert all(m.data.shape[0] == first for m in runner._outbox.sent)
     assert all(r.data.codec_first_flush_done for r in requests)
@@ -217,7 +257,7 @@ def test_first_frames_of_one_emits_legacy_row_then_stacked() -> None:
     runner = _runner(_fake_model(n, 4, 2), coalesce=k, first_frames=1)
     requests, batch = _requests(n), _sched_batch(n)
 
-    _run_steps(runner, requests, batch, steps=1)
+    _run_steps(runner, requests, batch, steps=2)
     assert len(runner._outbox.sent) == 1
     assert runner._outbox.sent[0].data.ndim == 1
 
@@ -230,7 +270,7 @@ def test_first_frames_zero_keeps_uniform_threshold() -> None:
     n, k = 1, 3
     runner = _runner(_fake_model(n, 4, 2), coalesce=k, first_frames=0)
     requests, batch = _requests(n), _sched_batch(n)
-    _run_steps(runner, requests, batch, steps=k - 1)
+    _run_steps(runner, requests, batch, steps=k)
     assert runner._outbox.sent == []
     _run_steps(runner, requests, batch, steps=1)
     assert len(runner._outbox.sent) == 1
