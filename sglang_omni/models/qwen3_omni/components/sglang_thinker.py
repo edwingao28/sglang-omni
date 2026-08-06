@@ -73,8 +73,11 @@ class Qwen3OmniThinkerForCausalLM(nn.Module):
         if forward_batch.mrope_positions is not None:
             positions = forward_batch.mrope_positions
 
+        if self.model.pp_group.is_first_rank and input_embeds is None:
+            input_embeds = self.model.get_input_embeddings()(input_ids)
+
         hidden_states = self.model(
-            input_ids=input_ids,
+            input_ids=None,
             positions=positions,
             forward_batch=forward_batch,
             input_embeds=input_embeds,
