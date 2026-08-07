@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from sglang_omni.model_runner._hidden_capture import StaticAuxHiddenCapture
 from sglang_omni.models.qwen3_omni.components.code2wav_scheduler import (
     Code2WavScheduler,
 )
@@ -337,6 +338,103 @@ def test_qwen_aux_hidden_states_clear_when_no_request_emits_hidden():
 
     assert all(output.extra is None for output in outputs.values())
     assert model._captured_aux_hidden_states is None
+
+
+def test_qwen_static_aux_hidden_prefill_slices_only_logical_token_rows():
+    static_embed = torch.arange(12, dtype=torch.float32).reshape(6, 2)
+    static_layer = torch.arange(100, 112, dtype=torch.float32).reshape(6, 2)
+    capture = StaticAuxHiddenCapture(
+        layer_ids=[0, 24],
+        buffers=[static_embed, static_layer],
+        hook_handles=[],
+        max_tokens=6,
+    )
+    # Note (wenyao): a stale legacy capture must lose to the static capture owner.
+    model = SimpleNamespace(
+        _omni_aux_hidden_capture=capture,
+        _captured_aux_hidden_states=[static_embed, static_layer],
+    )
+    output_processor = SGLangOutputProcessor(
+        capture_hidden=True,
+        capture_hidden_layers=[0, 24],
+        model=model,
+        should_emit_hidden=lambda request: request.request_id == "audio",
+    )
+    scheduler_output = SchedulerOutput(
+        requests=[
+            SchedulerRequest(request_id="text"),
+            SchedulerRequest(request_id="audio"),
+        ],
+        batch_data=SimpleNamespace(
+            forward_mode=SimpleNamespace(is_extend=lambda: True),
+            reqs=[
+                SimpleNamespace(extend_range=SimpleNamespace(length=1)),
+                SimpleNamespace(extend_range=SimpleNamespace(length=2)),
+            ],
+        ),
+    )
+    model_output = SimpleNamespace(
+        next_token_ids=torch.tensor([11, 22]),
+        logits_output=SimpleNamespace(
+            hidden_states=torch.arange(6, dtype=torch.float32).reshape(3, 2)
+        ),
+    )
+
+    outputs = output_processor.process(model_output, scheduler_output)
+
+    audio_hidden = outputs["audio"].extra["hidden_states"]
+    assert outputs["text"].extra is None
+    assert audio_hidden["embed"].shape == (2, 2)
+    torch.testing.assert_close(audio_hidden["embed"], static_embed[1:3])
+    torch.testing.assert_close(audio_hidden[24], static_layer[1:3])
+    assert (
+        audio_hidden["embed"].untyped_storage().nbytes()
+        == audio_hidden["embed"].numel() * audio_hidden["embed"].element_size()
+    )
+
+
+def test_qwen_static_aux_hidden_decode_slices_only_request_rows():
+    static_embed = torch.arange(12, dtype=torch.float32).reshape(6, 2)
+    static_layer = torch.arange(100, 112, dtype=torch.float32).reshape(6, 2)
+    capture = StaticAuxHiddenCapture(
+        layer_ids=[0, 24],
+        buffers=[static_embed, static_layer],
+        hook_handles=[],
+        max_tokens=6,
+    )
+    model = SimpleNamespace(
+        _omni_aux_hidden_capture=capture,
+        _captured_aux_hidden_states=[static_embed, static_layer],
+    )
+    output_processor = SGLangOutputProcessor(
+        capture_hidden=True,
+        capture_hidden_layers=[0, 24],
+        model=model,
+        should_emit_hidden=lambda request: request.request_id == "audio",
+    )
+    scheduler_output = SchedulerOutput(
+        requests=[
+            SchedulerRequest(request_id="text"),
+            SchedulerRequest(request_id="audio"),
+        ],
+        batch_data=SimpleNamespace(
+            forward_mode=SimpleNamespace(is_extend=lambda: False),
+            reqs=[SimpleNamespace(), SimpleNamespace()],
+        ),
+    )
+    model_output = SimpleNamespace(
+        next_token_ids=torch.tensor([11, 22]),
+        logits_output=SimpleNamespace(
+            hidden_states=torch.arange(4, dtype=torch.float32).reshape(2, 2)
+        ),
+    )
+
+    outputs = output_processor.process(model_output, scheduler_output)
+
+    audio_hidden = outputs["audio"].extra["hidden_states"]
+    assert outputs["text"].extra is None
+    torch.testing.assert_close(audio_hidden["embed"], static_embed[1])
+    torch.testing.assert_close(audio_hidden[24], static_layer[1])
 
 
 def test_utf8_multibyte_hold_then_emit():
