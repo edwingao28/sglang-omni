@@ -41,13 +41,15 @@ class _FakeTextModel(nn.Module):
         pp_proxy_tensors: object | None = None,
         input_deepstack_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        del positions, forward_batch, pp_proxy_tensors, input_deepstack_embeds
+        del positions, forward_batch, input_deepstack_embeds
         self.seen_input_ids = input_ids
         self.seen_input_embeds = input_embeds
         if input_embeds is not None:
             return input_embeds
-        assert input_ids is not None
-        return self.embed_tokens(input_ids)
+        if input_ids is not None:
+            return self.embed_tokens(input_ids)
+        assert pp_proxy_tensors is not None
+        return pp_proxy_tensors
 
 
 class _FakeLogitsProcessor(nn.Module):
@@ -103,4 +105,23 @@ def test_outer_forward_preserves_caller_supplied_multimodal_embeddings() -> None
     assert output == "logits"
     assert text_model.seen_input_ids is None
     assert text_model.seen_input_embeds is input_embeds
+    assert text_model.embed_tokens.calls == 0
+
+
+def test_outer_forward_skips_embedding_on_non_first_pp_rank() -> None:
+    outer, text_model = _make_outer()
+    text_model.pp_group.is_first_rank = False
+    input_ids = torch.tensor([1, 2])
+    pp_proxy_tensors = torch.zeros(2, 4)
+
+    output = outer(
+        input_ids,
+        torch.tensor([0, 1]),
+        _forward_batch(),
+        pp_proxy_tensors=pp_proxy_tensors,
+    )
+
+    assert output == "logits"
+    assert text_model.seen_input_ids is None
+    assert text_model.seen_input_embeds is None
     assert text_model.embed_tokens.calls == 0
