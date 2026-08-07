@@ -1563,6 +1563,95 @@ def test_rollback_zeroes_same_cell_with_cached_device_scalar() -> None:
     assert scheduler._rollback_zero is cached
 
 
+def _hoist_scheduler(*, ready: bool) -> QwenTalkerScheduler:
+    scheduler = object.__new__(QwenTalkerScheduler)
+    scheduler._model_runner = SimpleNamespace(
+        _feedback_enabled=True,
+        _data_has_next_decode_input=lambda data: bool(data and data.ready),
+    )
+    scheduler.last_batch = None
+    scheduler.waiting_queue = []
+    scheduler.chunked_req = None
+    scheduler.running_batch = SimpleNamespace(
+        is_empty=lambda: False,
+        reqs=[
+            SimpleNamespace(
+                _omni_data=SimpleNamespace(ready=ready), finished=lambda: False
+            )
+        ],
+    )
+    return scheduler
+
+
+def test_ready_check_hoist_skips_upstream_when_decode_not_ready(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        _Upstream,
+        "get_next_batch_to_run",
+        lambda self: calls.append("upstream"),
+    )
+
+    scheduler = _hoist_scheduler(ready=False)
+    assert scheduler.get_next_batch_to_run() is None
+    assert calls == []
+
+    scheduler = _hoist_scheduler(ready=True)
+    scheduler._is_batch_ready_to_run = lambda batch: True
+    scheduler.get_next_batch_to_run()
+    assert calls == ["upstream"]
+
+
+def test_ready_check_hoist_defers_to_upstream_when_prefill_pending(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        _Upstream,
+        "get_next_batch_to_run",
+        lambda self: calls.append("upstream"),
+    )
+
+    class _ExtendMode:
+        @staticmethod
+        def is_extend() -> bool:
+            return True
+
+    pending_merge = _hoist_scheduler(ready=False)
+    pending_merge.last_batch = SimpleNamespace(forward_mode=_ExtendMode())
+    pending_merge._is_batch_ready_to_run = lambda batch: True
+    pending_merge.get_next_batch_to_run()
+
+    waiting = _hoist_scheduler(ready=False)
+    waiting.waiting_queue = [object()]
+    waiting._is_batch_ready_to_run = lambda batch: True
+    waiting.get_next_batch_to_run()
+
+    feedback_off = _hoist_scheduler(ready=False)
+    feedback_off._model_runner._feedback_enabled = False
+    feedback_off._is_batch_ready_to_run = lambda batch: True
+    feedback_off.get_next_batch_to_run()
+
+    assert calls == ["upstream", "upstream", "upstream"]
+
+
+def test_ready_check_hoist_bails_to_upstream_when_req_finished(monkeypatch) -> None:
+    """A finished req reads not-ready forever; upstream must filter it out."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        _Upstream,
+        "get_next_batch_to_run",
+        lambda self: calls.append("upstream"),
+    )
+
+    scheduler = _hoist_scheduler(ready=False)
+    scheduler.running_batch.reqs.append(
+        SimpleNamespace(_omni_data=SimpleNamespace(ready=False), finished=lambda: True)
+    )
+    scheduler._is_batch_ready_to_run = lambda batch: True
+    scheduler.get_next_batch_to_run()
+    assert calls == ["upstream"]
+
+
 def test_prepare_for_decode_rollback_type_contract_with_upstream(monkeypatch) -> None:
     schedule_batch_mod = pytest.importorskip("sglang.srt.managers.schedule_batch")
     ScheduleBatch = schedule_batch_mod.ScheduleBatch

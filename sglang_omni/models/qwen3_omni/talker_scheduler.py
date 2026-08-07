@@ -124,11 +124,39 @@ class QwenTalkerScheduler(OmniScheduler):
         return True
 
     def get_next_batch_to_run(self) -> Any | None:
+        if self._defer_decode_before_prepare():
+            return None
         batch = _Upstream.get_next_batch_to_run(self)
         if batch is not None and not self._is_batch_ready_to_run(batch):
             self._rollback_decode_prep_after_skip(batch)
             return None
         return batch
+
+    def _defer_decode_before_prepare(self) -> bool:
+        # Note (wenyao): skip the whole prepare_for_decode/rollback churn when the
+        # next batch can only be a not-ready decode of running_batch; readiness here
+        # reads only per-req feedback/text state, which prepare never writes. Any
+        # case this can't classify falls through to the post-hoc rollback path.
+        runner = getattr(self, "_model_runner", None)
+        if runner is None or not getattr(runner, "_feedback_enabled", False):
+            return False
+        last_batch = getattr(self, "last_batch", None)
+        if last_batch is not None and last_batch.forward_mode.is_extend():
+            return False
+        if self.waiting_queue or getattr(self, "chunked_req", None) is not None:
+            return False
+        running_batch = getattr(self, "running_batch", None)
+        if running_batch is None or running_batch.is_empty():
+            return False
+        # Note (wenyao): finished reqs read not-ready forever (feedback count is
+        # zeroed on finish) but only upstream's filter_batch removes them — bail
+        # to upstream so they get filtered instead of livelocking the batch.
+        if any(req.finished() for req in running_batch.reqs):
+            return False
+        return not all(
+            runner._data_has_next_decode_input(getattr(req, "_omni_data", None))
+            for req in running_batch.reqs
+        )
 
     def update_running_batch(self, batch: Any) -> Any:
         # Note (wenyao): retract_decode frees the KV and sets is_retracted before it
