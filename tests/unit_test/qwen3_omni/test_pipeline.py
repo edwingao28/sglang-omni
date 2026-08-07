@@ -660,6 +660,39 @@ def test_qwen_builder_forwards_explicit_mem_fraction_static() -> None:
     assert server_args.dtype == "bfloat16"
 
 
+def test_thinker_prefill_graph_opt_in_resolves_breakable_bounded() -> None:
+    # "dummy" model_path short-circuits ServerArgs.__post_init__ (no HF
+    # config fetch), so assert on the raw fields the helper feeds in rather
+    # than the phase-resolved cuda_graph_config (which only __post_init__
+    # populates).
+    overrides = qwen_stages._thinker_prefill_graph_overrides(enabled=True)
+    server_args = build_sglang_server_args(
+        "dummy", context_length=8192, **overrides
+    )
+    assert server_args.cuda_graph_backend_prefill == "breakable"
+    assert server_args.cuda_graph_max_bs_prefill == 256
+
+
+def test_thinker_prefill_graph_default_off() -> None:
+    overrides = qwen_stages._thinker_prefill_graph_overrides(enabled=False)
+    assert overrides == {}
+
+
+def test_thinker_prefill_graph_opt_in_inert_when_cuda_graph_disabled() -> None:
+    overrides = qwen_stages._thinker_prefill_graph_overrides(
+        enabled=True, disable_cuda_graph=True
+    )
+    assert overrides == {}
+    server_args = build_sglang_server_args(
+        "dummy",
+        context_length=8192,
+        disable_cuda_graph=True,
+        **overrides,
+    )
+    assert server_args.cuda_graph_backend_prefill == "disabled"
+    assert server_args.cuda_graph_max_bs_prefill is None
+
+
 def test_qwen_encoder_mem_reserve_applies_only_to_valid_auto_values() -> None:
     server_args = FakeServerArgs(mem_fraction_static=0.929)
 

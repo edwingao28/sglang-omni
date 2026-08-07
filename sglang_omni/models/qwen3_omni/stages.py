@@ -932,6 +932,21 @@ def create_decode_executor(model_path: str):
 # ---------------------------------------------------------------------------
 
 
+def _thinker_prefill_graph_overrides(
+    *, enabled: bool, disable_cuda_graph: bool = False
+) -> dict[str, Any]:
+    # Note (wenyao): explicit bound — never inherit sglang's implicit
+    # 8192-token/58-bucket prefill default; and stay inert when the stage's
+    # CUDA graphs are off, because sglang's convenience-flag precedence
+    # would otherwise override legacy disable_cuda_graph.
+    if not enabled or disable_cuda_graph:
+        return {}
+    return {
+        "cuda_graph_backend_prefill": "breakable",
+        "cuda_graph_max_bs_prefill": 256,
+    }
+
+
 def create_sglang_thinker_executor_from_config(
     model_path: str,
     *,
@@ -949,6 +964,7 @@ def create_sglang_thinker_executor_from_config(
     prefill_coalesce_requests: int = 0,
     prefill_coalesce_wait_ms: float = 60.0,
     prefill_coalesce_when_idle: bool = False,
+    prefill_cuda_graph: bool = False,
 ):
     """Returns OmniScheduler for thinker."""
     # note (luojiaxuan):
@@ -970,6 +986,7 @@ def create_sglang_thinker_executor_from_config(
         enable_mixed_chunk=True,
         chunked_prefill_size=8192,
         sampling_backend="pytorch",
+        **_thinker_prefill_graph_overrides(enabled=prefill_cuda_graph),
     )
     overrides["tp_size"] = tp_size
     has_explicit_colocated_mem_fraction = (
