@@ -80,21 +80,27 @@ class SGLangOutputProcessor:
         ]
 
         if self._model is not None and self._capture_hidden_layers:
-            captured_aux_hidden_states = self._model._captured_aux_hidden_states
+            static_capture = getattr(self._model, "_omni_aux_hidden_capture", None)
+            if static_capture is not None:
+                logical_rows = self._logical_hidden_rows(scheduler_output)
+                return self._build_aux_hidden_extras(
+                    static_capture.views(logical_rows),
+                    model_output=model_output,
+                    scheduler_output=scheduler_output,
+                    request_indexes=request_indexes,
+                )
+
+            captured_aux_hidden_states = getattr(
+                self._model, "_captured_aux_hidden_states", None
+            )
             if captured_aux_hidden_states is not None:
                 self._model._captured_aux_hidden_states = None
-                if not request_indexes:
-                    return {}
-                stream_hidden_states = self._extract_stream_hidden_states(model_output)
-                return {
-                    request_index: self._build_aux_hidden_extra(
-                        captured_aux_hidden_states,
-                        request_index=request_index,
-                        scheduler_output=scheduler_output,
-                        stream_hidden_states=stream_hidden_states,
-                    )
-                    for request_index in request_indexes
-                }
+                return self._build_aux_hidden_extras(
+                    captured_aux_hidden_states,
+                    model_output=model_output,
+                    scheduler_output=scheduler_output,
+                    request_indexes=request_indexes,
+                )
 
         if not request_indexes:
             return {}
@@ -127,6 +133,27 @@ class SGLangOutputProcessor:
                 for request_index in request_indexes
             }
         return {}
+
+    def _build_aux_hidden_extras(
+        self,
+        aux_hidden_states: Sequence[torch.Tensor],
+        *,
+        model_output: Any,
+        scheduler_output: SchedulerOutput,
+        request_indexes: list[int],
+    ) -> dict[int, dict[str, Any] | None]:
+        if not request_indexes:
+            return {}
+        stream_hidden_states = self._extract_stream_hidden_states(model_output)
+        return {
+            request_index: self._build_aux_hidden_extra(
+                aux_hidden_states,
+                request_index=request_index,
+                scheduler_output=scheduler_output,
+                stream_hidden_states=stream_hidden_states,
+            )
+            for request_index in request_indexes
+        }
 
     def _build_aux_hidden_extra(
         self,
@@ -181,6 +208,13 @@ class SGLangOutputProcessor:
             return None
         raw_hidden = logits_output.hidden_states
         return raw_hidden if isinstance(raw_hidden, torch.Tensor) else None
+
+    @staticmethod
+    def _logical_hidden_rows(scheduler_output: SchedulerOutput) -> int:
+        batch_data = scheduler_output.batch_data
+        if batch_data.forward_mode.is_extend():
+            return sum(req.extend_range.length for req in batch_data.reqs)
+        return len(batch_data.reqs)
 
     @staticmethod
     def _slice_per_request_tensor(
