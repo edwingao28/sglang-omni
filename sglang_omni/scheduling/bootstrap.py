@@ -25,18 +25,29 @@ class _SGLangServerArgsForDiagnostics(Protocol):
 def _describe_sglang_runtime_configuration(
     server_args: _SGLangServerArgsForDiagnostics,
     gpu_id: int,
+    hidden_capture_max_tokens: int | None = None,
 ) -> str:
     sm_version = get_visible_gpu_sm_version(gpu_id)
     prefill_attention_backend, decode_attention_backend = (
         server_args.get_attention_backends()
     )
+    prefill_graph_config = getattr(
+        getattr(server_args, "cuda_graph_config", None), "prefill", None
+    )
+    prefill_graph_backend = getattr(prefill_graph_config, "backend", None)
+    prefill_graph_buckets = getattr(prefill_graph_config, "bs", None) or []
     return (
         f"SGLang runtime configuration: gpu_id={gpu_id}, sm={sm_version}, "
         f"architecture={gpu_architecture_for_sm(sm_version)}, "
         f"attention_backend={server_args.attention_backend}, "
         f"decode_attention_backend={decode_attention_backend}, "
         f"prefill_attention_backend={prefill_attention_backend}, "
-        f"sampling_backend={server_args.sampling_backend}"
+        f"sampling_backend={server_args.sampling_backend}, "
+        f"prefill_graph_backend={prefill_graph_backend}, "
+        f"prefill_graph_buckets={len(prefill_graph_buckets)}, "
+        f"prefill_graph_max_tokens="
+        f"{max(prefill_graph_buckets) if prefill_graph_buckets else 0}, "
+        f"hidden_capture_capacity={hidden_capture_max_tokens}"
     )
 
 
@@ -61,6 +72,9 @@ def _hidden_capture_max_tokens(server_args: Any) -> int:
             phase_config = getattr(cuda_graph_config, phase, None)
             if phase_config is not None:
                 candidates.append(getattr(phase_config, "max_bs", None))
+                bucket_list = getattr(phase_config, "bs", None)
+                if bucket_list:
+                    candidates.append(max(bucket_list))
 
     positive = [int(value) for value in candidates if value is not None and value > 0]
     if not positive:
@@ -92,7 +106,14 @@ def create_sglang_infrastructure(
         create_tree_cache,
     )
 
-    logger.info(_describe_sglang_runtime_configuration(server_args, gpu_id))
+    hidden_capture_max_tokens = (
+        _hidden_capture_max_tokens(server_args) if capture_hidden_layers else None
+    )
+    logger.info(
+        _describe_sglang_runtime_configuration(
+            server_args, gpu_id, hidden_capture_max_tokens
+        )
+    )
 
     model_worker = ModelWorker(
         config=ModelWorkerConfig(
@@ -115,7 +136,7 @@ def create_sglang_infrastructure(
         install_hidden_capture_hooks(
             model,
             capture_hidden_layers,
-            max_tokens=_hidden_capture_max_tokens(server_args),
+            max_tokens=hidden_capture_max_tokens,
         )
 
     # SGLang 0.5.15 split model loading, KV-pool allocation, attention-backend

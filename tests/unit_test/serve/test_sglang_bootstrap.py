@@ -38,7 +38,9 @@ def test_runtime_configuration_reports_global_backend_for_each_phase(
     assert description == (
         "SGLang runtime configuration: gpu_id=0, sm=89, architecture=ada, "
         "attention_backend=flashinfer, decode_attention_backend=flashinfer, "
-        "prefill_attention_backend=flashinfer, sampling_backend=pytorch"
+        "prefill_attention_backend=flashinfer, sampling_backend=pytorch, "
+        "prefill_graph_backend=None, prefill_graph_buckets=0, "
+        "prefill_graph_max_tokens=0, hidden_capture_capacity=None"
     )
 
 
@@ -67,8 +69,40 @@ def test_runtime_configuration_reports_explicit_phase_backends(
     assert description == (
         "SGLang runtime configuration: gpu_id=1, sm=90, architecture=hopper, "
         "attention_backend=flashinfer, decode_attention_backend=triton, "
-        "prefill_attention_backend=fa3, sampling_backend=pytorch"
+        "prefill_attention_backend=fa3, sampling_backend=pytorch, "
+        "prefill_graph_backend=None, prefill_graph_buckets=0, "
+        "prefill_graph_max_tokens=0, hidden_capture_capacity=None"
     )
+
+
+def test_runtime_configuration_log_names_prefill_graph_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        bootstrap,
+        "get_visible_gpu_sm_version",
+        lambda _gpu_id: 90,
+        raising=False,
+    )
+    server_args = SimpleNamespace(
+        attention_backend="flashinfer",
+        decode_attention_backend=None,
+        prefill_attention_backend=None,
+        sampling_backend="pytorch",
+        get_attention_backends=lambda: ("flashinfer", "flashinfer"),
+        cuda_graph_config=SimpleNamespace(
+            prefill=SimpleNamespace(backend="breakable", max_bs=256, bs=[4, 256]),
+        ),
+    )
+
+    description = bootstrap._describe_sglang_runtime_configuration(
+        server_args, gpu_id=1, hidden_capture_max_tokens=256
+    )
+
+    assert "prefill_graph_backend=breakable" in description
+    assert "prefill_graph_buckets=2" in description
+    assert "prefill_graph_max_tokens=256" in description
+    assert "hidden_capture_capacity=256" in description
 
 
 def test_create_sglang_infrastructure_runs_0515_initialization_phases(
@@ -78,7 +112,9 @@ def test_create_sglang_infrastructure_runs_0515_initialization_phases(
     monkeypatch.setattr(
         bootstrap,
         "_describe_sglang_runtime_configuration",
-        lambda _server_args, _gpu_id: events.append("runtime_configuration")
+        lambda _server_args, _gpu_id, _hidden_capture_max_tokens=None: events.append(
+            "runtime_configuration"
+        )
         or "runtime configuration",
     )
 
@@ -187,6 +223,20 @@ def test_create_sglang_infrastructure_runs_0515_initialization_phases(
                 ),
             ),
             1024,
+        ),
+        (
+            # G1: an explicit prefill bucket list is not clamped by max_bs.
+            SimpleNamespace(
+                chunked_prefill_size=128,
+                max_prefill_tokens=16384,
+                context_length=8192,
+                max_running_requests=8,
+                cuda_graph_config=SimpleNamespace(
+                    decode=SimpleNamespace(max_bs=128, bs=[1, 128]),
+                    prefill=SimpleNamespace(max_bs=256, bs=[64, 512]),
+                ),
+            ),
+            512,
         ),
     ],
 )
