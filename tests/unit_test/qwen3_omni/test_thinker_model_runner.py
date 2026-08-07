@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import logging
 from types import SimpleNamespace
 
 import torch
@@ -83,6 +84,34 @@ def test_visual_deepstack_prefill_keeps_model_specific_forward() -> None:
     assert seen == [
         (forward_batch, input_embeds, deepstack_embeds, visual_mask),
     ]
+
+
+def _probe_runner_with_counters(tp_rank: int) -> ThinkerModelRunner:
+    runner = object.__new__(ThinkerModelRunner)
+    runner._prefill_graph_replay_count = 0
+    runner._prefill_graph_fallback_count = 0
+    runner.tp_worker = SimpleNamespace(tp_rank=tp_rank)
+    return runner
+
+
+def test_prefill_counters_increment_and_log(caplog):
+    runner = _probe_runner_with_counters(tp_rank=0)
+    out_replay = SimpleNamespace(can_run_cuda_graph=True)
+    out_fallback = SimpleNamespace(can_run_cuda_graph=False)
+    extend_fb = SimpleNamespace(forward_mode=SimpleNamespace(is_extend=lambda: True))
+    decode_fb = SimpleNamespace(forward_mode=SimpleNamespace(is_extend=lambda: False))
+
+    with caplog.at_level(logging.INFO):
+        runner._count_prefill_graph_outcome(out_replay, extend_fb)
+        runner._count_prefill_graph_outcome(out_fallback, extend_fb)
+        runner._count_prefill_graph_outcome(out_replay, decode_fb)  # ignored
+
+    assert runner._prefill_graph_replay_count == 1
+    assert runner._prefill_graph_fallback_count == 1
+    assert any(
+        "prefill_graph_counters tp_rank=0 replay=1 fallback=1" in r.message
+        for r in caplog.records
+    )  # first fallback logs immediately
 
 
 def test_custom_omni_forward_publishes_sglang_forward_context():

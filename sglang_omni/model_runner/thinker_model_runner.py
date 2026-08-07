@@ -30,6 +30,8 @@ class ThinkerModelRunner(ModelRunner):
         self._embed_tokens = self._text_model.embed_tokens
         self._th_host_bufs = None
         self._th_slot = 0
+        self._prefill_graph_replay_count = 0
+        self._prefill_graph_fallback_count = 0
 
         thinker_cfg = tp_worker.model_runner.model_config.hf_config.thinker_config
         self._image_token_id = thinker_cfg.image_token_id
@@ -293,6 +295,33 @@ class ThinkerModelRunner(ModelRunner):
         return GenerationBatchResult(
             logits_output=logits_output, can_run_cuda_graph=False
         )
+
+    def _count_prefill_graph_outcome(self, output: Any, forward_batch: Any) -> None:
+        if not forward_batch.forward_mode.is_extend():
+            return
+        first_fallback = False
+        if output.can_run_cuda_graph:
+            self._prefill_graph_replay_count += 1
+        else:
+            first_fallback = self._prefill_graph_fallback_count == 0
+            self._prefill_graph_fallback_count += 1
+        total = self._prefill_graph_replay_count + self._prefill_graph_fallback_count
+        if first_fallback or total % 100 == 0:
+            logger.info(
+                "prefill_graph_counters tp_rank=%d replay=%d fallback=%d",
+                self.tp_worker.tp_rank,
+                self._prefill_graph_replay_count,
+                self._prefill_graph_fallback_count,
+            )
+
+    def _finalize(
+        self, batch_result, forward_batch, schedule_batch, scheduler_output, skip_rids=None
+    ):
+        output = super()._finalize(
+            batch_result, forward_batch, schedule_batch, scheduler_output, skip_rids
+        )
+        self._count_prefill_graph_outcome(output, forward_batch)
+        return output
 
     def lookahead_eligible(self, batch: Any) -> bool:
         """Route to sync where the one-step lag would diverge from sync. A request
