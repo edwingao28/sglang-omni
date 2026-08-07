@@ -382,6 +382,59 @@ def test_cuda_graph_cli_override_reaches_resolved_sglang_args():
     assert talker_args["server_args_overrides"]["disable_cuda_graph"] is False
 
 
+def test_thinker_prefill_cuda_graph_on_applies_stage_override():
+    config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
+
+    apply_cuda_graph_cli_overrides(
+        config,
+        thinker_cuda_graph="default",
+        talker_cuda_graph="default",
+        thinker_prefill_cuda_graph="on",
+    )
+
+    thinker = next(stage for stage in config.stages if stage.name == "thinker")
+    thinker_args = resolve_stage_factory_args(thinker, config)
+
+    assert (
+        thinker_args["server_args_overrides"]["cuda_graph_backend_prefill"]
+        == "breakable"
+    )
+    assert thinker_args["server_args_overrides"]["cuda_graph_max_bs_prefill"] == 256
+
+
+def test_thinker_prefill_cuda_graph_defaults_off():
+    config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
+
+    apply_cuda_graph_cli_overrides(
+        config,
+        thinker_cuda_graph="default",
+        talker_cuda_graph="default",
+    )
+
+    thinker = next(stage for stage in config.stages if stage.name == "thinker")
+    thinker_args = resolve_stage_factory_args(thinker, config)
+
+    assert "cuda_graph_backend_prefill" not in thinker_args.get(
+        "server_args_overrides", {}
+    )
+
+
+def test_thinker_cuda_graph_off_beats_prefill_opt_in():
+    config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
+
+    apply_cuda_graph_cli_overrides(
+        config,
+        thinker_cuda_graph="off",
+        talker_cuda_graph="default",
+        thinker_prefill_cuda_graph="on",
+    )
+
+    thinker = next(stage for stage in config.stages if stage.name == "thinker")
+    thinker_args = resolve_stage_factory_args(thinker, config)
+
+    assert "cuda_graph_backend_prefill" not in thinker_args["server_args_overrides"]
+
+
 def test_torch_compile_cli_override_reaches_resolved_sglang_args():
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
 

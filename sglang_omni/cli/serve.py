@@ -721,6 +721,27 @@ def _apply_stage_cuda_graph_override(
     )
 
 
+def _apply_stage_prefill_cuda_graph_override(
+    pipeline_config: PipelineConfig,
+    *,
+    stage_name: str,
+    mode: _STAGE_TOGGLE_MODE,
+    thinker_cuda_graph_mode: _STAGE_TOGGLE_MODE,
+) -> None:
+    # Note (wenyao): legacy --thinker-cuda-graph=off must win over this opt-in.
+    if mode != "on" or thinker_cuda_graph_mode == "off":
+        return
+
+    from sglang_omni.models.qwen3_omni.stages import _thinker_prefill_graph_overrides
+
+    _apply_stage_server_args_override(
+        pipeline_config,
+        stage_name=stage_name,
+        updates=_thinker_prefill_graph_overrides(enabled=True),
+        reason="thinker prefill CUDA graph opt-in",
+    )
+
+
 def _apply_stage_torch_compile_override(
     pipeline_config: PipelineConfig,
     *,
@@ -752,15 +773,25 @@ def apply_cuda_graph_cli_overrides(
     *,
     thinker_cuda_graph: str,
     talker_cuda_graph: str,
+    thinker_prefill_cuda_graph: str = "off",
 ) -> PipelineConfig:
     thinker_mode = _normalize_stage_toggle_mode(
         "thinker_cuda_graph", thinker_cuda_graph
     )
     talker_mode = _normalize_stage_toggle_mode("talker_cuda_graph", talker_cuda_graph)
+    thinker_prefill_mode = _normalize_stage_toggle_mode(
+        "thinker_prefill_cuda_graph", thinker_prefill_cuda_graph
+    )
     _apply_stage_cuda_graph_override(
         pipeline_config,
         stage_name="thinker",
         mode=thinker_mode,
+    )
+    _apply_stage_prefill_cuda_graph_override(
+        pipeline_config,
+        stage_name="thinker",
+        mode=thinker_prefill_mode,
+        thinker_cuda_graph_mode=thinker_mode,
     )
     if talker_mode != "default":
         _apply_stage_cuda_graph_override(
@@ -1116,6 +1147,17 @@ def serve(
             help="CUDA graph mode for supported SGLang talker stage: default|on|off.",
         ),
     ] = "default",
+    thinker_prefill_cuda_graph: Annotated[
+        str,
+        typer.Option(
+            "--thinker-prefill-cuda-graph",
+            "--thinker_prefill_cuda_graph",
+            help=(
+                "Opt in to a breakable CUDA graph for thinker prefill: on|off. "
+                "Ignored (stays off) when --thinker-cuda-graph=off."
+            ),
+        ),
+    ] = "off",
     talker_partial_start: Annotated[
         str,
         typer.Option(
@@ -1315,6 +1357,7 @@ def serve(
         merged_config,
         thinker_cuda_graph=thinker_cuda_graph,
         talker_cuda_graph=talker_cuda_graph,
+        thinker_prefill_cuda_graph=thinker_prefill_cuda_graph,
     )
     merged_config = apply_torch_compile_cli_overrides(
         merged_config,
