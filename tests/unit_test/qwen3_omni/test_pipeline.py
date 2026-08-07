@@ -693,6 +693,39 @@ def test_thinker_prefill_graph_opt_in_inert_when_cuda_graph_disabled() -> None:
     assert server_args.cuda_graph_max_bs_prefill is None
 
 
+class _StopAfterOverrides(Exception):
+    pass
+
+
+def test_qwen_thinker_factory_threads_disable_cuda_graph_into_prefill_graph_override(
+    monkeypatch,
+) -> None:
+    """The factory's server_args_overrides={'disable_cuda_graph': True} must
+    reach _thinker_prefill_graph_overrides, not just the top-level
+    disable_cuda_graph=False stage default it sits alongside."""
+    captured: dict[str, object] = {}
+
+    def fake_build_generation_batch_overrides(**kwargs):
+        captured["kwargs"] = kwargs
+        raise _StopAfterOverrides
+
+    monkeypatch.setattr(
+        qwen_stages,
+        "build_generation_batch_overrides",
+        fake_build_generation_batch_overrides,
+    )
+
+    with pytest.raises(_StopAfterOverrides):
+        qwen_stages.create_sglang_thinker_executor_from_config(
+            "dummy",
+            prefill_cuda_graph=True,
+            server_args_overrides={"disable_cuda_graph": True},
+        )
+
+    assert "cuda_graph_backend_prefill" not in captured["kwargs"]
+    assert "cuda_graph_max_bs_prefill" not in captured["kwargs"]
+
+
 def test_qwen_encoder_mem_reserve_applies_only_to_valid_auto_values() -> None:
     server_args = FakeServerArgs(mem_fraction_static=0.929)
 

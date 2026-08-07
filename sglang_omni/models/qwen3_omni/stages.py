@@ -986,7 +986,12 @@ def create_sglang_thinker_executor_from_config(
         enable_mixed_chunk=True,
         chunked_prefill_size=8192,
         sampling_backend="pytorch",
-        **_thinker_prefill_graph_overrides(enabled=prefill_cuda_graph),
+        **_thinker_prefill_graph_overrides(
+            enabled=prefill_cuda_graph,
+            disable_cuda_graph=bool(
+                (server_args_overrides or {}).get("disable_cuda_graph", False)
+            ),
+        ),
     )
     overrides["tp_size"] = tp_size
     has_explicit_colocated_mem_fraction = (
