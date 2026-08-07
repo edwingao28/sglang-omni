@@ -33,7 +33,10 @@ class StaticAuxHiddenCapture:
         self.buffers = tuple(buffers)
         self.max_tokens = max_tokens
         # Note (wenyao): rows the last forward actually wrote; graph replay may
-        # write padded rows, so this is an upper bound on readable rows.
+        # write padded rows, so this is an upper bound on readable rows. The hook
+        # below only maintains it on eager forwards — replay reruns the recorded
+        # copy_ without the Python closure — so the model runner reassigns it from
+        # host code on every forward before any reader calls views().
         self.rows_written = 0
         self._hook_handles = tuple(hook_handles)
 

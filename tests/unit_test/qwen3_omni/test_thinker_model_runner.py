@@ -245,3 +245,82 @@ def test_custom_omni_forward_publishes_sglang_forward_context():
     )
 
     assert result.logits_output == "logits"
+
+
+def _replay_probe_runner(monkeypatch, super_finalize, *, stale_rows: int = 1):
+    """Runner with a capture owner whose hooks did not re-run (graph replay)."""
+    from sglang_omni.model_runner._hidden_capture import StaticAuxHiddenCapture
+
+    capture = StaticAuxHiddenCapture(
+        buffers=[torch.zeros(64, 3)], hook_handles=[], max_tokens=64
+    )
+    capture.rows_written = stale_rows
+    runner = object.__new__(ThinkerModelRunner)
+    runner.model = SimpleNamespace(_omni_aux_hidden_capture=capture)
+    runner.tp_worker = SimpleNamespace(tp_rank=0)
+    runner._prefill_graph_replay_count = 0
+    runner._prefill_graph_fallback_count = 0
+    monkeypatch.setattr(ModelRunner, "_finalize", super_finalize)
+    return runner, capture
+
+
+def _fb(*, extend: bool, rows: int):
+    return SimpleNamespace(
+        forward_mode=SimpleNamespace(is_extend=lambda: extend),
+        input_ids=torch.zeros(rows, dtype=torch.long),
+    )
+
+
+def test_finalize_refreshes_rows_written_before_super(monkeypatch) -> None:
+    seen: list[int] = []
+
+    def super_finalize(
+        self, batch_result, forward_batch, schedule_batch, so, skip=None
+    ):
+        # views() is consumed inside super()._finalize via the output processor.
+        seen.append(self.model._omni_aux_hidden_capture.views(40)[0].shape[0])
+        return "out"
+
+    runner, capture = _replay_probe_runner(monkeypatch, super_finalize)
+    result = runner._finalize(
+        SimpleNamespace(can_run_cuda_graph=True), _fb(extend=True, rows=40), None, None
+    )
+
+    assert result == "out"
+    assert seen == [40]
+    assert capture.rows_written == 40
+
+
+def test_finalize_refreshes_rows_written_for_decode(monkeypatch) -> None:
+    runner, capture = _replay_probe_runner(
+        monkeypatch, lambda *a, **k: "out", stale_rows=64
+    )
+    runner._finalize(
+        SimpleNamespace(can_run_cuda_graph=True), _fb(extend=False, rows=8), None, None
+    )
+
+    assert capture.rows_written == 8
+
+
+def test_finalize_counts_outcome_when_super_raises(monkeypatch, caplog) -> None:
+    def super_finalize(self, *args, **kwargs):
+        raise RuntimeError("boom")
+
+    runner, _ = _replay_probe_runner(monkeypatch, super_finalize)
+    with caplog.at_level(logging.INFO):
+        for _ in range(2):
+            try:
+                runner._finalize(
+                    SimpleNamespace(can_run_cuda_graph=False),
+                    _fb(extend=True, rows=40),
+                    None,
+                    None,
+                )
+            except RuntimeError:
+                pass
+
+    assert runner._prefill_graph_fallback_count == 2
+    assert any(
+        "prefill_graph_counters tp_rank=0 replay=0 fallback=1" in r.message
+        for r in caplog.records
+    )

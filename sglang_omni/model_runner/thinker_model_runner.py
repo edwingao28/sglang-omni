@@ -319,11 +319,23 @@ class ThinkerModelRunner(ModelRunner):
             logits_output=logits_output, can_run_cuda_graph=False
         )
 
-    def _count_prefill_graph_outcome(self, output: Any, forward_batch: Any) -> None:
+    def _refresh_capture_rows(self, forward_batch: Any) -> None:
+        # Note (wenyao): the capture hooks are inside the CUDA graph, so replay
+        # refreshes the buffers without re-running their Python bookkeeping. Reset
+        # the row count from host code that runs on every forward instead.
+        capture = getattr(self.model, "_omni_aux_hidden_capture", None)
+        if capture is None:
+            return
+        input_ids = getattr(forward_batch, "input_ids", None)
+        if input_ids is None:
+            return
+        capture.rows_written = int(input_ids.shape[0])
+
+    def _count_prefill_graph_outcome(self, result: Any, forward_batch: Any) -> None:
         if not forward_batch.forward_mode.is_extend():
             return
         first_fallback = False
-        if output.can_run_cuda_graph:
+        if result.can_run_cuda_graph:
             self._prefill_graph_replay_count += 1
         else:
             first_fallback = self._prefill_graph_fallback_count == 0
@@ -338,13 +350,20 @@ class ThinkerModelRunner(ModelRunner):
             )
 
     def _finalize(
-        self, batch_result, forward_batch, schedule_batch, scheduler_output, skip_rids=None
+        self,
+        batch_result,
+        forward_batch,
+        schedule_batch,
+        scheduler_output,
+        skip_rids=None,
     ):
-        output = super()._finalize(
+        # Both run before super(), which consumes views() through the output
+        # processor and may raise; the outcome must still be counted.
+        self._refresh_capture_rows(forward_batch)
+        self._count_prefill_graph_outcome(batch_result, forward_batch)
+        return super()._finalize(
             batch_result, forward_batch, schedule_batch, scheduler_output, skip_rids
         )
-        self._count_prefill_graph_outcome(output, forward_batch)
-        return output
 
     def lookahead_eligible(self, batch: Any) -> bool:
         """Route to sync where the one-step lag would diverge from sync. A request
