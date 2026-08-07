@@ -90,18 +90,6 @@ class SGLangOutputProcessor:
                     request_indexes=request_indexes,
                 )
 
-            captured_aux_hidden_states = getattr(
-                self._model, "_captured_aux_hidden_states", None
-            )
-            if captured_aux_hidden_states is not None:
-                self._model._captured_aux_hidden_states = None
-                return self._build_aux_hidden_extras(
-                    captured_aux_hidden_states,
-                    model_output=model_output,
-                    scheduler_output=scheduler_output,
-                    request_indexes=request_indexes,
-                )
-
         if not request_indexes:
             return {}
 

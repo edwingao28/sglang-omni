@@ -80,7 +80,6 @@ def test_static_capture_records_exact_layer_inputs_in_registered_buffers() -> No
     torch.testing.assert_close(views[1], layer1_hidden + layer1_residual)
     assert [buffer.data_ptr() for buffer in capture.buffers] == first_pointers
     assert text_model.layers_to_capture == []
-    assert not hasattr(model, "_captured_aux_hidden_states")
     assert not any("omni_aux_hidden" in key for key in text_model.state_dict())
 
 
@@ -110,3 +109,28 @@ def test_static_capture_rejects_rows_beyond_capacity() -> None:
 
     with pytest.raises(RuntimeError, match="3 rows.*capacity is 2"):
         capture.views(3)
+
+
+def test_static_capture_rejects_views_beyond_rows_written() -> None:
+    model, text_model = _top_level_model()
+    install_hidden_capture_hooks(model, [0], max_tokens=8)
+    capture = model._omni_aux_hidden_capture
+
+    with pytest.raises(RuntimeError, match="asked for 1 rows.*wrote only 0"):
+        capture.views(1)
+
+    _run_layer(text_model.layers[0], torch.ones(2, 3), None)
+
+    assert capture.rows_written == 2
+    torch.testing.assert_close(capture.views(1)[0], torch.ones(1, 3))
+    torch.testing.assert_close(capture.views(2)[0], torch.ones(2, 3))
+    with pytest.raises(RuntimeError, match="asked for 3 rows.*wrote only 2"):
+        capture.views(3)
+
+
+def test_static_capture_rejects_layer_input_dtype_mismatch() -> None:
+    model, text_model = _top_level_model()
+    install_hidden_capture_hooks(model, [0], max_tokens=4)
+
+    with pytest.raises(RuntimeError, match="expected torch.float32 layer input"):
+        _run_layer(text_model.layers[0], torch.ones(2, 3, dtype=torch.float64), None)
