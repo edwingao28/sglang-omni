@@ -17,8 +17,8 @@ from sglang_omni.model_runner.sglang_execution import attn_forward_context
 
 logger = logging.getLogger(__name__)
 
-# The only keys injection reads payload from; a request builder always leaves a
-# non-None omni_model_inputs, so presence of these decides text-only vs multimodal.
+# Note (wenyao): injection reads no other omni_model_inputs key that can write
+# embeds, so presence of these alone decides text-only vs multimodal.
 _MULTIMODAL_EMBED_KEYS = (
     "image_embeds",
     "video_embeds",
@@ -103,9 +103,9 @@ class ThinkerModelRunner(ModelRunner):
     def _inject_multimodal_embeds(
         self, forward_batch: Any, schedule_batch: Any
     ) -> tuple[torch.Tensor | None, list | None, torch.Tensor | None] | None:
-        # Text-only batches would get a plain embedding lookup here, which the
-        # outer thinker performs anyway; publishing input_embeds for them only
-        # disqualifies the batch from SGLang's prefill CUDA graph.
+        # Note (wenyao): text-only batches would get a plain embedding lookup
+        # here, which the outer thinker performs anyway; publishing input_embeds
+        # for them only disqualifies the batch from SGLang's prefill CUDA graph.
         if not any(
             _has_multimodal_payload(req.omni_model_inputs)
             for req in schedule_batch.reqs
@@ -357,8 +357,8 @@ class ThinkerModelRunner(ModelRunner):
         scheduler_output,
         skip_rids=None,
     ):
-        # Both run before super(), which consumes views() through the output
-        # processor and may raise; the outcome must still be counted.
+        # Note (wenyao): super() consumes views() and may raise; refresh and
+        # count must both happen first.
         self._refresh_capture_rows(forward_batch)
         self._count_prefill_graph_outcome(batch_result, forward_batch)
         return super()._finalize(

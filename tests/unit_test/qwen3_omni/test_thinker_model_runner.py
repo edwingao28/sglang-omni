@@ -106,8 +106,7 @@ def _injection_runner(embed_dim: int = 4) -> ThinkerModelRunner:
 
 
 def _text_only_batch(input_ids):
-    # Shape produced by request_builders for a pure-text request: the fallback
-    # copies the whole thinker_inputs dict, whose model_inputs is empty.
+    # Note (wenyao): mirrors request_builders' fallback shape for pure text.
     req = SimpleNamespace(
         omni_model_inputs={"model_inputs": {}},
         _omni_consumed=None,
@@ -277,7 +276,6 @@ def test_finalize_refreshes_rows_written_before_super(monkeypatch) -> None:
     def super_finalize(
         self, batch_result, forward_batch, schedule_batch, so, skip=None
     ):
-        # views() is consumed inside super()._finalize via the output processor.
         seen.append(self.model._omni_aux_hidden_capture.views(40)[0].shape[0])
         return "out"
 

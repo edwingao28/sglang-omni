@@ -225,7 +225,7 @@ def test_create_sglang_infrastructure_runs_0515_initialization_phases(
             1024,
         ),
         (
-            # G1: an explicit prefill bucket list is not clamped by max_bs.
+            # Note (wenyao): sglang does not clamp an explicit bucket list by max_bs.
             SimpleNamespace(
                 chunked_prefill_size=128,
                 max_prefill_tokens=16384,

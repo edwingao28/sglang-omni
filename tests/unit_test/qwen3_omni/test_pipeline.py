@@ -661,10 +661,8 @@ def test_qwen_builder_forwards_explicit_mem_fraction_static() -> None:
 
 
 def test_thinker_prefill_graph_opt_in_resolves_breakable_bounded() -> None:
-    # "dummy" model_path short-circuits ServerArgs.__post_init__ (no HF
-    # config fetch), so assert on the raw fields the helper feeds in rather
-    # than the phase-resolved cuda_graph_config (which only __post_init__
-    # populates).
+    # Note (wenyao): "dummy" model_path short-circuits ServerArgs.__post_init__,
+    # so only the raw fields exist to assert on, not resolved cuda_graph_config.
     overrides = qwen_stages._thinker_prefill_graph_overrides(enabled=True)
     server_args = build_sglang_server_args(
         "dummy", context_length=8192, **overrides
