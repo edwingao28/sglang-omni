@@ -50,6 +50,8 @@ tests/
     │   └── test_shm_relay.py
     ├── models/
     │   └── test_model_capabilities.py
+    ├── model_runner/
+    │   └── test_hidden_capture.py
     ├── qwen3_omni/
     │   ├── test_cli.py
     │   ├── test_code2wav.py
@@ -62,6 +64,7 @@ tests/
     │   ├── test_logit_shaping.py
     │   ├── test_pipeline.py
     │   ├── test_sglang_ar_budget.py
+    │   ├── test_sglang_thinker.py
     │   ├── test_streaming.py
     │   ├── test_talker.py
     │   ├── test_talker_emit_snapshot.py
@@ -369,6 +372,10 @@ that happened to contain an older version of the test.
 - `unit_test/utils/`: Shared utility tests:
   - audio loading helpers for data URIs, file URIs, HTTP URLs, timeout fallback,
     and mono/channel preservation.
+- `unit_test/model_runner/`: Shared model-runner contract tests:
+  - graph-safe hidden-state capture: stable registered buffers refreshed by
+    decoder-layer pre-hooks, capacity and row-count validation, and buffer
+    address stability across forwards.
 - `unit_test/models/`: Model registry and cross-model contract tests:
   - static TTS `ModelCapabilities` declarations, registry lookup, aliases, and
     launcher startup logging.
@@ -413,6 +420,9 @@ that happened to contain an older version of the test.
 - `unit_test/qwen3_omni/` Qwen3-Omni unit tests:
 
   - public CLI/config behavior
+  - thinker outer-forward embedding contract (outer model materializes text
+    embeddings, inner model receives `input_ids=None`, multimodal embeds pass
+    through by identity, non-first PP ranks skip the lookup)
   - example launcher config contract (TP/GPU/mem-fraction overrides)
   - SGLang argument builders
   - backend policy and quantization compatibility contracts
