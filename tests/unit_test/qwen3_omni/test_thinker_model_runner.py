@@ -86,6 +86,99 @@ def test_visual_deepstack_prefill_keeps_model_specific_forward() -> None:
     ]
 
 
+class _FakeEmbedding:
+    def __init__(self, weight):
+        self.weight = weight
+        self.num_embeddings = weight.shape[0]
+
+    def __call__(self, ids):
+        return self.weight[ids]
+
+
+def _injection_runner(embed_dim: int = 4) -> ThinkerModelRunner:
+    runner = object.__new__(ThinkerModelRunner)
+    weight = torch.arange(10 * embed_dim, dtype=torch.float32).reshape(10, embed_dim)
+    runner._embed_tokens = _FakeEmbedding(weight)
+    runner._image_token_id = 7
+    runner._video_token_id = 8
+    runner._audio_token_id = 9
+    return runner
+
+
+def _text_only_batch(input_ids):
+    # Shape produced by request_builders for a pure-text request: the fallback
+    # copies the whole thinker_inputs dict, whose model_inputs is empty.
+    req = SimpleNamespace(
+        omni_model_inputs={"model_inputs": {}},
+        _omni_consumed=None,
+        inflight_middle_chunks=0,
+    )
+    forward_batch = SimpleNamespace(
+        input_ids=input_ids,
+        input_embeds=None,
+        extend_seq_lens_cpu=[len(input_ids)],
+        forward_mode=SimpleNamespace(is_extend=lambda: True),
+    )
+    schedule_batch = SimpleNamespace(
+        reqs=[req], forward_mode=forward_batch.forward_mode
+    )
+    return forward_batch, schedule_batch, req
+
+
+def test_text_only_prefill_skips_injection() -> None:
+    runner = _injection_runner()
+    forward_batch, schedule_batch, _req = _text_only_batch(torch.tensor([1, 2, 3]))
+
+    assert runner._inject_multimodal_embeds(forward_batch, schedule_batch) is None
+
+    result = runner.custom_prefill_forward(forward_batch, schedule_batch, [])
+
+    assert result is None
+    assert forward_batch.input_embeds is None
+
+
+def test_multimodal_prefill_still_injects() -> None:
+    runner = _injection_runner()
+    input_ids = torch.tensor([1, 9, 9, 2])
+    audio_embeds = torch.full((2, 4), -1.0)
+    req = SimpleNamespace(
+        omni_model_inputs={"audio_embeds": audio_embeds},
+        _omni_consumed=None,
+        inflight_middle_chunks=0,
+    )
+    forward_batch = SimpleNamespace(
+        input_ids=input_ids,
+        input_embeds=None,
+        extend_seq_lens_cpu=[4],
+        forward_mode=SimpleNamespace(is_extend=lambda: True),
+    )
+    schedule_batch = SimpleNamespace(
+        reqs=[req], forward_mode=forward_batch.forward_mode
+    )
+
+    result = runner.custom_prefill_forward(forward_batch, schedule_batch, [])
+
+    assert result is None
+    assert forward_batch.input_embeds is not None
+    assert torch.equal(forward_batch.input_embeds[1:3], audio_embeds)
+
+
+def test_text_only_skip_matches_injected_embeddings() -> None:
+    """The skipped path must be the same lookup the outer thinker performs."""
+    runner = _injection_runner()
+    input_ids = torch.tensor([1, 2, 3])
+    forward_batch, schedule_batch, req = _text_only_batch(input_ids)
+
+    assert runner._inject_multimodal_embeds(forward_batch, schedule_batch) is None
+
+    req.omni_model_inputs = {"audio_embeds": torch.empty(0, 4)}
+    injected, _ds, _masks = runner._inject_multimodal_embeds(
+        forward_batch, schedule_batch
+    )
+
+    assert torch.equal(injected, runner._embed_tokens(input_ids))
+
+
 def _probe_runner_with_counters(tp_rank: int) -> ThinkerModelRunner:
     runner = object.__new__(ThinkerModelRunner)
     runner._prefill_graph_replay_count = 0

@@ -17,6 +17,23 @@ from sglang_omni.model_runner.sglang_execution import attn_forward_context
 
 logger = logging.getLogger(__name__)
 
+# The only keys injection reads payload from; a request builder always leaves a
+# non-None omni_model_inputs, so presence of these decides text-only vs multimodal.
+_MULTIMODAL_EMBED_KEYS = (
+    "image_embeds",
+    "video_embeds",
+    "audio_embeds",
+    "deepstack_visual_embeds",
+    "image_deepstack_visual_embeds",
+    "video_deepstack_visual_embeds",
+)
+
+
+def _has_multimodal_payload(omni_inputs: dict | None) -> bool:
+    if not omni_inputs:
+        return False
+    return any(omni_inputs.get(key) is not None for key in _MULTIMODAL_EMBED_KEYS)
+
 
 class ThinkerModelRunner(ModelRunner):
     """Thinker: injects multimodal embeddings in the prefill phase."""
@@ -86,7 +103,13 @@ class ThinkerModelRunner(ModelRunner):
     def _inject_multimodal_embeds(
         self, forward_batch: Any, schedule_batch: Any
     ) -> tuple[torch.Tensor | None, list | None, torch.Tensor | None] | None:
-        if not any(req.omni_model_inputs is not None for req in schedule_batch.reqs):
+        # Text-only batches would get a plain embedding lookup here, which the
+        # outer thinker performs anyway; publishing input_embeds for them only
+        # disqualifies the batch from SGLang's prefill CUDA graph.
+        if not any(
+            _has_multimodal_payload(req.omni_model_inputs)
+            for req in schedule_batch.reqs
+        ):
             return None
 
         device = forward_batch.input_ids.device
