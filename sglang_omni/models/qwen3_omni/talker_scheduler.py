@@ -8,6 +8,8 @@ import os
 from collections import deque
 from typing import Any
 
+import torch
+
 from sglang.srt.managers import scheduler as _upstream_scheduler
 from sglang.srt.managers.scheduler import Scheduler as _Upstream
 
@@ -205,7 +207,18 @@ class QwenTalkerScheduler(OmniScheduler):
         batch.seq_lens_cpu.sub_(1)
         batch.orig_seq_lens.sub_(1)
         batch.seq_lens_sum -= len(batch.reqs)
-        batch.req_to_token_pool.req_to_token[batch.req_pool_indices, batch.seq_lens] = 0
+        req_to_token = batch.req_to_token_pool.req_to_token
+        zero = getattr(self, "_rollback_zero", None)
+        if (
+            zero is None
+            or zero.dtype != req_to_token.dtype
+            or zero.device != req_to_token.device
+        ):
+            # Note (wenyao): a Python-scalar store wraps host-side and blocks on the
+            # in-flight overlapped step; a cached device scalar keeps it async.
+            zero = torch.zeros((), dtype=req_to_token.dtype, device=req_to_token.device)
+            self._rollback_zero = zero
+        req_to_token.index_put_((batch.req_pool_indices, batch.seq_lens), zero)
 
     def self_check_during_idle(self) -> None:
         if self.running_batch is not None and not self.running_batch.is_empty():
