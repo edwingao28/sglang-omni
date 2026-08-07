@@ -91,12 +91,9 @@ def install_hidden_capture_hooks(
 ) -> None:
     """Capture decoder-layer inputs into stable, non-persistent buffers.
 
-    Args:
-        model: Top-level SGLang model (e.g. Qwen3OmniMoeForConditionalGeneration)
-        capture_layers: Layer indices to capture (e.g. [0, 24]).
-            Layer 0 captures embed output (input to first transformer layer).
-            Layer N captures input to layer N (= output of layer N-1).
-        max_tokens: Maximum token rows in one eager or graph-backed forward.
+    Layer 0 captures the embedding output (input to the first decoder layer);
+    layer N captures the input to layer N (= output of layer N-1). max_tokens
+    bounds the token rows of one eager or graph-backed forward.
     """
     if max_tokens <= 0:
         raise ValueError(f"max_tokens must be positive, got {max_tokens}")
