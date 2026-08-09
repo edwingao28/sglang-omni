@@ -111,21 +111,21 @@ def test_static_capture_rejects_rows_beyond_capacity() -> None:
         capture.views(3)
 
 
-def test_static_capture_rejects_views_beyond_rows_written() -> None:
+def test_static_capture_views_rows_refreshed_by_graph_replay() -> None:
     model, text_model = _top_level_model()
-    install_hidden_capture_hooks(model, [0], max_tokens=8)
+    install_hidden_capture_hooks(model, [0], max_tokens=4)
     capture = model._omni_aux_hidden_capture
 
-    with pytest.raises(RuntimeError, match="asked for 1 rows.*wrote only 0"):
-        capture.views(1)
+    # Graph buckets are captured largest-to-smallest, so the final Python hook
+    # invocation may be for fewer rows than a later replay.
+    _run_layer(text_model.layers[0], torch.zeros(1, 3), None)
+    replayed = torch.arange(9, dtype=torch.float32).reshape(3, 3)
 
-    _run_layer(text_model.layers[0], torch.ones(2, 3), None)
+    # CUDA graph replay executes the captured device copy without rerunning the
+    # Python hook.
+    capture.buffers[0][:3].copy_(replayed)
 
-    assert capture.rows_written == 2
-    torch.testing.assert_close(capture.views(1)[0], torch.ones(1, 3))
-    torch.testing.assert_close(capture.views(2)[0], torch.ones(2, 3))
-    with pytest.raises(RuntimeError, match="asked for 3 rows.*wrote only 2"):
-        capture.views(3)
+    torch.testing.assert_close(capture.views(3)[0], replayed)
 
 
 def test_static_capture_rejects_layer_input_dtype_mismatch() -> None:

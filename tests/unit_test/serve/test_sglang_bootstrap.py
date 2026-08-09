@@ -215,6 +215,18 @@ def test_hidden_capture_max_tokens_covers_eager_and_graph_forwards(
     assert bootstrap._hidden_capture_max_tokens(server_args) == expected
 
 
+def test_hidden_capture_max_tokens_covers_non_chunked_context_length() -> None:
+    server_args = SimpleNamespace(
+        chunked_prefill_size=-1,
+        max_prefill_tokens=8192,
+        context_length=32768,
+        max_running_requests=64,
+        cuda_graph_config=None,
+    )
+
+    assert bootstrap._hidden_capture_max_tokens(server_args) == 32768
+
+
 def test_hidden_capture_max_tokens_rejects_missing_capacity_sources() -> None:
     server_args = SimpleNamespace(
         chunked_prefill_size=-1,

@@ -73,6 +73,9 @@ def _hidden_capture_max_tokens(server_args: Any) -> int:
         candidates.append(chunked_prefill_size)
     else:
         candidates.append(getattr(server_args, "max_prefill_tokens", None))
+        # Without chunking, SGLang always admits the first prefill request even
+        # when it exceeds the batch token budget, up to the model context bound.
+        candidates.append(getattr(server_args, "context_length", None))
     candidates.append(getattr(server_args, "max_running_requests", None))
 
     cuda_graph_config = getattr(server_args, "cuda_graph_config", None)
@@ -86,8 +89,8 @@ def _hidden_capture_max_tokens(server_args: Any) -> int:
     if not positive:
         raise ValueError(
             "Cannot derive hidden capture capacity: none of chunked_prefill_size, "
-            "max_prefill_tokens, max_running_requests, or the CUDA graph batch "
-            "maxima is positive"
+            "max_prefill_tokens, context_length, max_running_requests, or the "
+            "CUDA graph batch maxima is positive"
         )
     return max(positive)
 

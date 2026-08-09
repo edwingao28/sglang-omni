@@ -332,6 +332,44 @@ def test_qwen_static_aux_hidden_decode_slices_only_request_rows():
     torch.testing.assert_close(audio_hidden[24], static_layer[1])
 
 
+def test_qwen_static_aux_hidden_skips_capture_for_text_only_decode():
+    class _UnexpectedCaptureRead:
+        def __init__(self) -> None:
+            self.views_calls = 0
+
+        def views(self, _num_rows: int) -> None:
+            self.views_calls += 1
+            raise AssertionError("text-only decode must not read hidden capture")
+
+    capture = _UnexpectedCaptureRead()
+    output_processor = SGLangOutputProcessor(
+        capture_hidden=True,
+        capture_hidden_layers=[0, 24],
+        model=SimpleNamespace(_omni_aux_hidden_capture=capture),
+        should_emit_hidden=lambda _request: False,
+    )
+    scheduler_output = SchedulerOutput(
+        requests=[
+            SchedulerRequest(request_id="text-1"),
+            SchedulerRequest(request_id="text-2"),
+        ],
+        batch_data=SimpleNamespace(
+            forward_mode=SimpleNamespace(is_extend=lambda: False),
+            reqs=[SimpleNamespace(), SimpleNamespace()],
+        ),
+    )
+    model_output = SimpleNamespace(
+        next_token_ids=torch.tensor([11, 22]),
+        logits_output=None,
+    )
+
+    outputs = output_processor.process(model_output, scheduler_output)
+
+    assert capture.views_calls == 0
+    assert outputs["text-1"].extra is None
+    assert outputs["text-2"].extra is None
+
+
 def test_utf8_multibyte_hold_then_emit():
     """A 3-byte CJK char split across 3 tokens must hold until complete."""
     # "你" is U+4F60 → b'\xe4\xbd\xa0'. Split byte-per-token.

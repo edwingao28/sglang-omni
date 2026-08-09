@@ -30,24 +30,16 @@ class StaticAuxHiddenCapture:
     ) -> None:
         self.buffers = tuple(buffers)
         self.max_tokens = max_tokens
-        # Note (wenyao): rows the last forward actually wrote; graph replay may
-        # write padded rows, so this is an upper bound on readable rows.
-        self.rows_written = 0
         self._hook_handles = tuple(hook_handles)
 
     def views(self, num_rows: int) -> list[torch.Tensor]:
+        # The caller owns forward freshness: graph replay refreshes these
+        # buffers without executing Python-side row bookkeeping.
         _check_rows(num_rows, self.max_tokens)
-        if num_rows > self.rows_written:
-            raise RuntimeError(
-                f"Static aux hidden capture asked for {num_rows} rows but the "
-                f"last forward wrote only {self.rows_written}"
-            )
         return [buffer[:num_rows] for buffer in self.buffers]
 
 
-def _layer_input_capture_hook(
-    owner: StaticAuxHiddenCapture, buffer: torch.Tensor, max_tokens: int
-):
+def _layer_input_capture_hook(buffer: torch.Tensor, max_tokens: int):
     buffer_dtype = buffer.dtype
 
     def _capture(
@@ -78,7 +70,6 @@ def _layer_input_capture_hook(
                 f"but got {layer_input.dtype}"
             )
         buffer[:num_rows].copy_(layer_input)
-        owner.rows_written = num_rows
 
     return _capture
 
@@ -151,7 +142,7 @@ def install_hidden_capture_hooks(
     for layer_id, buffer in zip(capture_layers, buffers):
         hook_handles.append(
             text_model.layers[layer_id].register_forward_pre_hook(
-                _layer_input_capture_hook(capture, buffer, max_tokens),
+                _layer_input_capture_hook(buffer, max_tokens),
                 with_kwargs=True,
             )
         )

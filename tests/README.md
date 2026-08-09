@@ -376,8 +376,8 @@ that happened to contain an older version of the test.
     and mono/channel preservation.
 - `unit_test/model_runner/`: Shared model-runner contract tests:
   - graph-safe hidden-state capture: stable registered buffers refreshed by
-    decoder-layer pre-hooks, capacity and row-count validation, and buffer
-    address stability across forwards.
+    decoder-layer pre-hooks, capacity validation, graph-replay row reads, and
+    buffer address stability across forwards.
 - `unit_test/models/`: Model registry and cross-model contract tests:
   - static TTS `ModelCapabilities` declarations, registry lookup, aliases, and
     launcher startup logging.

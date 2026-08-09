@@ -78,6 +78,8 @@ class SGLangOutputProcessor:
             for i, should_emit in enumerate(should_emit_hidden_by_request)
             if should_emit
         ]
+        if not request_indexes:
+            return {}
 
         if self._model is not None and self._capture_hidden_layers:
             static_capture = getattr(self._model, "_omni_aux_hidden_capture", None)
@@ -89,9 +91,6 @@ class SGLangOutputProcessor:
                     scheduler_output=scheduler_output,
                     request_indexes=request_indexes,
                 )
-
-        if not request_indexes:
-            return {}
 
         logits_output = model_output.logits_output
         if logits_output is None:
