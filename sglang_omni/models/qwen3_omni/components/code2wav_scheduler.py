@@ -198,15 +198,29 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         self, request_id: str, state: Code2WavStreamState, codes: torch.Tensor
     ) -> torch.Tensor:
         del request_id, state
+        assert codes.ndim in (1, 2), f"expected 1-D or 2-D codes, got {codes.ndim}-D"
         return codes.to(device=self._device, dtype=torch.long)
 
     def ingest(
         self, request_id: str, state: Code2WavStreamState, codes: torch.Tensor
     ) -> None:
         del request_id
-        if codes.ndim >= 1 and codes[0].item() == self._codec_eos_token_id:
+        if codes.ndim != 2:
+            if codes.ndim >= 1 and codes[0].item() == self._codec_eos_token_id:
+                return
+            state.chunks.append(codes)
             return
-        state.chunks.append(codes)
+        # Multi-frame message: one host sync for the EOS scan, not one per
+        # row. Rows before an in-message EOS are kept; the EOS row and
+        # anything after it are dropped. Unpacking into per-frame entries
+        # keeps every downstream consumer (thresholds, windows, graph keys)
+        # untouched.
+        eos_positions = (codes[:, 0] == self._codec_eos_token_id).nonzero()
+        n_keep = (
+            int(eos_positions[0].item()) if eos_positions.numel() else codes.shape[0]
+        )
+        if n_keep > 0:
+            state.chunks.extend(codes[:n_keep].unbind(0))
 
     def should_decode(self, state: Code2WavStreamState, *, is_final: bool) -> bool:
         del is_final

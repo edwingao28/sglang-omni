@@ -46,6 +46,9 @@ def _runner(model: SimpleNamespace, *, feedback_enabled: bool = True):
     runner._code2wav_target = "code2wav"
     runner._outbox = SimpleNamespace(sent=[])
     runner._outbox.put = runner._outbox.sent.append
+    # Per-step flushing: this file asserts launch/resolve parity frame by
+    # frame, so IPC batching cadence is pinned out of the way.
+    runner._flush_frames = 1
 
     def _never(*args, **kwargs):
         raise AssertionError(

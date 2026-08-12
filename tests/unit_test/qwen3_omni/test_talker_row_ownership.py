@@ -420,6 +420,8 @@ def test_row_ownership_tracks_current_batch_order_across_steps() -> None:
     n, hidden, code_groups = 2, 3, 2
     model = _fake_model(n, hidden, code_groups)
     runner = _runner(model)
+    # Flush every frame so the per-step sent-order assertions stay exact.
+    runner._flush_frames = 1
 
     reqs = {rid: _make_req(rid) for rid in ("r0", "r1")}
     request_data = {

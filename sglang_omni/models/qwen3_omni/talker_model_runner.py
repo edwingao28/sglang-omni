@@ -18,6 +18,11 @@ logger = logging.getLogger(__name__)
 
 
 class QwenTalkerModelRunner(ModelRunner):
+    # Frames per code2wav transport message; matches the vocoder's stream
+    # chunk size so one message carries exactly one decode window's frames.
+    _flush_frames: int = 10
+    # Codec EOS in layer 0; rows at/after it never reach the vocoder.
+    _codec_eos_token_id: int = 2150
 
     def __init__(
         self,
@@ -298,25 +303,60 @@ class QwenTalkerModelRunner(ModelRunner):
         *,
         skip_done: bool = False,
     ) -> None:
+        # One host sync for the whole batch, not one .item() per row.
+        eos_flags = (codes_snap[:, 0] == self._codec_eos_token_id).tolist()
         for idx, sched_req in enumerate(requests):
-            req = sched_req.data.req
+            data = sched_req.data
+            req = data.req
             if skip_done and self._req_is_done(req):
                 continue
-            # Tell code2wav whether to forward audio chunks to the Coordinator.
-            stage_payload = sched_req.data.stage_payload
-            is_streaming = bool(
-                stage_payload is not None
-                and (stage_payload.request.params or {}).get("stream", False)
+            buf = getattr(data, "pending_code_rows", None)
+            if buf is None:
+                buf = []
+                data.pending_code_rows = buf
+            # Rows are views of this step's private snapshot; no extra clone.
+            buf.append(codes_snap[idx])
+            frames_sent = getattr(data, "code_frames_sent", 0)
+            # Flush points: first frame immediately (preserves TTFA/TTFCC),
+            # every code2wav decode boundary (frames 1, 10, 20, ...), and
+            # codec EOS (the EOS row rides inside the tensor; ingest drops
+            # it). A finished request is force-flushed by
+            # ``on_request_finished`` ahead of the terminal payload; an
+            # aborted request's buffer simply dies with ``data``.
+            if (
+                frames_sent == 0
+                or (frames_sent + len(buf)) % self._flush_frames == 0
+                or eos_flags[idx]
+            ):
+                self._flush_code_rows(request_id=req.rid, data=data)
+
+    def _flush_code_rows(self, *, request_id: str, data: Any) -> None:
+        buf = getattr(data, "pending_code_rows", None)
+        if not buf:
+            return
+        code_chunk = buf[0] if len(buf) == 1 else torch.stack(buf, dim=0)
+        # Tell code2wav whether to forward audio chunks to the Coordinator.
+        stage_payload = getattr(data, "stage_payload", None)
+        is_streaming = bool(
+            stage_payload is not None
+            and (stage_payload.request.params or {}).get("stream", False)
+        )
+        self._outbox.put(
+            OutgoingMessage(
+                request_id=request_id,
+                type="stream",
+                data=code_chunk,
+                target=self._code2wav_target,
+                metadata={"stream": is_streaming},
             )
-            self._outbox.put(
-                OutgoingMessage(
-                    request_id=req.rid,
-                    type="stream",
-                    data=codes_snap[idx],
-                    target=self._code2wav_target,
-                    metadata={"stream": is_streaming},
-                )
-            )
+        )
+        data.code_frames_sent = getattr(data, "code_frames_sent", 0) + len(buf)
+        buf.clear()
+
+    def on_request_finished(self, request_id: str, req_data: Any) -> None:
+        # OmniScheduler calls this before putting type="result" on the same
+        # FIFO outbox, so buffered frames always precede stream-done.
+        self._flush_code_rows(request_id=request_id, data=req_data)
 
     def _req_is_done(self, req: Any) -> bool:
         """Whether this row finished or retracted in an earlier step.
