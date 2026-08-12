@@ -11,6 +11,7 @@ from sglang_omni.config import (
     resolve_stage_factory_args,
 )
 from sglang_omni.config.manager import ConfigManager
+from sglang_omni.config.topology import compile_logical_processes
 from sglang_omni.models.qwen3_omni.config import (
     Qwen3OmniPipelineConfig,
     Qwen3OmniSpeechColocatedPipelineConfig,
@@ -165,6 +166,28 @@ def test_qwen3_omni_h20_colocated_example_config_loads_and_plans() -> None:
         "talker_ar": 0,
         "code2wav": 0,
     }
+
+
+def test_qwen3_omni_replica_example_copies_one_multistage_process() -> None:
+    config_path = (
+        _REPO_ROOT / "examples" / "configs" / "qwen3_omni_speech_replica2.yaml"
+    )
+
+    config = ConfigManager.from_file(str(config_path)).config
+    logical_plan, _ = compile_logical_processes(config)
+    topology = build_compiled_process_topology(config)
+
+    speech_tail = logical_plan.get("speech_tail")
+    assert speech_tail.stage_names == ("talker_ar", "code2wav")
+    assert speech_tail.num_replicas == 2
+    assert [
+        (group.name, group.stage_names, group.gpu_id)
+        for group in topology.groups
+        if group.name.startswith("speech_tail@r")
+    ] == [
+        ("speech_tail@r0", ("talker_ar@r0", "code2wav@r0"), 1),
+        ("speech_tail@r1", ("talker_ar@r1", "code2wav@r1"), 2),
+    ]
 
 
 def test_qwen3_omni_mmsu_example_config_uses_text_pipeline() -> None:

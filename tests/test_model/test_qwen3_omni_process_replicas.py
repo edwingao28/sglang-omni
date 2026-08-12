@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Process-replica smoke test for the Qwen3-Omni speech pipeline.
 
-Launches the 2-replica speech deployment (thinker on GPU 0, one
-talker_ar + code2wav pair each on GPU 1 and GPU 2) and drives audio
+Launches the 2-replica speech deployment (thinker on GPU 0, one replicated
+Process containing talker_ar + code2wav on GPU 1 and GPU 2) and drives audio
 requests through it. Asserts every request returns audio, that all four
-replica instances were spawned and registered, and that admission
-round-robined across both replicas of each replicated process.
+member-stage instances were spawned and registered, and that each request
+bound both Process members to the same replica index.
 
 Requires 3 GPUs.
 
@@ -48,7 +48,7 @@ STARTUP_TIMEOUT = 900
 REQUEST_TIMEOUT = 300
 
 NUM_REQUESTS = 4
-REPLICATED_PROCESSES = ("talker_ar", "code2wav")
+REPLICATED_PROCESS_MEMBERS = ("talker_ar", "code2wav")
 REPLICA_INSTANCES = (
     "talker_ar@r0",
     "talker_ar@r1",
@@ -138,15 +138,17 @@ def test_every_replica_serves_audio(replica_server):
     assert (
         len(admitted) >= NUM_REQUESTS
     ), f"expected at least {NUM_REQUESTS} admission log lines, got {len(admitted)}"
-    bound: dict[str, set[int]] = {}
-    for raw in admitted:
-        for stage, replica_id in ast.literal_eval(raw).items():
-            bound.setdefault(stage, set()).add(replica_id)
-    for process_name in REPLICATED_PROCESSES:
-        assert bound.get(process_name) == {
-            0,
-            1,
-        }, (
-            f"{process_name} did not round-robin across both replicas: "
-            f"{bound.get(process_name)}"
+    request_bindings = [ast.literal_eval(raw) for raw in admitted[-NUM_REQUESTS:]]
+    for index, bindings in enumerate(request_bindings):
+        member_bindings = {
+            stage: bindings.get(stage) for stage in REPLICATED_PROCESS_MEMBERS
+        }
+        assert set(member_bindings.values()) <= {0, 1}
+        assert len(set(member_bindings.values())) == 1, (
+            f"request {index}: Process members crossed replicas: {member_bindings}"
         )
+
+    assert {bindings["talker_ar"] for bindings in request_bindings} == {0, 1}, (
+        "speech_tail did not round-robin across both replicas: "
+        f"{request_bindings}"
+    )

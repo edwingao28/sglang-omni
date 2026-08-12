@@ -277,6 +277,12 @@ _SPEECH_DEFAULT_PROCESSES = {
     "code2wav": "code2wav",
 }
 
+_SPEECH_REPLICA_PROCESSES = {
+    **_SPEECH_DEFAULT_PROCESSES,
+    "talker_ar": "speech_tail",
+    "code2wav": "speech_tail",
+}
+
 
 class _Qwen3OmniBasePipelineConfig(PipelineConfig):
     architecture: ClassVar[str] = "Qwen3OmniMoeForConditionalGeneration"
@@ -382,10 +388,24 @@ class Qwen3OmniSpeechColocatedPipelineConfig(Qwen3OmniSpeechPipelineConfig):
     )
 
 
+class Qwen3OmniSpeechProcessReplicaPipelineConfig(Qwen3OmniSpeechPipelineConfig):
+    """Speech pipeline with talker and codec in one replicable Process."""
+
+    stages: list[StageConfig] = Field(
+        default_factory=lambda: _speech_stages(
+            thinker_gpu=0,
+            talker_gpu=1,
+            process_by_stage=_SPEECH_REPLICA_PROCESSES,
+            enable_partial_start=True,
+        )
+    )
+
+
 EntryClass = Qwen3OmniSpeechPipelineConfig
 
 Variants = {
     "text": Qwen3OmniPipelineConfig,
     "speech": Qwen3OmniSpeechPipelineConfig,
     "speech-colocated": Qwen3OmniSpeechColocatedPipelineConfig,
+    "speech-process-replica": Qwen3OmniSpeechProcessReplicaPipelineConfig,
 }
