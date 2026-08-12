@@ -84,8 +84,6 @@ def resolve_stage_factory_arg_defaults(
     defaults: dict[str, Any] = {"model_path": global_cfg.model_path}
     if gpu_id is None:
         gpu_id = _resolve_primary_gpu_id(stage_cfg, global_cfg)
-    # TODO (kaige): Migrate legacy device-only factories before enabling
-    # process replica device remapping for those models.
     defaults["gpu_id"] = gpu_id
     total_gpu_memory_fraction = stage_cfg.runtime.resources.total_gpu_memory_fraction
     if total_gpu_memory_fraction is not None:
@@ -103,6 +101,16 @@ def resolve_factory_signature_args(
 
     args = dict(args)
     sig = inspect.signature(factory)
+
+    placement_gpu_id = defaults.get("gpu_id")
+    # Placement also owns legacy factories that expose ``device`` instead of
+    # ``gpu_id``; their static cuda:0 defaults must not shadow replica devices.
+    if (
+        placement_gpu_id is not None
+        and "gpu_id" not in sig.parameters
+        and "device" in sig.parameters
+    ):
+        args["device"] = f"cuda:{placement_gpu_id}"
 
     for name, value in defaults.items():
         if name in sig.parameters and name not in args:

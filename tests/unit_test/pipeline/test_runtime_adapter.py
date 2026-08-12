@@ -18,6 +18,9 @@ _FACTORY = "tests.unit_test.fixtures.pipeline_fakes.runtime_factory"
 _FACTORY_WITHOUT_TOTAL_BUDGET = (
     "tests.unit_test.fixtures.pipeline_fakes.runtime_factory_without_total_budget"
 )
+_FACTORY_ACCEPTING_DEVICE_ONLY = (
+    "tests.unit_test.fixtures.pipeline_fakes.runtime_factory_accepting_device_only"
+)
 
 
 def _stage(**kwargs) -> StageConfig:
@@ -222,6 +225,19 @@ def test_rank_gpu_id_can_be_supplied_by_launch_planner() -> None:
     args = resolve_stage_factory_args(stage, config, gpu_id=3)
 
     assert args["gpu_id"] == 3
+
+
+def test_launch_planner_gpu_overrides_legacy_device_only_factory_arg() -> None:
+    stage = _stage(
+        factory=_FACTORY_ACCEPTING_DEVICE_ONLY,
+        factory_args={"device": "cuda:0"},
+        gpu=0,
+    )
+    config = PipelineConfig(model_path="dummy-model", stages=[stage])
+
+    args = resolve_stage_factory_args(stage, config, gpu_id=3)
+
+    assert args["device"] == "cuda:3"
 
 
 def test_runtime_override_wins_over_qwen_model_default() -> None:
