@@ -161,28 +161,72 @@ def test_qwen_code2wav_enabled_factory_rejects_missing_typed_budget_before_load(
     assert load_calls == 0
 
 
-def test_qwen_code2wav_factory_rejects_batching_with_cuda_graph_before_load(
+def test_qwen_code2wav_factory_batching_with_cuda_graph_builds_batched_keys(
     monkeypatch,
 ) -> None:
-    load_calls = 0
+    model = _FactoryModel()
+    build_call: dict = {}
 
-    def _load(*args, **kwargs):
-        nonlocal load_calls
-        load_calls += 1
-        return _FactoryModel()
+    def _build(built_model, **kwargs):
+        build_call.update(model=built_model, **kwargs)
+        return SimpleNamespace(stats=lambda: {})
 
-    monkeypatch.setattr(code2wav_scheduler, "load_code2wav_model", _load)
+    monkeypatch.setattr(
+        code2wav_scheduler, "load_code2wav_model", lambda *a, **k: model
+    )
+    monkeypatch.setattr(
+        code2wav_scheduler.Code2WavCudaGraphRunner,
+        "build",
+        staticmethod(_build),
+    )
 
-    with pytest.raises(ValueError, match="cannot be enabled together"):
-        code2wav_scheduler.create_code2wav_scheduler(
-            "dummy",
-            device="cuda:0",
-            enable_batching=True,
-            enable_cuda_graph=True,
-            total_gpu_memory_fraction=0.02,
-        )
+    scheduler = code2wav_scheduler.create_code2wav_scheduler(
+        "dummy",
+        device="cuda:0",
+        enable_batching=True,
+        batch_ceiling=8,
+        enable_cuda_graph=True,
+        total_gpu_memory_fraction=0.02,
+    )
 
-    assert load_calls == 0
+    assert scheduler._enable_batching
+    assert scheduler._cuda_graph_runner is not None
+    assert build_call["graph_keys"] == tuple(
+        GraphKey(batch_size=batch_size, frames=frames)
+        for batch_size in (1, 2, 4, 8)
+        for frames in (10, 20, 30, 35)
+    )
+
+
+def test_qwen_code2wav_factory_batch_ceiling_bounds_graph_batch_sizes(
+    monkeypatch,
+) -> None:
+    model = _FactoryModel()
+    build_call: dict = {}
+
+    def _build(built_model, **kwargs):
+        build_call.update(model=built_model, **kwargs)
+        return SimpleNamespace(stats=lambda: {})
+
+    monkeypatch.setattr(
+        code2wav_scheduler, "load_code2wav_model", lambda *a, **k: model
+    )
+    monkeypatch.setattr(
+        code2wav_scheduler.Code2WavCudaGraphRunner,
+        "build",
+        staticmethod(_build),
+    )
+
+    code2wav_scheduler.create_code2wav_scheduler(
+        "dummy",
+        device="cuda:0",
+        enable_batching=True,
+        batch_ceiling=4,
+        enable_cuda_graph=True,
+        total_gpu_memory_fraction=0.02,
+    )
+
+    assert {key.batch_size for key in build_call["graph_keys"]} == {1, 2, 4}
 
 
 @pytest.mark.parametrize(

@@ -462,3 +462,55 @@ def test_qwen_code2wav_run_step_emits_full_chunk_despite_output_deficit() -> Non
     decoded = scheduler.run_step([("req-1", state)], [1])
     assert decoded["req-1"].shape == (4,)
     assert state.emitted == 3
+
+
+def test_batched_step_uses_cuda_graph_runner_per_sub_batch() -> None:
+    from sglang_omni.models.qwen3_omni.components.code2wav_cuda_graph import (
+        Code2WavRunResult,
+        GraphKey,
+    )
+
+    model = FakeCode2WavModel(total_upsample=2)
+    run_calls: list[tuple[tuple[int, ...], bool]] = []
+
+    class _StubRunner:
+        def run(self, codes: torch.Tensor, *, eligible: bool = True):
+            run_calls.append((tuple(codes.shape), eligible))
+            return Code2WavRunResult(
+                output=model(codes),
+                execution_mode="cuda_graph",
+                key=GraphKey(
+                    batch_size=int(codes.shape[0]),
+                    frames=int(codes.shape[2]),
+                ),
+                fallback_reason=None,
+            )
+
+    scheduler = Code2WavScheduler(
+        model,
+        device="cpu",
+        stream_chunk_size=2,
+        left_context_size=1,
+        sample_rate=24000,
+        enable_batching=True,
+        max_batch_wait_ms=0,
+        batch_floor=2,
+        enable_cuda_graph=True,
+        _cuda_graph_runner=_StubRunner(),
+    )
+
+    entries = []
+    for index in range(5):
+        rid = f"req-{index}"
+        entries.append((rid, index + 1))
+        entries.append((rid, index + 11))
+    _feed_batch(scheduler, entries)
+
+    # Five same-bucket participants decompose into graph-capturable sub-batches
+    # and every sub-batch forward stays graph-eligible.
+    assert [shape[0] for shape, _ in run_calls] == [4, 1]
+    assert all(eligible for _, eligible in run_calls)
+    for index in range(5):
+        state = scheduler._stream_states[f"req-{index}"]
+        assert state.emitted == 2
+        assert len(state.audio_parts) == 1

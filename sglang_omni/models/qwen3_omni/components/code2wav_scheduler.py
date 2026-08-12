@@ -35,6 +35,7 @@ def _serial_threshold_graph_keys(
     stream_chunk_size: int,
     left_context_size: int,
     initial_chunk_size: int = 0,
+    batch_sizes: tuple[int, ...] = (1,),
 ) -> tuple[GraphKey, ...]:
     frames: list[int] = []
     start = 0
@@ -46,8 +47,15 @@ def _serial_threshold_graph_keys(
         start += new_frames
         new_frames = stream_chunk_size
     return tuple(
-        GraphKey(batch_size=1, frames=window_frames) for window_frames in frames
+        GraphKey(batch_size=batch_size, frames=window_frames)
+        for batch_size in batch_sizes
+        for window_frames in frames
     )
+
+
+def _step_plan_batch_sizes(batch_ceiling: int) -> tuple[int, ...]:
+    # _decompose_batch only ever emits these sub-batch sizes.
+    return tuple(size for size in (1, 2, 4, 8) if size <= batch_ceiling)
 
 
 def load_code2wav_model(
@@ -107,10 +115,6 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         enable_cuda_graph: bool = False,
         _cuda_graph_runner: Code2WavCudaGraphRunner | None = None,
     ):
-        if enable_batching and enable_cuda_graph:
-            raise ValueError(
-                "Code2Wav batching and CUDA Graph cannot be enabled together"
-            )
         self._model = model
         self._device = torch.device(device)
         self._stream_chunk_size = max(int(stream_chunk_size), 1)
@@ -480,7 +484,7 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
             codes = torch.stack(rows, dim=0)
             wav, execution_metadata = self._forward_codes(
                 codes,
-                graph_eligible=False,
+                graph_eligible=True,
             )
             if wav.shape[0] != len(group):
                 raise RuntimeError(
@@ -539,8 +543,6 @@ def create_code2wav_scheduler(
     total_gpu_memory_fraction: float | None = None,
 ):
     """Factory: returns Code2WavScheduler."""
-    if enable_batching and enable_cuda_graph:
-        raise ValueError("Code2Wav batching and CUDA Graph cannot be enabled together")
     if enable_cuda_graph and total_gpu_memory_fraction is None:
         raise ValueError(
             "Code2Wav CUDA graph requires "
@@ -558,6 +560,11 @@ def create_code2wav_scheduler(
     model = load_code2wav_model(model_path, device=device, dtype=dtype)
     cuda_graph_runner = None
     if enable_cuda_graph:
+        batch_sizes = (
+            _step_plan_batch_sizes(min(max(int(batch_ceiling), 1), 8))
+            if enable_batching
+            else (1,)
+        )
         cuda_graph_runner = Code2WavCudaGraphRunner.build(
             model,
             device=concrete_device,
@@ -567,6 +574,7 @@ def create_code2wav_scheduler(
                 stream_chunk_size,
                 left_context_size,
                 initial_chunk_size,
+                batch_sizes=batch_sizes,
             ),
         )
         logger.info(
