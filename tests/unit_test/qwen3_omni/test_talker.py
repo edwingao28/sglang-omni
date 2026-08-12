@@ -715,11 +715,17 @@ def test_qwen_predictor_decode_graph_uses_tensor_device_when_current_device_diff
 
 
 def _build_assistant_part_for_n_chunks(n: int) -> dict[str, torch.Tensor]:
-    """Build an assistant segment with n thinker chunks under the test layout."""
+    """Build an assistant segment with n prefetched thinker chunks.
+
+    Mirrors production: the segment always starts with the 3 chat-header rows
+    (``<|im_start|>assistant\n`` comes from prompt_ids, not from prefetched
+    chunks), followed by the n generated-token rows.
+    """
     hidden_dim = 4
-    assistant_embed = torch.arange(n * hidden_dim, dtype=torch.float32).reshape(
-        n, hidden_dim
-    )
+    header_rows = 3
+    assistant_embed = torch.arange(
+        (header_rows + n) * hidden_dim, dtype=torch.float32
+    ).reshape(header_rows + n, hidden_dim)
 
     def codec_embed_fn(token_ids: torch.Tensor) -> torch.Tensor:
         return torch.zeros((token_ids.shape[0], hidden_dim), dtype=torch.float32)
@@ -744,50 +750,34 @@ def _build_assistant_part_for_n_chunks(n: int) -> dict[str, torch.Tensor]:
 def test_partial_prompt_prefill_layout_invariants() -> None:
     """Locks the assistant-segment row contract used by partial-start.
 
-    Source of truth for ``MIN_PARTIAL_START_CHUNKS`` and the documented
-    decode-ready operating point: below 3 chunks ``build_assistant_part``
-    fails to assemble the layout (``text_hidden`` is < 9 rows while
-    ``codec_hidden`` is fixed at 9 rows, so the subsequent tensor add raises);
-    at 3 or 4 chunks the layout is stable but ``future_text_rows`` collapses
-    to zero after the trailing EOS row is stripped on the partial path; from
-    5 chunks onward at least one consumable future text row remains.
+    The chat header (3 rows) always comes from prompt_ids, so the 9-row
+    assistant tail assembles from the very first generated token: K=1 is the
+    minimum structurally complete operating point (vLLM-Omni's
+    start-after-one-token equivalent). Prefetching more chunks only pre-queues
+    decode text rows: future_text_rows == K - 1 on the partial path after the
+    trailing EOS row is stripped, so K=1 defers the first decode step until
+    chunk 2 arrives and K=2 is the smallest stall-free point.
     """
-    for n in range(1, MIN_PARTIAL_START_CHUNKS):
-        try:
-            _build_assistant_part_for_n_chunks(n)
-        except RuntimeError:
-            pass
-        else:
-            raise AssertionError(
-                "layout invariant: build_assistant_part must fail "
-                f"below MIN_PARTIAL_START_CHUNKS (n={n})"
-            )
-
-    for n in (MIN_PARTIAL_START_CHUNKS, 4, 5, 10):
+    for n in (MIN_PARTIAL_START_CHUNKS, 2, 3, 4, 5, 10):
         assert (
             _build_assistant_part_for_n_chunks(n)["input_embeds"].shape[0] == 9
         ), f"layout invariant: at n={n} the assistant tail must be 9 rows"
 
-    # future_text_rows count before include_assistant_eos stripping:
-    #   n <= 4 -> 1 row (just the EOS row);
-    #   n  > 4 -> (n - 4) projected rows + 1 EOS row.
-    assert _build_assistant_part_for_n_chunks(3)["future_text_rows"].shape[0] == 1
-    assert _build_assistant_part_for_n_chunks(4)["future_text_rows"].shape[0] == 1
-    assert _build_assistant_part_for_n_chunks(5)["future_text_rows"].shape[0] == 2
-    assert _build_assistant_part_for_n_chunks(6)["future_text_rows"].shape[0] == 3
+    # future_text_rows before include_assistant_eos stripping: (n - 1)
+    # projected rows plus the trailing EOS row.
+    assert _build_assistant_part_for_n_chunks(1)["future_text_rows"].shape[0] == 1
+    assert _build_assistant_part_for_n_chunks(2)["future_text_rows"].shape[0] == 2
+    assert _build_assistant_part_for_n_chunks(5)["future_text_rows"].shape[0] == 5
 
     def stripped(n: int) -> int:
         rows = _build_assistant_part_for_n_chunks(n)["future_text_rows"]
         return max(rows.shape[0] - 1, 0)
 
-    # With include_assistant_eos=False on the partial path:
-    #   n in {3, 4} -> 0 future rows (decode stalls immediately after prefill);
-    #   n == 5 -> 1 future row (documented decode-ready operating point);
-    #   n >= 6 -> (n - 4) future rows.
-    assert stripped(3) == 0
-    assert stripped(4) == 0
-    assert stripped(5) == 1
-    assert stripped(6) == 2
+    # With include_assistant_eos=False on the partial path: K - 1 usable rows.
+    assert stripped(1) == 0
+    assert stripped(2) == 1
+    assert stripped(3) == 2
+    assert stripped(5) == 4
 
 
 def _fresh_partial_scheduler(

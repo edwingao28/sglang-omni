@@ -466,11 +466,20 @@ def test_partial_start_disabled_does_not_propagate_subfloor_min_chunks(
 
 
 def test_partial_start_min_chunks_rejects_below_floor(mock_launch_server):
-    args = _make_args(enable_partial_start=True, partial_start_min_chunks=2)
-    with pytest.raises(ValueError, match="partial-start-min-chunks must be >= 3"):
+    args = _make_args(enable_partial_start=True, partial_start_min_chunks=0)
+    with pytest.raises(ValueError, match="partial-start-min-chunks must be >= 1"):
         _launch_speech_server(args)
 
     mock_launch_server.assert_not_called()
+
+
+def test_partial_start_min_chunks_accepts_k1(mock_launch_server):
+    args = _make_args(enable_partial_start=True, partial_start_min_chunks=1)
+    _launch_speech_server(args)
+
+    config = mock_launch_server.call_args[0][0]
+    talker = _stage(config, "talker_ar")
+    assert talker.factory_args["partial_start_min_chunks"] == 1
 
 
 def test_colocated_defaults_use_thinker_gpu_for_gpu_stages(mock_launch_server):
