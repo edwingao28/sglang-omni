@@ -63,8 +63,8 @@ that tensor parallelism creates by putting a TP stage in its own process.
 | --- | --- |
 | Higgs-TTS | — |
 | FishAudio S2-Pro | — |
-| Voxtral TTS | — |
-| Ming-Omni-TTS | — |
+| Voxtral TTS | `preprocessing -> tts_generation` |
+| Ming-Omni-TTS | `preprocessing -> reference_encode`, `reference_encode -> tts_engine` |
 | MOSS-TTS Local (single-GPU) | `preprocessing -> tts_engine` — preprocessing publishes into a process-local `PreparedRequestQueue` the AR stage pops |
 | MOSS-TTS Local (split) | all pipeline edges; placement declares GPU 0 while the codec runs on `cuda:1` |
 | Qwen3-TTS | `preprocessing -> tts_engine` — prepared requests live in `_PREPROCESSING_CONTEXT` / `_PREPARED_REQUESTS`, read in-process by the AR engine builder |

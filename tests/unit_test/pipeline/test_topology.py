@@ -337,6 +337,46 @@ def test_ming_tts_default_stays_in_one_process() -> None:
     compile_logical_processes(config)
 
 
+@pytest.mark.parametrize(
+    ("stage_processes", "edge"),
+    [
+        ({"preprocessing": "frontend"}, "'preprocessing' -> 'reference_encode'"),
+        (
+            {"tts_engine": "engine", "audio_decode": "engine"},
+            "'reference_encode' -> 'tts_engine'",
+        ),
+    ],
+)
+def test_ming_tts_rejects_splitting_process_local_edges(
+    stage_processes: dict[str, str],
+    edge: str,
+) -> None:
+    from sglang_omni.models.ming_tts.config import MingTTSPipelineConfig
+
+    isolated = _isolate(
+        MingTTSPipelineConfig(model_path="dummy"),
+        **stage_processes,
+    )
+
+    with pytest.raises(ValueError, match=edge):
+        compile_logical_processes(isolated)
+
+
+def test_voxtral_rejects_splitting_preprocessing_from_generation() -> None:
+    from sglang_omni.models.voxtral_tts.config import VoxtralTTSPipelineConfig
+
+    isolated = _isolate(
+        VoxtralTTSPipelineConfig(model_path="dummy"),
+        preprocessing="frontend",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="'preprocessing' -> 'tts_generation'",
+    ):
+        compile_logical_processes(isolated)
+
+
 def test_fishaudio_default_splits_preprocessing_from_the_pipeline() -> None:
     from sglang_omni.models.fishaudio_s2_pro.config import S2ProPipelineConfig
 
