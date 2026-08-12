@@ -348,8 +348,12 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         return len(state.chunks) - state.emitted
 
     def _bucket(self, state: Code2WavStreamState) -> tuple[int, int]:
+        # Cap each threshold step at one stream chunk of new frames so the
+        # window stays on the captured CUDA graph grid even when a stream has
+        # accumulated a backlog; the surplus stays pending for the next step.
         context = min(self._left_context_size, state.emitted)
-        return (context, context + self._ready(state))
+        ready = min(self._ready(state), self._threshold(state))
+        return (context, context + ready)
 
     @staticmethod
     def _decompose_batch(n: int) -> list[int]:
@@ -466,7 +470,8 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
             rows = []
             window_ends: list[int] = []
             for _, state in group:
-                start, end = state.emitted, len(state.chunks)
+                start = state.emitted
+                end = min(len(state.chunks), start + self._threshold(state))
                 window_ends.append(end)
                 context = min(self._left_context_size, start)
                 rows.append(

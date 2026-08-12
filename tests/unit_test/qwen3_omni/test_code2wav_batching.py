@@ -226,9 +226,11 @@ def test_bucket_isolation() -> None:
             ("req-b", 10),
         ],
     )
+    # req-b's backlog is capped to one stream chunk per step, so both streams
+    # land in the same bucket and batch together; the surplus decodes on the
+    # following step.
     steady_calls = scheduler._model.calls[2:]
-    assert all(call[0] == 1 for call in steady_calls)
-    assert sorted(steady_calls) == [(1, 2, 3), (1, 2, 5)]
+    assert steady_calls == [(2, 2, 3), (1, 2, 3)]
     assert scheduler._stream_states["req-a"].emitted == 4
     assert scheduler._stream_states["req-b"].emitted == 6
 
@@ -358,7 +360,9 @@ def test_one_participation_per_pump() -> None:
 
     scheduler.select_step_participants = recording_select
     _feed_batch(scheduler, [("req-1", 3), ("req-1", 4), ("req-1", 5), ("req-1", 6)])
-    assert selections == [["req-1"]]
+    # The four-frame backlog drains within one pump, one capped stream chunk
+    # per step, so the stream participates once per capped window.
+    assert selections == [["req-1"], ["req-1"]]
     state = scheduler._stream_states["req-1"]
     assert state.emitted == 6
     assert len(state.chunks) - state.emitted == 0
