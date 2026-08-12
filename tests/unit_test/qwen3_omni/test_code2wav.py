@@ -880,3 +880,108 @@ def test_qwen_code2wav_emits_full_chunk_despite_model_output_deficit() -> None:
     assert second_audio.shape == (4,)
 
     assert first_audio.shape[0] + second_audio.shape[0] == 4 * 2 - 1
+
+
+def _run_multiframe_stream(
+    messages: list[torch.Tensor],
+) -> tuple[Code2WavScheduler, FakeCode2WavModel, list[tuple]]:
+    model = FakeCode2WavModel(total_upsample=2)
+    scheduler = Code2WavScheduler(
+        model,
+        device="cpu",
+        stream_chunk_size=10,
+        left_context_size=1,
+    )
+    scheduler._stream_payloads["req-1"] = make_qwen_payload(request_id="req-1")
+    for chunk_id, codes in enumerate(messages):
+        scheduler._handle_stream_chunk(
+            "req-1",
+            StreamItem(chunk_id, codes, "talker", metadata={"stream": True}),
+        )
+    chunks = list(scheduler._stream_states["req-1"].chunks)
+    scheduler._on_done("req-1")
+    outbox = [scheduler.outbox.get_nowait() for _ in range(scheduler.outbox.qsize())]
+    emitted = [
+        (m.type, m.data["audio_waveform"]) for m in outbox if m.type == "stream"
+    ]
+    return scheduler, model, [("chunks", chunks)] + emitted
+
+
+def test_multiframe_ingest_equivalence() -> None:
+    frames = [torch.tensor([i + 1, (i + 1) * 10]) for i in range(20)]
+
+    _, model_a, snap_a = _run_multiframe_stream([f.clone() for f in frames])
+    packed = [
+        frames[0].clone(),
+        torch.stack(frames[1:10], dim=0),
+        torch.stack(frames[10:20], dim=0),
+    ]
+    _, model_b, snap_b = _run_multiframe_stream(packed)
+
+    chunks_a = snap_a[0][1]
+    chunks_b = snap_b[0][1]
+    assert len(chunks_a) == len(chunks_b) == 20
+    for row_a, row_b in zip(chunks_a, chunks_b):
+        assert row_a.shape == row_b.shape == (2,)
+        assert torch.equal(row_a, row_b)
+    # Identical decode windows -> identical CUDA-graph key grid.
+    assert model_a.calls == model_b.calls
+    # Bitwise-identical emitted waveforms.
+    assert snap_a[1:] == snap_b[1:]
+
+
+def test_multiframe_eos_last_row_is_dropped_pre_eos_rows_kept() -> None:
+    rows = [torch.tensor([i + 1, 1]) for i in range(3)]
+    message = torch.stack(rows + [torch.tensor([2150, 0])], dim=0)
+    scheduler, model, _ = _run_multiframe_stream([message])
+
+    assert model.calls == [(1, 2, 3)]  # stream-done tail decode of 3 frames
+    del scheduler
+
+
+def test_multiframe_eos_mid_message_drops_tail_rows() -> None:
+    message = torch.stack(
+        [
+            torch.tensor([1, 1]),
+            torch.tensor([2, 2]),
+            torch.tensor([2150, 0]),
+            torch.tensor([7, 7]),
+        ],
+        dim=0,
+    )
+    model = FakeCode2WavModel(total_upsample=2)
+    scheduler = Code2WavScheduler(
+        model,
+        device="cpu",
+        stream_chunk_size=10,
+        left_context_size=1,
+    )
+    scheduler._stream_payloads["req-1"] = make_qwen_payload(request_id="req-1")
+    scheduler._handle_stream_chunk(
+        "req-1",
+        StreamItem(0, message, "talker", metadata={"stream": True}),
+    )
+    state = scheduler._stream_states["req-1"]
+    assert [row[0].item() for row in state.chunks] == [1, 2]
+
+
+def test_multiframe_eos_only_message_is_noop() -> None:
+    model = FakeCode2WavModel(total_upsample=2)
+    scheduler = Code2WavScheduler(
+        model,
+        device="cpu",
+        stream_chunk_size=10,
+        left_context_size=1,
+    )
+    scheduler._stream_payloads["req-1"] = make_qwen_payload(request_id="req-1")
+    scheduler._handle_stream_chunk(
+        "req-1",
+        StreamItem(
+            0,
+            torch.stack([torch.tensor([2150, 0])], dim=0),
+            "talker",
+            metadata={"stream": True},
+        ),
+    )
+    assert scheduler._stream_states["req-1"].chunks == []
+    assert model.calls == []
