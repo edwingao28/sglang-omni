@@ -403,38 +403,15 @@ class Coordinator:
         if not isinstance(request, OmniRequest):
             request = OmniRequest(inputs=request)
 
-        # Track request
-        self._requests[request_id] = RequestInfo(
-            request_id=request_id,
-            state=RequestState.PENDING,
-            current_stage=self.entry_stage,
-            terminal_stages=self._resolve_terminal_stages(request),
-        )
-
-        # Create future for completion
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future = loop.create_future()
-        self._completion_futures[request_id] = future
-        if stream_queue is not None:
-            self._stream_queues[request_id] = stream_queue
-
+        terminal_stages = self._resolve_terminal_stages(request)
         payload = StagePayload(
             request_id=request_id,
             request=request,
             data={"raw_inputs": request.inputs},
         )
-
-        _emit_event(
-            request_id=request_id,
-            stage="coordinator",
-            event_name="request_admission",
-            metadata={"entry_stage": self.entry_stage},
-        )
-
         replica_bindings = assign_replica_bindings(
             self._logical_process_plan, self._binding_policy, request_id
         )
-
         bindings = replica_bindings or {}
         entry_instance = (
             self._replica_topology.resolve(
@@ -444,15 +421,45 @@ class Coordinator:
             else self.entry_stage
         )
         entry_info = self._stages[entry_instance]
-        await self.control_plane.submit_to_stage(
-            entry_instance,
-            entry_info.control_endpoint,
-            SubmitMessage(
-                request_id=request_id,
-                data=payload,
-                replica_bindings=replica_bindings,
-            ),
+
+        self._requests[request_id] = RequestInfo(
+            request_id=request_id,
+            state=RequestState.PENDING,
+            current_stage=self.entry_stage,
+            terminal_stages=terminal_stages,
         )
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        self._completion_futures[request_id] = future
+        if stream_queue is not None:
+            self._stream_queues[request_id] = stream_queue
+
+        try:
+            _emit_event(
+                request_id=request_id,
+                stage="coordinator",
+                event_name="request_admission",
+                metadata={"entry_stage": self.entry_stage},
+            )
+            await self.control_plane.submit_to_stage(
+                entry_instance,
+                entry_info.control_endpoint,
+                SubmitMessage(
+                    request_id=request_id,
+                    data=payload,
+                    replica_bindings=replica_bindings,
+                ),
+            )
+        except BaseException:
+            self._requests.pop(request_id, None)
+            self._partial_results.pop(request_id, None)
+            if self._completion_futures.get(request_id) is future:
+                self._completion_futures.pop(request_id, None)
+                if not future.done():
+                    future.cancel()
+            if self._stream_queues.get(request_id) is stream_queue:
+                self._stream_queues.pop(request_id, None)
+            raise
 
         # Update state
         info = self._requests.get(request_id)

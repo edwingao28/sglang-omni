@@ -983,6 +983,77 @@ def test_coordinator_submits_to_the_bound_entry_replica() -> None:
     asyncio.run(_run())
 
 
+def test_coordinator_binding_rejection_does_not_reserve_request_id() -> None:
+    class InvalidThenValidBindingPolicy:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def bind(self, process_name: str, num_replicas: int, request_id: str) -> int:
+            del process_name, num_replicas, request_id
+            self.calls += 1
+            return 7 if self.calls == 1 else 0
+
+    async def _run() -> None:
+        logical_plan, replica_topology = _linear_replica_runtime(front=2)
+        coordinator = Coordinator(
+            "inproc://complete",
+            "inproc://abort",
+            entry_stage="normalize",
+            replica_topology=replica_topology,
+            logical_process_plan=logical_plan,
+            binding_policy=InvalidThenValidBindingPolicy(),
+        )
+        coordinator.control_plane = RecordingCoordinatorControlPlane()
+        coordinator.register_stage("normalize@r0", "inproc://n0")
+        coordinator.register_stage("normalize@r1", "inproc://n1")
+
+        with pytest.raises(ValueError, match="selected replica 7"):
+            await coordinator._submit_request("req-0", "hello")
+
+        assert coordinator._requests == {}
+        assert coordinator._completion_futures == {}
+        await coordinator._submit_request("req-0", "retry")
+        assert coordinator._requests["req-0"].state.name == "RUNNING"
+
+    asyncio.run(_run())
+
+
+def test_coordinator_initial_send_failure_rolls_back_admission() -> None:
+    class FailFirstSubmitControlPlane(RecordingCoordinatorControlPlane):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts = 0
+
+        async def submit_to_stage(self, stage: str, endpoint: str, msg) -> None:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError("send failed")
+            await super().submit_to_stage(stage, endpoint, msg)
+
+    async def _run() -> None:
+        coordinator = Coordinator(
+            "inproc://complete",
+            "inproc://abort",
+            entry_stage="preprocess",
+        )
+        coordinator.control_plane = FailFirstSubmitControlPlane()
+        coordinator.register_stage("preprocess", "inproc://preprocess")
+        stream_queue: asyncio.Queue = asyncio.Queue()
+
+        with pytest.raises(RuntimeError, match="send failed"):
+            await coordinator._submit_request(
+                "req-0", "hello", stream_queue=stream_queue
+            )
+
+        assert coordinator._requests == {}
+        assert coordinator._completion_futures == {}
+        assert coordinator._stream_queues == {}
+        await coordinator._submit_request("req-0", "retry")
+        assert coordinator._requests["req-0"].state.name == "RUNNING"
+
+    asyncio.run(_run())
+
+
 def test_coordinator_without_replicas_sends_no_bindings() -> None:
     async def _run() -> None:
         logical_plan, replica_topology = _linear_replica_runtime()
