@@ -19,7 +19,12 @@ from sglang_omni.platforms import current_platform
 _PKG = "sglang_omni.models.qwen3_omni"
 _PLACEMENT_POLICY = f"{_PKG}.placement.Qwen3OmniPlacementPolicy"
 THINKER_STAGE = "thinker"
-MIN_PARTIAL_START_CHUNKS = 3
+# One prefetched chunk = one thinker token. The talker prompt's 9-row
+# assistant tail needs only the chat header (always present in prompt_ids)
+# plus the first generated token, so K=1 is structurally complete — it
+# matches vLLM-Omni's start-after-one-token point. Higher K only pre-queues
+# decode text rows (future_text_rows = K-1 after EOS stripping).
+MIN_PARTIAL_START_CHUNKS = 1
 
 # SGLang reads this when DeepGEMM compile utilities are imported. Qwen AR
 # stages can first hit some dense FP8 shapes after readiness; disable all-M
