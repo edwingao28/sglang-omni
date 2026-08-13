@@ -338,6 +338,13 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
             return None
         return min(due) + self._max_batch_wait_s
 
+    def _drain_inbox(self):
+        while True:
+            try:
+                yield self.inbox.get_nowait()
+            except queue.Empty:
+                return
+
     def _next_message(self):
         # Drain already-queued stream chunks before handling any other message:
         # at a wave boundary ~2x batch_ceiling stream_done finals hit the inbox
@@ -347,19 +354,22 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         # content-invariant: every request's decode window is pinned by its
         # threshold, so only cross-request batch composition changes.
         if self._can_batch_stream_chunks:
-            chunks: list = []
-            while True:
-                try:
-                    msg = self.inbox.get_nowait()
-                except queue.Empty:
-                    break
-                if msg.type == "stream_chunk":
-                    if not self._is_aborted(msg.request_id):
-                        chunks.append(msg)
+            first_chunks: list = []
+            for msg in self._drain_inbox():
+                if (
+                    msg.type == "stream_chunk"
+                    and msg.request_id not in self._stream_states
+                    and not self._is_aborted(msg.request_id)
+                ):
+                    # Only a request's FIRST chunk jumps the queue — that is
+                    # the TTFA-critical message. Steady chunks and finals keep
+                    # FIFO order so final decodes are not deferred (deferring
+                    # them measurably lengthens e2e and drops closed-loop rps).
+                    first_chunks.append(msg)
                 else:
                     self._pending_messages.append(msg)
-            if chunks:
-                self._handle_stream_chunk_batch(chunks)
+            if first_chunks:
+                self._handle_stream_chunk_batch(first_chunks)
         if self._pending_messages:
             return self._pending_messages.popleft()
         deadline = self._batch_deadline()
