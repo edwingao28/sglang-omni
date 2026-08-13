@@ -73,7 +73,7 @@ def _hidden_capture_max_tokens(server_args: Any) -> int:
         candidates.append(chunked_prefill_size)
     else:
         candidates.append(getattr(server_args, "max_prefill_tokens", None))
-        # Without chunking, SGLang always admits the first prefill request even
+        # Note(wenyao): Without chunking, SGLang always admits the first prefill request even
         # when it exceeds the batch token budget, up to the model context bound.
         candidates.append(getattr(server_args, "context_length", None))
     candidates.append(getattr(server_args, "max_running_requests", None))
