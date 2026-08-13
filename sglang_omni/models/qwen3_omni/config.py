@@ -276,11 +276,16 @@ def _speech_stages(
     ]
 
 
+# The admission-path stages (preprocessing, encoders, mm_aggregate) share one
+# "frontend" process: they are sequential per request, so separate processes
+# only add IPC hops (~0.15-0.2s of TTFT/TTFA at c32) without any parallelism
+# win. The GIL-heavy AR loops (thinker, talker, code2wav) keep their own
+# processes.
 _SPEECH_DEFAULT_PROCESSES = {
-    "preprocessing": "preprocessing",
-    "image_encoder": "image_encoder",
-    "audio_encoder": "audio_encoder",
-    "mm_aggregate": "mm_aggregate",
+    "preprocessing": "frontend",
+    "image_encoder": "frontend",
+    "audio_encoder": "frontend",
+    "mm_aggregate": "frontend",
     "thinker": "thinker",
     "decode": "decode",
     "talker_ar": "talker_ar",

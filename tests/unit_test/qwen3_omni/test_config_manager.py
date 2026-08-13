@@ -131,10 +131,7 @@ def test_qwen3_omni_h20_colocated_example_config_loads_and_plans() -> None:
     assert config.name == "qwen3-omni-colocated-h20"
     assert plan.gpus[0].total_gpu_memory_fraction == pytest.approx(0.94)
     assert [group.name for group in topology.groups] == [
-        "preprocessing",
-        "image_encoder",
-        "audio_encoder",
-        "mm_aggregate",
+        "frontend",
         "thinker",
         "decode",
         "talker_ar",
