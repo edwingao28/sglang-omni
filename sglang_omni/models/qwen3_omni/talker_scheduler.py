@@ -4,14 +4,28 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections import deque
 from typing import Any
+
+from sglang.srt.managers import scheduler as _upstream_scheduler
+from sglang.srt.managers.scheduler import Scheduler as _Upstream
 
 from sglang_omni.models.qwen3_omni.config import MIN_PARTIAL_START_CHUNKS
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 from sglang_omni.vendor.sglang.server_args import override_server_args
 
 logger = logging.getLogger(__name__)
+
+
+def talker_overlap_requested() -> bool:
+    """Whether the talker stage was asked to overlap decode steps.
+
+    Single source of truth for the env gate: it both keeps
+    ``disable_overlap_schedule`` unforced here and turns on the scheduler's
+    one-step-lookahead async decode loop in ``create_talker_scheduler``.
+    """
+    return os.environ.get("SGLANG_OMNI_TALKER_OVERLAP", "0") == "1"
 
 
 def configure_talker_server_args(
@@ -26,15 +40,26 @@ def configure_talker_server_args(
     """
 
     want_cuda_graph = not bool(server_args.disable_cuda_graph)
+    overlap_requested = talker_overlap_requested()
     overrides = {
         "disable_radix_cache": True,
         "chunked_prefill_size": 0,
     }
     if feedback_enabled:
-        overrides["disable_overlap_schedule"] = True
+        if not overlap_requested:
+            overrides["disable_overlap_schedule"] = True
         if want_cuda_graph:
             overrides["disable_cuda_graph"] = True
     override_server_args(server_args, "qwen3_omni.talker", **overrides)
+    logger.info(
+        "talker overlap gate: SGLANG_OMNI_TALKER_OVERLAP=%s -> requested=%s, "
+        "feedback_enabled=%s, async_decode=%s, disable_overlap_schedule=%s",
+        os.environ.get("SGLANG_OMNI_TALKER_OVERLAP", "<unset>"),
+        overlap_requested,
+        feedback_enabled,
+        feedback_enabled and overlap_requested,
+        overrides.get("disable_overlap_schedule", False),
+    )
     return want_cuda_graph
 
 
@@ -117,6 +142,57 @@ class QwenTalkerScheduler(OmniScheduler):
             self._rollback_decode_prep_after_skip(batch)
             return None
         return batch
+
+    def update_running_batch(self, batch: Any) -> Any:
+        # Note (wenyao): retract_decode frees the KV and sets is_retracted before it
+        # hands the request back, and the async resolve then skips retracted rows —
+        # so a step that was launched but not yet resolved loses the token it already
+        # emitted a codec frame for, and the replay desyncs against the text queue.
+        # Land the in-flight step while the request still counts as running.
+        if self._async_pending_batch() is not None and self._retract_is_imminent(batch):
+            self._resolve_pending_async()
+        return _Upstream.update_running_batch(self, batch)
+
+    def _retract_is_imminent(self, batch: Any) -> bool:
+        """Upstream's own retract trigger, read before it mutates the batch.
+
+        ``check_decode_mem`` is evaluated here on the unfiltered batch, so this can
+        only be true more often than the upstream check that follows it — draining a
+        step early costs one round of overlap, missing one corrupts the replay.
+        """
+        if batch is None or not batch.reqs:
+            return False
+        interval = _upstream_scheduler.TEST_RETRACT_INTERVAL
+        if (
+            _upstream_scheduler.TEST_RETRACT
+            and getattr(self, "forward_ct", 0) % interval == 0
+        ):
+            return True
+        return not batch.check_decode_mem()
+
+    def _add_request_to_queue(self, req: Any, is_retracted: bool = False) -> None:
+        # Note (wenyao): retract has already freed req_pool_idx but nothing has
+        # emitted into that feedback slot yet, so this is the last point where an
+        # unconsumed feedback row can still be read back for replay.
+        if is_retracted or bool(getattr(req, "is_retracted", False)):
+            runner = getattr(self, "_model_runner", None)
+            if runner is not None:
+                try:
+                    runner.snapshot_feedback_for_retract(req)
+                except Exception as exc:
+                    # Note (wenyao): retract runs inside get_next_batch_to_run, which
+                    # the event loop calls outside any try, so an error escaping here
+                    # kills the scheduler thread and every co-resident request. Fail
+                    # this request the way a batch failure does and keep the stage up.
+                    logger.exception(
+                        "Talker retract feedback snapshot failed for request=%s; "
+                        "aborting that request alone",
+                        req.rid,
+                    )
+                    self._emit_request_error(req.rid, exc)
+                    self.abort(req.rid, defer_running_cleanup=False)
+                    return
+        return _Upstream._add_request_to_queue(self, req, is_retracted=is_retracted)
 
     def _rollback_decode_prep_after_skip(self, batch: Any) -> None:
         # Note(Chenchen Hong, Xuesong): This is talker-only. It does not fully
