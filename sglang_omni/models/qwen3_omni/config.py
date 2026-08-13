@@ -276,7 +276,7 @@ def _speech_stages(
 # win. The GIL-heavy AR loops (thinker, talker, code2wav) keep their own
 # processes.
 _SPEECH_DEFAULT_PROCESSES = {
-    "preprocessing": "frontend",
+    "preprocessing": "preprocessing",
     "image_encoder": "frontend",
     "audio_encoder": "frontend",
     "mm_aggregate": "frontend",
