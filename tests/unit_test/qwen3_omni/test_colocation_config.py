@@ -68,10 +68,10 @@ def test_default_speech_topology_stays_disaggregated() -> None:
     assert _stage(config, "talker_ar").factory_args["enable_partial_start"] is True
     assert config.placement.require_memory_fraction_for_colocation is False
     assert {stage.name: stage.process for stage in config.stages} == {
-        "preprocessing": "preprocessing",
-        "image_encoder": "image_encoder",
-        "audio_encoder": "audio_encoder",
-        "mm_aggregate": "mm_aggregate",
+        "preprocessing": "frontend",
+        "image_encoder": "frontend",
+        "audio_encoder": "frontend",
+        "mm_aggregate": "frontend",
         "thinker": "thinker",
         "decode": "decode",
         "talker_ar": "talker_ar",
@@ -83,10 +83,7 @@ def test_default_speech_topology_stays_disaggregated() -> None:
     topology = build_process_topology_plan(config, plan)
 
     assert [group.name for group in topology.groups] == [
-        "preprocessing",
-        "image_encoder",
-        "audio_encoder",
-        "mm_aggregate",
+        "frontend",
         "thinker",
         "decode",
         "talker_ar",
@@ -107,7 +104,12 @@ def test_colocated_topology_is_opt_in_and_uses_one_gpu() -> None:
         "code2wav",
     ):
         assert _stage(config, stage_name).gpu == 0
-        assert _stage(config, stage_name).process == stage_name
+        expected_process = (
+            "frontend"
+            if stage_name in ("image_encoder", "audio_encoder")
+            else stage_name
+        )
+        assert _stage(config, stage_name).process == expected_process
 
 
 def test_colocated_config_passes_with_explicit_budgets_without_ar_mem_fraction() -> (
@@ -121,10 +123,7 @@ def test_colocated_config_passes_with_explicit_budgets_without_ar_mem_fraction()
 
     assert plan.gpus[0].total_gpu_memory_fraction == pytest.approx(0.94)
     assert [group.name for group in topology.groups] == [
-        "preprocessing",
-        "image_encoder",
-        "audio_encoder",
-        "mm_aggregate",
+        "frontend",
         "thinker",
         "decode",
         "talker_ar",
