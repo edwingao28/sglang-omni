@@ -938,25 +938,20 @@ def make_thinker_stream_output_builder():
         extra = req_output.extra
         if isinstance(extra, dict) and "hidden_states" in extra:
             embed, layer_hidden = _split_dual_layer_hidden(extra["hidden_states"])
-            if embed is not None:
-                metadata = {"token_id": token_id}
-                if layer_hidden is not None:
-                    metadata["layer_hidden"] = layer_hidden
+            # The talker reconstructs the token embed from token_id via the
+            # thinker embedding table (TalkerPrefillBuilder), so when the aux
+            # layer hidden is available the streamed embed is dead weight:
+            # ship only layer_hidden. Halves bytes and relay ops per token on
+            # the cross-GPU thinker->talker edge. The consumer fallback
+            # (chunk_layer_hidden_or_embed) reads chunk.data, which is now the
+            # layer hidden -- same tensor it previously took from metadata.
+            hidden = layer_hidden if layer_hidden is not None else embed
+            if hidden is not None:
                 messages.append(
                     OutgoingMessage(
                         request_id=request_id,
                         type="stream",
-                        data=embed,
-                        target="talker_ar",
-                        metadata=metadata,
-                    )
-                )
-            elif layer_hidden is not None:
-                messages.append(
-                    OutgoingMessage(
-                        request_id=request_id,
-                        type="stream",
-                        data=layer_hidden,
+                        data=hidden,
                         target="talker_ar",
                         metadata={"token_id": token_id},
                     )
