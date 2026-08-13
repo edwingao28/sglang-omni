@@ -8,6 +8,7 @@ import time
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -1715,6 +1716,96 @@ def _patch_sampling(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def test_build_talker_request_sets_fixed_minimum_length() -> None:
+    from sglang.srt.sampling.penaltylib import BatchedMinNewTokensPenalizer
+    from sglang.srt.sampling.penaltylib.orchestrator import BatchedPenalizerOrchestrator
+
+    class CpuBatch:
+        def __init__(self, req: Any) -> None:
+            self.device = torch.device("cpu")
+            self.reqs = [req]
+
+    text_tokenizer = FakeQwenTokenizer(eos_token_id=151645, vocab_size=151936)
+    text_tokenizer.additional_stop_token_ids = {2151, 151644}
+    data = build_sglang_talker_request(
+        thinker_hidden_states=torch.ones((1, 4)),
+        tokenizer=text_tokenizer,
+        codec_vocab_size=3072,
+        codec_eos_id=2150,
+        max_new_tokens=64,
+        min_new_tokens=64,
+    )
+    orchestrator = BatchedPenalizerOrchestrator(
+        vocab_size=3072,
+        batch=CpuBatch(data.req),
+        penalizers={BatchedMinNewTokensPenalizer},
+    )
+    penalizer = orchestrator.penalizers[BatchedMinNewTokensPenalizer]
+    stopped_ids = (
+        torch.isneginf(penalizer.stop_token_penalties[0])
+        .nonzero(as_tuple=True)[0]
+        .tolist()
+    )
+
+    assert data.req.sampling_params.max_new_tokens == 64
+    assert data.req.sampling_params.min_new_tokens == 64
+    assert data.req.sampling_params.ignore_eos is False
+    assert stopped_ids == [2150]
+    assert max(stopped_ids) < 3072
+    assert data.req.tokenizer.eos_token_id == 2150
+    assert data.req.tokenizer.additional_stop_token_ids == set()
+    assert data.req.tokenizer.decode([7]) == text_tokenizer.decode([7])
+    assert text_tokenizer.eos_token_id == 151645
+    assert text_tokenizer.additional_stop_token_ids == {2151, 151644}
+
+
+def test_build_talker_request_defaults_minimum_length_to_zero() -> None:
+    from sglang.srt.sampling.penaltylib import BatchedMinNewTokensPenalizer
+    from sglang.srt.sampling.penaltylib.orchestrator import BatchedPenalizerOrchestrator
+
+    class CpuBatch:
+        def __init__(self, req: Any) -> None:
+            self.device = torch.device("cpu")
+            self.reqs = [req]
+
+    text_tokenizer = FakeQwenTokenizer(eos_token_id=151645, vocab_size=151936)
+    text_tokenizer.additional_stop_token_ids = {2151, 151644}
+    data = build_sglang_talker_request(
+        thinker_hidden_states=torch.ones((1, 4)),
+        tokenizer=text_tokenizer,
+        codec_vocab_size=3072,
+        codec_eos_id=2150,
+    )
+    orchestrator = BatchedPenalizerOrchestrator(
+        vocab_size=3072,
+        batch=CpuBatch(data.req),
+        penalizers={BatchedMinNewTokensPenalizer},
+    )
+
+    assert data.req.sampling_params.min_new_tokens == 0
+    assert orchestrator.is_required is False
+    assert text_tokenizer.eos_token_id == 151645
+    assert text_tokenizer.additional_stop_token_ids == {2151, 151644}
+
+
+def test_build_talker_request_uses_sglang_min_max_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "sglang.srt.sampling.sampling_params.SamplingParams.normalize",
+        lambda _self, _tok: None,
+    )
+
+    with pytest.raises(ValueError, match="min_new_tokens must be in"):
+        build_sglang_talker_request(
+            thinker_hidden_states=torch.ones((1, 4)),
+            tokenizer=FakeQwenTokenizer(),
+            codec_vocab_size=4096,
+            max_new_tokens=63,
+            min_new_tokens=64,
+        )
+
+
 @pytest.mark.usefixtures("_patch_sampling")
 class TestBuildTalkerRequestTensorStorage:
     """build_sglang_talker_request stores the tensor and honours the Req list contract."""
@@ -2212,20 +2303,25 @@ def _talker_seed_self(
     fake = SimpleNamespace(
         _repetition_mask=torch.zeros(max_bs, vocab, dtype=torch.bool, device=device),
         _suppress_mask=torch.zeros(max_bs, vocab, dtype=torch.bool, device=device),
+        _min_new_token_stop_mask=torch.zeros(
+            max_bs, vocab, dtype=torch.bool, device=device
+        ),
         _repetition_penalties=torch.ones(max_bs, 1, device=device),
         _sampling_temperatures=torch.ones(max_bs, 1, device=device),
         _sampling_top_ps=torch.ones(max_bs, device=device),
         _sampling_top_ks=torch.ones(max_bs, dtype=torch.long, device=device),
         _sampling_min_ps=torch.zeros(max_bs, device=device),
         _sampling_seeds=torch.zeros(max_bs, dtype=torch.long, device=device),
+        _sampling_min_new_tokens=torch.zeros(max_bs, dtype=torch.long, device=device),
+        _sampling_output_lens=torch.zeros(max_bs, dtype=torch.long, device=device),
         _sampling_staging_cpu=torch.zeros(
-            6,
+            8,
             max_bs,
             dtype=torch.int64,
             device="cpu",
             pin_memory=device.type == "cuda",
         ),
-        _sampling_staging_gpu=torch.zeros(6, max_bs, dtype=torch.int64, device=device),
+        _sampling_staging_gpu=torch.zeros(8, max_bs, dtype=torch.int64, device=device),
         _sampling_staging_event=(torch.cuda.Event() if device.type == "cuda" else None),
         _sampled_token_ids=torch.zeros(max_bs, dtype=torch.long, device=device),
         _mask_set_value=torch.ones((), dtype=torch.bool, device=device),
@@ -2248,11 +2344,15 @@ def _talker_seed_req(seed: int | None, rid: str) -> SimpleNamespace:
         top_k=20,
         min_p=0.0,
         sampling_seed=seed,
+        min_new_tokens=0,
+        stop_token_ids=set(),
+        ignore_eos=False,
     )
     req = SimpleNamespace(
         sampling_params=sp,
         output_ids=[],
         _codec_suppress_tokens=None,
+        eos_token_ids=set(),
         rid=rid,
         decode_batch_idx=0,
     )
@@ -2308,11 +2408,15 @@ def _talker_prep_req(
         top_k=top_k,
         min_p=min_p,
         sampling_seed=seed,
+        min_new_tokens=0,
+        stop_token_ids=set(),
+        ignore_eos=False,
     )
     req = SimpleNamespace(
         sampling_params=sp,
         output_ids=list(output_ids or []),
         _codec_suppress_tokens=None,
+        eos_token_ids=set(),
         rid=rid,
         decode_batch_idx=0,
     )
@@ -2327,6 +2431,142 @@ def _advance_decode_step(requests: list[SimpleNamespace], tokens: list[int]) -> 
     for sched_req, token in zip(requests, tokens):
         sched_req.data.req.decode_batch_idx += 1
         sched_req.data.req.output_ids.append(token)
+
+
+def _real_talker_decode_req(
+    rid: str,
+    *,
+    min_new_tokens: int,
+    output_ids: list[int],
+    codec_eos_id: int = 6,
+    stop_token_ids: set[int] | None = None,
+    eos_token_ids: set[int] | None = None,
+    ignore_eos: bool = False,
+) -> SimpleNamespace:
+    text_tokenizer = FakeQwenTokenizer(eos_token_id=151645, vocab_size=151936)
+    text_tokenizer.additional_stop_token_ids = {3, 151644}
+    data = build_sglang_talker_request(
+        thinker_hidden_states=torch.ones((1, 4)),
+        tokenizer=text_tokenizer,
+        codec_vocab_size=8,
+        codec_eos_id=codec_eos_id,
+        min_new_tokens=min_new_tokens,
+        request_id=rid,
+    )
+    data.req.output_ids.extend(output_ids)
+    if stop_token_ids is not None:
+        data.req.sampling_params.stop_token_ids = stop_token_ids
+    if eos_token_ids is not None:
+        data.req.eos_token_ids = eos_token_ids
+    data.req.sampling_params.ignore_eos = ignore_eos
+    assert data.req.tokenizer.additional_stop_token_ids == set()
+    assert text_tokenizer.additional_stop_token_ids == {3, 151644}
+    return SimpleNamespace(data=data)
+
+
+def test_talker_decode_masks_only_codec_stops_until_each_rows_minimum() -> None:
+    fake = _talker_seed_self(max_bs=4, vocab=8)
+    fake._sampler = None
+    requests = [
+        _real_talker_decode_req(
+            "below-min",
+            min_new_tokens=3,
+            output_ids=[1, 2],
+            stop_token_ids={5, -1, 8},
+            eos_token_ids={6, 99},
+        ),
+        _real_talker_decode_req(
+            "at-min",
+            min_new_tokens=1,
+            # The prefill sampler's first token is already in output_ids.
+            output_ids=[1],
+            stop_token_ids={5},
+            eos_token_ids={6},
+        ),
+        _real_talker_decode_req(
+            "default-zero",
+            min_new_tokens=0,
+            output_ids=[],
+            stop_token_ids={5},
+            eos_token_ids={6},
+        ),
+        _real_talker_decode_req(
+            "ignore-eos",
+            min_new_tokens=9,
+            output_ids=[],
+            stop_token_ids={5},
+            eos_token_ids={6},
+            ignore_eos=True,
+        ),
+    ]
+    Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
+    logits = torch.tensor([[0.0, 0.0, 0.0, 8.0, 0.0, 9.0, 10.0, 0.0]] * len(requests))
+
+    selected = Qwen3OmniTalker._sample_decode_tokens(
+        fake,
+        logits,
+        SimpleNamespace(positions=torch.arange(len(requests))),
+    )
+
+    assert selected.tolist() == [3, 6, 6, 6]
+
+
+def test_talker_minimum_buffers_refresh_reuse_and_replace_requests() -> None:
+    fake = _talker_seed_self(max_bs=2, vocab=8)
+    requests = [
+        _real_talker_decode_req(
+            "a",
+            min_new_tokens=4,
+            output_ids=[1],
+            stop_token_ids={5, -1, 8},
+            eos_token_ids={6, 99},
+        ),
+        _real_talker_decode_req(
+            "b",
+            min_new_tokens=2,
+            output_ids=[2],
+            stop_token_ids={4},
+            eos_token_ids={7},
+        ),
+    ]
+    Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
+
+    assert fake._sampling_min_new_tokens.tolist() == [4, 2]
+    assert fake._sampling_output_lens.tolist() == [1, 1]
+    assert fake._min_new_token_stop_mask[0].nonzero().flatten().tolist() == [5, 6]
+    assert fake._min_new_token_stop_mask[1].nonzero().flatten().tolist() == [4, 7]
+
+    fake._sampled_token_ids[:2] = torch.tensor([3, 4])
+    for sched_req, token in zip(requests, [3, 4]):
+        sched_req.data.req.decode_batch_idx += 1
+        sched_req.data.req.output_ids.append(token)
+    Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
+
+    assert fake._sampling_output_lens.tolist() == [2, 2]
+
+    replacements = [
+        _real_talker_decode_req(
+            "c",
+            min_new_tokens=1,
+            output_ids=[],
+            stop_token_ids={2},
+            eos_token_ids={3},
+        ),
+        _real_talker_decode_req(
+            "d",
+            min_new_tokens=7,
+            output_ids=[1, 2, 3],
+            stop_token_ids={1},
+            eos_token_ids={7},
+            ignore_eos=True,
+        ),
+    ]
+    Qwen3OmniTalker.prepare_decode_buffers(fake, replacements)
+
+    assert fake._sampling_min_new_tokens.tolist() == [1, 7]
+    assert fake._sampling_output_lens.tolist() == [0, 3]
+    assert fake._min_new_token_stop_mask[0].nonzero().flatten().tolist() == [2, 3]
+    assert not fake._min_new_token_stop_mask[1].any()
 
 
 def test_talker_prepare_decode_buffers_steady_state_reuse() -> None:
@@ -2459,12 +2699,19 @@ def test_talker_prepare_decode_buffers_cuda_matches_fresh_rebuild() -> None:
         "_sampling_top_ks",
         "_sampling_min_ps",
         "_sampling_seeds",
-        "_sampling_staging_cpu",
-        "_sampling_staging_gpu",
+        "_sampling_min_new_tokens",
+        "_sampling_output_lens",
         "_repetition_mask",
         "_suppress_mask",
+        "_min_new_token_stop_mask",
     ):
         torch.testing.assert_close(getattr(fake, name), getattr(fresh, name))
+    torch.testing.assert_close(
+        fake._sampling_staging_cpu[:6], fresh._sampling_staging_cpu[:6]
+    )
+    torch.testing.assert_close(
+        fake._sampling_staging_gpu[:6], fresh._sampling_staging_gpu[:6]
+    )
 
 
 def test_talker_decode_reuse_marks_the_mask_without_a_host_scalar(monkeypatch) -> None:
