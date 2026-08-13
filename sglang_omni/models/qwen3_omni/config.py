@@ -191,7 +191,7 @@ def _talker_stage(
             "speech_enabled": True,
             "feedback_enabled": True,
             "enable_partial_start": enable_partial_start,
-            "partial_start_min_chunks": 5,
+            "partial_start_min_chunks": 3,
         },
         gpu=gpu,
         runtime_arg_map={"max_seq_len": "talker_max_seq_len"},
@@ -212,6 +212,7 @@ def _code2wav_stage(*, gpu: int, process: str) -> StageConfig:
         factory_args={
             "device": current_platform.device_type,
             "enable_cuda_graph": True,
+            "initial_chunk_size": 2,
         },
         gpu=gpu,
         runtime=StageRuntimeConfig(

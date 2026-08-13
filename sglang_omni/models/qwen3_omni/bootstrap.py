@@ -133,7 +133,7 @@ def create_talker_scheduler(
     nccl_port: int | None = None,
     total_gpu_memory_fraction: float | None = None,
     enable_partial_start: bool = False,
-    partial_start_min_chunks: int = 5,
+    partial_start_min_chunks: int = 3,
 ):
     """Create the Qwen talker scheduler."""
     del speech_enabled
