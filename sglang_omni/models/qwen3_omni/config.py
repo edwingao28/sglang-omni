@@ -44,7 +44,18 @@ _COLOCATED_STAGE_ENV_DEFAULTS = {
 }
 
 
-def _preprocessing_stage(*, process: str) -> StageConfig:
+def _preprocessing_stage(*, process: str, speech_enabled: bool = False) -> StageConfig:
+    if speech_enabled:
+        # Speech: no mm_aggregate relay — thinker and talker_ar each declare
+        # the 3-way join themselves, so preprocessing fans the lightweight
+        # state directly to them.
+        next_stages = ["image_encoder", "audio_encoder", "thinker", "talker_ar"]
+        route_fn = f"{_PKG}.request_builders.resolve_preprocessing_next_stages_speech"
+        join_targets = ("thinker", "talker_ar")
+    else:
+        next_stages = ["image_encoder", "audio_encoder", "mm_aggregate"]
+        route_fn = f"{_PKG}.request_builders.resolve_preprocessing_next_stages"
+        join_targets = ("mm_aggregate",)
     return StageConfig(
         name="preprocessing",
         process=process,
@@ -54,8 +65,8 @@ def _preprocessing_stage(*, process: str) -> StageConfig:
             "max_seq_len": "thinker_max_seq_len",
             "video_fps": "video_fps",
         },
-        next=["image_encoder", "audio_encoder", "mm_aggregate"],
-        route_fn=f"{_PKG}.request_builders.resolve_preprocessing_next_stages",
+        next=next_stages,
+        route_fn=route_fn,
         project_payload={
             "image_encoder": (
                 f"{_PKG}.request_builders.project_preprocessing_to_image_encoder"
@@ -63,64 +74,63 @@ def _preprocessing_stage(*, process: str) -> StageConfig:
             "audio_encoder": (
                 f"{_PKG}.request_builders.project_preprocessing_to_audio_encoder"
             ),
-            "mm_aggregate": (
-                f"{_PKG}.request_builders.project_preprocessing_to_mm_aggregate"
-            ),
+            **{
+                target: (
+                    f"{_PKG}.request_builders.project_preprocessing_to_mm_aggregate"
+                )
+                for target in join_targets
+            },
         },
     )
 
 
-def _image_encoder_stage(*, gpu: int, process: str) -> StageConfig:
+def _encoder_join_edges(*, speech_enabled: bool) -> dict[str, object]:
+    if speech_enabled:
+        return {
+            "next": ["thinker", "talker_ar"],
+            "route_fn": f"{_PKG}.request_builders.resolve_encoder_next_stages",
+            "project_payload": {
+                "thinker": (f"{_PKG}.request_builders.project_encoder_to_mm_aggregate"),
+                "talker_ar": (f"{_PKG}.request_builders.project_encoder_to_talker_ar"),
+            },
+        }
+    return {
+        "next": "mm_aggregate",
+        "project_payload": {
+            "mm_aggregate": f"{_PKG}.request_builders.project_encoder_to_mm_aggregate"
+        },
+    }
+
+
+def _image_encoder_stage(
+    *, gpu: int, process: str, speech_enabled: bool = False
+) -> StageConfig:
     return StageConfig(
         name="image_encoder",
         process=process,
         factory=f"{_PKG}.stages.create_image_encoder_executor",
         factory_args={"device": current_platform.device_type, "dtype": None},
         gpu=gpu,
-        next="mm_aggregate",
-        project_payload={
-            "mm_aggregate": f"{_PKG}.request_builders.project_encoder_to_mm_aggregate"
-        },
+        **_encoder_join_edges(speech_enabled=speech_enabled),
     )
 
 
-def _audio_encoder_stage(*, gpu: int, process: str) -> StageConfig:
+def _audio_encoder_stage(
+    *, gpu: int, process: str, speech_enabled: bool = False
+) -> StageConfig:
     return StageConfig(
         name="audio_encoder",
         process=process,
         factory=f"{_PKG}.stages.create_audio_encoder_executor",
         factory_args={"device": current_platform.device_type, "dtype": None},
         gpu=gpu,
-        next="mm_aggregate",
-        project_payload={
-            "mm_aggregate": f"{_PKG}.request_builders.project_encoder_to_mm_aggregate"
-        },
+        **_encoder_join_edges(speech_enabled=speech_enabled),
     )
 
 
-def _aggregate_stage(
-    *, process: str, gpu: int, speech_enabled: bool = False
-) -> StageConfig:
-    # Route the merged payload to talker_ar so partial-start can fire — the
-    # policy hook needs the new_request before `stream_done` arrives.
-    if speech_enabled:
-        return StageConfig(
-            name="mm_aggregate",
-            process=process,
-            factory=f"{_PKG}.stages.create_aggregate_executor",
-            gpu=gpu,
-            wait_for=["preprocessing", "image_encoder", "audio_encoder"],
-            wait_for_fn=f"{_PKG}.request_builders.resolve_mm_aggregate_wait_sources",
-            merge_fn=f"{_PKG}.merge.merge_for_thinker",
-            next=["thinker", "talker_ar"],
-            route_fn=f"{_PKG}.request_builders.resolve_mm_aggregate_next_stages",
-            disable_direct_cuda_ipc_payload=True,
-            project_payload={
-                "talker_ar": (
-                    f"{_PKG}.request_builders.project_mm_aggregate_to_talker_ar"
-                ),
-            },
-        )
+def _aggregate_stage(*, process: str, gpu: int) -> StageConfig:
+    # Text-only pipeline keeps the aggregate relay; the speech pipeline joins
+    # directly at thinker/talker_ar instead.
     return StageConfig(
         name="mm_aggregate",
         process=process,
@@ -139,6 +149,15 @@ def _thinker_stage(*, gpu: int, speech_enabled: bool, process: str) -> StageConf
     factory_args = {"thinker_max_seq_len": 8192, "enable_async_decode": True}
     if speech_enabled:
         factory_args["speech_enabled"] = True
+    join_kwargs: dict = {}
+    if speech_enabled:
+        join_kwargs = {
+            "wait_for": ["preprocessing", "image_encoder", "audio_encoder"],
+            "wait_for_fn": (
+                f"{_PKG}.request_builders.resolve_mm_aggregate_wait_sources"
+            ),
+            "merge_fn": f"{_PKG}.merge.merge_for_thinker",
+        }
     return StageConfig(
         name="thinker",
         process=process,
@@ -147,6 +166,7 @@ def _thinker_stage(*, gpu: int, speech_enabled: bool, process: str) -> StageConf
         gpu=gpu,
         runtime_arg_map={"max_seq_len": "thinker_max_seq_len"},
         next="decode",
+        **join_kwargs,
         stream_to=["talker_ar", "decode"] if speech_enabled else ["decode"],
         route_fn=(
             f"{_PKG}.request_builders.resolve_thinker_next_stages"
@@ -180,9 +200,15 @@ def _talker_stage(
     process: str,
     enable_partial_start: bool,
 ) -> StageConfig:
+    # The talker joins the merged multimodal payload itself so partial-start
+    # can fire — the policy hook needs the new_request before `stream_done`
+    # arrives from the thinker.
     return StageConfig(
         name="talker_ar",
         process=process,
+        wait_for=["preprocessing", "image_encoder", "audio_encoder"],
+        wait_for_fn=f"{_PKG}.request_builders.resolve_mm_aggregate_wait_sources",
+        merge_fn=f"{_PKG}.request_builders.merge_for_talker",
         factory=f"{_PKG}.stages.create_talker_ar_executor_from_config",
         factory_args={
             # Note (Xuesong): must exceed talker_max_new_tokens (4096) +
@@ -233,7 +259,7 @@ def _text_stages() -> list[StageConfig]:
         _preprocessing_stage(process="pipeline"),
         _image_encoder_stage(gpu=0, process="pipeline"),
         _audio_encoder_stage(gpu=0, process="pipeline"),
-        _aggregate_stage(process="pipeline", gpu=0, speech_enabled=False),
+        _aggregate_stage(process="pipeline", gpu=0),
         _thinker_stage(gpu=0, speech_enabled=False, process="pipeline"),
         _decode_stage(process="pipeline"),
     ]
@@ -247,18 +273,18 @@ def _speech_stages(
     enable_partial_start: bool,
 ) -> list[StageConfig]:
     return [
-        _preprocessing_stage(process=process_by_stage["preprocessing"]),
+        _preprocessing_stage(
+            process=process_by_stage["preprocessing"],
+            speech_enabled=True,
+        ),
         _image_encoder_stage(
             gpu=thinker_gpu,
             process=process_by_stage["image_encoder"],
+            speech_enabled=True,
         ),
         _audio_encoder_stage(
             gpu=thinker_gpu,
             process=process_by_stage["audio_encoder"],
-        ),
-        _aggregate_stage(
-            process=process_by_stage["mm_aggregate"],
-            gpu=thinker_gpu,
             speech_enabled=True,
         ),
         _thinker_stage(
@@ -276,16 +302,14 @@ def _speech_stages(
     ]
 
 
-# The admission-path stages (preprocessing, encoders, mm_aggregate) share one
-# "frontend" process: they are sequential per request, so separate processes
-# only add IPC hops (~0.15-0.2s of TTFT/TTFA at c32) without any parallelism
-# win. The GIL-heavy AR loops (thinker, talker, code2wav) keep their own
-# processes.
+# The admission-path encoder stages share one "frontend" process: they are
+# sequential per request, so separate processes only add IPC hops
+# (~0.15-0.2s of TTFT/TTFA at c32) without any parallelism win. The GIL-heavy
+# AR loops (thinker, talker, code2wav) keep their own processes.
 _SPEECH_DEFAULT_PROCESSES = {
     "preprocessing": "preprocessing",
     "image_encoder": "frontend",
     "audio_encoder": "frontend",
-    "mm_aggregate": "frontend",
     "thinker": "thinker",
     "decode": "decode",
     "talker_ar": "talker_ar",
@@ -329,7 +353,7 @@ class Qwen3OmniPipelineConfig(_Qwen3OmniBasePipelineConfig):
 
 
 class Qwen3OmniSpeechPipelineConfig(_Qwen3OmniBasePipelineConfig):
-    """8-stage speech pipeline (text + audio output)."""
+    """7-stage speech pipeline (text + audio output)."""
 
     @classmethod
     def mem_fraction_role_to_stage(cls) -> dict[str, str]:
@@ -374,11 +398,11 @@ class Qwen3OmniSpeechPipelineConfig(_Qwen3OmniBasePipelineConfig):
 
 
 class Qwen3OmniSpeechColocatedPipelineConfig(Qwen3OmniSpeechPipelineConfig):
-    """8-stage speech pipeline for single-GPU stage colocation.
+    """7-stage speech pipeline for single-GPU stage colocation.
 
     The topology places image_encoder, audio_encoder, thinker, talker_ar, and
-    code2wav on the same GPU while keeping preprocessing, aggregation, and
-    decode as CPU stages. Runtime memory budgets are supplied by the selected
+    code2wav on the same GPU while keeping preprocessing and decode as CPU
+    stages. Runtime memory budgets are supplied by the selected
     config file so deployments can use hardware-appropriate stage fractions and
     SGLang AR cache fractions.
     """
