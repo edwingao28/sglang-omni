@@ -442,6 +442,14 @@ class ModelRunner:
                 batch_result = self.custom_prefill_forward(
                     forward_batch, schedule_batch, requests
                 )
+                if batch_result is not None:
+                    record_custom_eager = getattr(
+                        self.tp_worker,
+                        "record_custom_prefill_eager",
+                        None,
+                    )
+                    if callable(record_custom_eager):
+                        record_custom_eager()
             else:
                 self.before_decode(
                     forward_batch,

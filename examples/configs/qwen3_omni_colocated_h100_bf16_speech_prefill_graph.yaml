@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: Apache-2.0
+# Opt-in H100 qualification profile for Qwen3-Omni speech Breakable Prefill
+# CUDA Graphs. This reuses the 42-bucket, 2048-token ladder already exercised
+# by the Qwen3-Omni audio-input gate; larger prefills remain valid and fall
+# back to eager execution. Keep the default speech profile unchanged until
+# replay, parity, and memory qualification pass.
+config_cls: Qwen3OmniSpeechColocatedPipelineConfig
+name: qwen3-omni-colocated-h100-bf16-speech-prefill-graph
+model_path: Qwen/Qwen3-Omni-30B-A3B-Instruct
+
+runtime_overrides:
+  thinker:
+    server_args_overrides:
+      # Qualification requests must exercise complete, reproducible prefills;
+      # production deployments may retain the normal radix-cache default.
+      disable_radix_cache: true
+      cuda_graph_backend_prefill: breakable
+      cuda_graph_bs_prefill:
+        - 4
+        - 8
+        - 12
+        - 16
+        - 20
+        - 24
+        - 28
+        - 32
+        - 48
+        - 64
+        - 80
+        - 96
+        - 112
+        - 128
+        - 144
+        - 160
+        - 176
+        - 192
+        - 208
+        - 224
+        - 240
+        - 256
+        - 288
+        - 320
+        - 352
+        - 384
+        - 416
+        - 448
+        - 480
+        - 512
+        - 576
+        - 640
+        - 704
+        - 768
+        - 832
+        - 896
+        - 960
+        - 1024
+        - 1280
+        - 1536
+        - 1792
+        - 2048
+      cuda_graph_max_bs_prefill: 2048
+
+stage_overrides:
+  image_encoder:
+    runtime:
+      resources:
+        total_gpu_memory_fraction: 0.02
+
+  audio_encoder:
+    runtime:
+      resources:
+        total_gpu_memory_fraction: 0.02
+
+  thinker:
+    runtime:
+      resources:
+        total_gpu_memory_fraction: 0.78
+
+  talker_ar:
+    runtime:
+      resources:
+        total_gpu_memory_fraction: 0.10
+
+  code2wav:
+    runtime:
+      resources:
+        total_gpu_memory_fraction: 0.02

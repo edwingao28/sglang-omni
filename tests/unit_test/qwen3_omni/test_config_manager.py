@@ -193,6 +193,68 @@ def test_qwen3_omni_mmsu_example_config_uses_text_pipeline() -> None:
     assert thinker_args["server_args_overrides"]["max_running_requests"] == 4
 
 
+def test_qwen3_omni_speech_prefill_graph_h100_config_is_explicit_and_opt_in() -> None:
+    config_path = (
+        _REPO_ROOT
+        / "examples"
+        / "configs"
+        / "qwen3_omni_colocated_h100_bf16_speech_prefill_graph.yaml"
+    )
+
+    config = ConfigManager.from_file(str(config_path)).config
+    thinker_args = resolve_stage_factory_args(_stage(config, "thinker"), config)
+    overrides = thinker_args["server_args_overrides"]
+
+    assert isinstance(config, Qwen3OmniSpeechColocatedPipelineConfig)
+    assert overrides["disable_radix_cache"] is True
+    assert overrides["cuda_graph_backend_prefill"] == "breakable"
+    assert overrides["cuda_graph_bs_prefill"] == [
+        4,
+        8,
+        12,
+        16,
+        20,
+        24,
+        28,
+        32,
+        48,
+        64,
+        80,
+        96,
+        112,
+        128,
+        144,
+        160,
+        176,
+        192,
+        208,
+        224,
+        240,
+        256,
+        288,
+        320,
+        352,
+        384,
+        416,
+        448,
+        480,
+        512,
+        576,
+        640,
+        704,
+        768,
+        832,
+        896,
+        960,
+        1024,
+        1280,
+        1536,
+        1792,
+        2048,
+    ]
+    assert overrides["cuda_graph_max_bs_prefill"] == 2048
+
+
 def test_qwen_preprocessing_runtime_video_fps_resolves_to_factory_arg() -> None:
     config = Qwen3OmniSpeechColocatedPipelineConfig(model_path="dummy")
     preprocessing = _stage(config, "preprocessing")

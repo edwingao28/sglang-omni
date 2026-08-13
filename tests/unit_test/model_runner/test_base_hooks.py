@@ -140,6 +140,7 @@ def _runner(calls: list[str], *, custom_result):
     runner.tp_worker = SimpleNamespace(
         model_runner=object(),
         forward_batch_generation=standard_forward,
+        record_custom_prefill_eager=lambda: calls.append("record_custom_eager"),
     )
     return runner
 
@@ -163,7 +164,15 @@ def test_resolve_deferred_prefill_inputs_materializes_staged_ids():
 @pytest.mark.parametrize(
     ("is_prefill", "expected"),
     [
-        (True, ["before_prefill", "custom_prefill", "post_prefill"]),
+        (
+            True,
+            [
+                "before_prefill",
+                "custom_prefill",
+                "record_custom_eager",
+                "post_prefill",
+            ],
+        ),
         (False, ["before_decode", "custom_decode", "post_decode"]),
     ],
 )

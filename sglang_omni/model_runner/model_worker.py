@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+from collections import Counter
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -68,6 +69,10 @@ class ModelWorker:
         self._configure_backend_policy()
         self._init_model_runner()
         self._init_dllm_algorithm()
+        self._prefill_cuda_graph_replay_count = 0
+        self._prefill_cuda_graph_standard_eager_count = 0
+        self._prefill_cuda_graph_custom_eager_count = 0
+        self._prefill_cuda_graph_replay_buckets: Counter[int] = Counter()
 
         self.device = self.model_runner.device
         from sglang.srt.utils import broadcast_pyobj, set_random_seed
@@ -277,12 +282,125 @@ class ModelWorker:
 
         out = self.model_runner.forward(forward_batch=forward_batch)
         logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
+        self._record_prefill_cuda_graph_usage(
+            forward_batch,
+            can_run_graph=bool(can_run_cuda_graph),
+        )
         batch_result = GenerationBatchResult(
             logits_output=logits_output,
             can_run_cuda_graph=can_run_cuda_graph,
             expert_distribution_metrics=out.expert_distribution_metrics,
         )
         return batch_result
+
+    def _record_prefill_cuda_graph_usage(
+        self,
+        forward_batch: Any,
+        *,
+        can_run_graph: bool,
+    ) -> None:
+        forward_mode = getattr(forward_batch, "forward_mode", None)
+        is_extend = getattr(forward_mode, "is_extend", None)
+        is_cuda_graph = getattr(forward_mode, "is_cuda_graph", None)
+        is_split_prefill = getattr(forward_mode, "is_split_prefill", None)
+        if (
+            not callable(is_extend)
+            or not bool(is_extend(include_draft_extend_v2=True))
+            or (callable(is_cuda_graph) and bool(is_cuda_graph()))
+            or (callable(is_split_prefill) and bool(is_split_prefill()))
+        ):
+            return
+
+        if not hasattr(self, "_prefill_cuda_graph_replay_count"):
+            self._prefill_cuda_graph_replay_count = 0
+            self._prefill_cuda_graph_standard_eager_count = 0
+            self._prefill_cuda_graph_custom_eager_count = 0
+            self._prefill_cuda_graph_replay_buckets = Counter()
+
+        if not can_run_graph:
+            # This observes the standard SGLang forward path. Model-specific
+            # custom eager forwards (for example visual/deepstack Qwen inputs)
+            # return before ModelWorker is called and are intentionally absent.
+            self._prefill_cuda_graph_standard_eager_count += 1
+            return
+
+        runner = getattr(self.model_runner, "prefill_cuda_graph_runner", None)
+        actual_bucket = getattr(runner, "_static_num_tokens", None)
+        if actual_bucket is None:
+            logger.warning(
+                "Prefill CUDA graph replay completed without an observable "
+                "static bucket on %s",
+                type(runner).__name__,
+            )
+            return
+        self._prefill_cuda_graph_replay_count += 1
+        self._prefill_cuda_graph_replay_buckets[int(actual_bucket)] += 1
+
+    def record_custom_prefill_eager(self) -> None:
+        """Record a custom prefill forward that bypasses SGLang graph dispatch."""
+        if not hasattr(self, "_prefill_cuda_graph_custom_eager_count"):
+            self._prefill_cuda_graph_custom_eager_count = 0
+        self._prefill_cuda_graph_custom_eager_count += 1
+
+    def _prefill_cuda_graph_info(self) -> dict[str, Any]:
+        runner = getattr(self.model_runner, "prefill_cuda_graph_runner", None)
+        backend_runner = getattr(runner, "backend", None)
+        capture_num_tokens = getattr(runner, "capture_num_tokens", None)
+        if capture_num_tokens is not None:
+            capture_num_tokens = [int(value) for value in capture_num_tokens]
+
+        registry = getattr(runner, "buffer_registry", None)
+        has_slot = getattr(registry, "has_slot", None)
+        input_embeds_slot = bool(callable(has_slot) and has_slot("input_embeds"))
+
+        prefill_config = getattr(
+            getattr(self.server_args, "cuda_graph_config", None),
+            "prefill",
+            None,
+        )
+        backend = getattr(prefill_config, "backend", None)
+        replay_buckets = getattr(
+            self,
+            "_prefill_cuda_graph_replay_buckets",
+            Counter(),
+        )
+        snapshot_provider = getattr(
+            self,
+            "_prefill_cuda_graph_debug_snapshot_provider",
+            None,
+        )
+        return {
+            "backend": backend,
+            "runner": type(runner).__name__ if runner is not None else None,
+            "backend_runner": (
+                type(backend_runner).__name__ if backend_runner is not None else None
+            ),
+            # Qualification can retain graph admission, padding, static
+            # buffers, and live metadata while executing the body eagerly.
+            # Expose the positive attestation so the H100 gate fails closed.
+            "qualification_eager_replay": bool(
+                getattr(backend_runner, "_omni_qualification_eager_replay", False)
+            ),
+            "upstream_debug_eager": bool(
+                getattr(backend_runner, "_debug_eager", False)
+            ),
+            "capture_num_tokens": capture_num_tokens,
+            "input_embeds_slot": input_embeds_slot,
+            "replay_count": int(getattr(self, "_prefill_cuda_graph_replay_count", 0)),
+            "standard_eager_count": int(
+                getattr(self, "_prefill_cuda_graph_standard_eager_count", 0)
+            ),
+            "custom_eager_count": int(
+                getattr(self, "_prefill_cuda_graph_custom_eager_count", 0)
+            ),
+            "replay_buckets": {
+                str(bucket): int(count)
+                for bucket, count in sorted(replay_buckets.items())
+            },
+            "debug_snapshot": (
+                snapshot_provider() if callable(snapshot_provider) else None
+            ),
+        }
 
     def model_info(self) -> dict[str, Any]:
         return {
@@ -296,6 +414,7 @@ class ModelWorker:
                 self.model_runner, "update_weights_from_disk"
             ),
             "supports_weight_checker": True,
+            "prefill_cuda_graph": self._prefill_cuda_graph_info(),
         }
 
     def update_weights_from_disk(self, payload: dict[str, Any]) -> tuple[bool, str]:
