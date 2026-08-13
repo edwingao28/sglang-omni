@@ -518,3 +518,22 @@ def test_batched_step_uses_cuda_graph_runner_per_sub_batch() -> None:
         state = scheduler._stream_states[f"req-{index}"]
         assert state.emitted == 2
         assert len(state.audio_parts) == 1
+
+
+def test_next_message_ingests_queued_chunks_before_other_messages() -> None:
+    scheduler = _make_batching_scheduler(max_batch_wait_ms=0, batch_floor=2)
+    # req-a is mid-stream; its done message queues ahead of req-b's first chunks.
+    _feed_batch(scheduler, [("req-a", 1), ("req-a", 2)])
+    _drain_outbox(scheduler)
+    scheduler.inbox.put(IncomingMessage(request_id="req-a", type="stream_done", data=None))
+    scheduler.inbox.put(_stream_chunk("req-b", 5))
+    scheduler.inbox.put(_stream_chunk("req-b", 6))
+
+    msg = scheduler._next_message()
+
+    # Queued chunks were ingested (and decoded — threshold met) before the
+    # done message surfaced, instead of waiting behind it.
+    assert msg is not None and msg.type == "stream_done" and msg.request_id == "req-a"
+    state = scheduler._stream_states["req-b"]
+    assert state.emitted == 2
+    assert len(state.audio_parts) == 1
