@@ -370,6 +370,21 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
                     self._pending_messages.append(msg)
             if first_chunks:
                 self._handle_stream_chunk_batch(first_chunks)
+            # Draining routes steady chunks through _pending_messages, which
+            # would defeat inbox-side coalescing — re-coalesce a consecutive
+            # run of pending chunks into one batched ingest (order preserved).
+            if (
+                self._pending_messages
+                and self._pending_messages[0].type == "stream_chunk"
+            ):
+                run: list = []
+                while (
+                    self._pending_messages
+                    and self._pending_messages[0].type == "stream_chunk"
+                ):
+                    run.append(self._pending_messages.popleft())
+                self._handle_stream_chunk_batch(run)
+                return None
         if self._pending_messages:
             return self._pending_messages.popleft()
         deadline = self._batch_deadline()
