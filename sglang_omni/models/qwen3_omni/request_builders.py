@@ -1101,6 +1101,7 @@ def make_talker_scheduler_adapters(
         ]
         return {
             "max_new_tokens": int(params.get("talker_max_new_tokens", 4096)),
+            "min_new_tokens": int(params.get("talker_min_new_tokens", 0)),
             "temperature": float(params.get("talker_temperature", 0.9)),
             "top_k": int(params.get("talker_top_k", 50)),
             "top_p": float(params.get("talker_top_p", 1.0)),
