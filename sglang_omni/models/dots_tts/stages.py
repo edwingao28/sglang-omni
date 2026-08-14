@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -367,19 +368,30 @@ def create_reference_encode_executor(
     *,
     device: str | None = "cuda",
     gpu_id: int | None = None,
-    max_concurrency: int = 1,
+    max_concurrency: int = 8,
+    max_batch_size: int = 1,
+    max_batch_wait_ms: float = 4.0,
 ) -> SimpleScheduler:
     worker_device = _device(device, gpu_id)
     codec = load_dots_audio_codec(model_path, device=worker_device)
-    encoder = DotsReferenceEncoder(codec, model_id=str(model_path))
-    return SimpleScheduler(encoder.encode_payload, max_concurrency=max_concurrency)
+    encoder = DotsReferenceEncoder(
+        codec,
+        model_id=str(model_path),
+        max_batch_size=max_batch_size,
+        max_batch_wait_ms=max_batch_wait_ms,
+    )
+    return SimpleScheduler(
+        encoder.encode_payload,
+        max_concurrency=max_concurrency,
+        shutdown_callback=encoder.close,
+    )
 
 
 def create_sglang_latent_engine_executor(
     model_path: str,
     *,
     precision: str = "bfloat16",
-    optimize: bool = False,
+    optimize: bool = True,
     max_generate_length: int = 500,
     num_steps: int = 4,
     device: str | None = "cuda",
@@ -406,16 +418,37 @@ def create_vocoder_executor(
     *,
     device: str | None = "cuda",
     gpu_id: int | None = None,
-    optimize: bool = False,
+    optimize: bool = True,
     vocoder_merge_steps: int = 4,
+    max_batch_size: int = 4,
+    max_batch_wait_ms: int = 2,
+    stream_slots: int = 16,
     **_: Any,
 ) -> DotsTTSStreamingVocoder:
     codec = load_dots_audio_codec(model_path, device=_device(device, gpu_id))
-    return DotsTTSStreamingVocoder(
+    vocoder = DotsTTSStreamingVocoder(
         codec,
         optimize=optimize,
         merge_steps=vocoder_merge_steps,
+        max_batch_size=max_batch_size,
+        max_batch_wait_ms=max_batch_wait_ms,
+        stream_slots=stream_slots,
     )
+    # note (guozhihao-224): allocate the slot pool at setup so OOM / shape
+    # mismatch surface before readiness, not on the first live chunk.
+    vocoder.ensure_slot_pool()
+    logging.getLogger(__name__).info(
+        "dots.tts vocoder backend: slot-pooled eager streaming "
+        "(optimize=%s, merge_steps=%d, stream_slots=%d, batch_size=%d, "
+        "stream_batch_cap=%d, wait_ms=%d)",
+        optimize,
+        vocoder.merge_steps,
+        vocoder.stream_slots,
+        max_batch_size,
+        vocoder._stream_chunk_batch_max,
+        max_batch_wait_ms,
+    )
+    return vocoder
 
 
 __all__ = [

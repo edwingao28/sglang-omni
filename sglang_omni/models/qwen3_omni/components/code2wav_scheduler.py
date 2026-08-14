@@ -4,6 +4,7 @@
 Receives codec code chunks via inbox (stream_chunk), accumulates them,
 runs vocoder incrementally, outputs final audio via outbox.
 """
+
 from __future__ import annotations
 
 import json
@@ -21,12 +22,14 @@ from sglang_omni.models.qwen3_omni.components.code2wav_cuda_graph import (
     Code2WavRunResult,
     GraphKey,
 )
+from sglang_omni.platforms import current_platform
 from sglang_omni.profiler.event_recorder import emit as _emit_event
 from sglang_omni.profiler.event_recorder import get_recorder as _get_event_recorder
 from sglang_omni.profiler.event_recorder import get_recorder as _get_recorder
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.streaming_vocoder import StreamingVocoderBase
 from sglang_omni.utils.audio_payload import audio_waveform_payload
+from sglang_omni.utils.device import resolve_device_spec
 
 logger = logging.getLogger(__name__)
 
@@ -218,9 +221,7 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
             codes,
             graph_eligible=not is_final,
         )
-        trim = context * self._total_upsample
-        if trim:
-            wav = wav[..., trim:]
+        wav = wav[..., -(end - start) * self._total_upsample :]
         audio = wav.reshape(-1).detach().cpu().float().numpy().copy()
         if profile_metadata is not None:
             _emit_event(
@@ -272,8 +273,8 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         graph_eligible: bool = False,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         with torch.no_grad():
-            if self._device.type == "cuda":
-                torch.cuda.set_device(self._device)
+            if self._device.type != "cpu":
+                torch.get_device_module(self._device).set_device(self._device)
             if self._cuda_graph_runner is None:
                 result = Code2WavRunResult(
                     output=self._model(codes),
@@ -480,9 +481,7 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
                     f"{len(group)} requests"
                 )
             context = min(self._left_context_size, group[0][1].emitted)
-            trim = context * self._total_upsample
-            if trim:
-                wav = wav[..., trim:]
+            wav = wav[..., -(window_frames - context) * self._total_upsample :]
             host = wav.detach().cpu().float()
             for i, (rid, state) in enumerate(group):
                 audio = host[i].reshape(-1).numpy().copy()
@@ -519,7 +518,7 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
 def create_code2wav_scheduler(
     model_path: str,
     *,
-    device: str = "cuda",
+    device: str | None = None,
     dtype: str | None = None,
     gpu_id: int | None = None,
     stream_chunk_size: int = 10,
@@ -539,11 +538,11 @@ def create_code2wav_scheduler(
             "Code2Wav CUDA graph requires "
             "runtime.resources.total_gpu_memory_fraction"
         )
-    if gpu_id is not None:
-        device = f"cuda:{gpu_id}"
-    concrete_device = torch.device(device)
-    if concrete_device.type == "cuda" and concrete_device.index is None:
-        concrete_device = torch.device("cuda", torch.cuda.current_device())
+    concrete_device = torch.device(resolve_device_spec(device, gpu_id))
+    if concrete_device.type != "cpu" and concrete_device.index is None:
+        concrete_device = current_platform.get_device(
+            torch.get_device_module().current_device()
+        )
     device = str(concrete_device)
     stream_chunk_size = max(int(stream_chunk_size), 1)
     left_context_size = max(int(left_context_size), 0)

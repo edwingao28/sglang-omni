@@ -6,12 +6,19 @@ from typing import Any
 
 from sglang.srt.server_args import ServerArgs
 
+from sglang_omni.scheduling.generation_batch_policy import CudaGraphBackend
 from sglang_omni.vendor.sglang.server_args import override_server_args
 
 _DECODE_CUDA_GRAPH_ALIASES = {
     "cuda_graph_max_bs": "cuda_graph_max_bs_decode",
     "cuda_graph_bs": "cuda_graph_bs_decode",
 }
+
+
+def _platform_device_type() -> str:
+    from sglang_omni.platforms import current_platform
+
+    return current_platform.device_type
 
 
 def _normalize_decode_cuda_graph_overrides(kwargs: dict[str, Any]) -> None:
@@ -57,9 +64,10 @@ def build_sglang_server_args(
     # Existing Omni models remain eager-prefill by default. Models that have
     # adapted SGLang's phase-specific prefill contract opt in explicitly
     # through their generation defaults / server overrides.
-    kwargs.setdefault("cuda_graph_backend_prefill", "disabled")
+    kwargs.setdefault("cuda_graph_backend_prefill", CudaGraphBackend.DISABLED)
     if kwargs.get("mem_fraction_static") is None:
         kwargs.pop("mem_fraction_static", None)
+    kwargs.setdefault("device", _platform_device_type())
     server_args = ServerArgs(**kwargs)
     # DP attention is unsupported; reject at configuration time. Mixed
     # chunked prefill stays allowed (the bridge handles it natively).

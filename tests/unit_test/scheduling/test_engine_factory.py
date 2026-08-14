@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+import sglang_omni.platforms as platforms
 from tests.unit_test.fakes import FakeServerArgs
 
 TEST_MAX_TOTAL_TOKENS = 82000
@@ -88,6 +89,13 @@ def test_tts_engine_builder_phase_order_and_override_contract(monkeypatch) -> No
     from sglang_omni.scheduling import bootstrap, sglang_backend
     from sglang_omni.scheduling.engine_factory import TtsEngineBuilder
 
+    monkeypatch.setattr(
+        platforms.current_platform, "device_type", "cuda", raising=False
+    )
+    monkeypatch.setattr(
+        "sglang.srt.utils.get_device", lambda device_id=None: f"cuda:{device_id}"
+    )
+
     events: list[str] = []
     build_kwargs: dict[str, Any] = {}
     infrastructure_saw_graph_disabled: list[bool] = []
@@ -108,6 +116,8 @@ def test_tts_engine_builder_phase_order_and_override_contract(monkeypatch) -> No
     class FakeWorker:
         def __init__(self, server_args: Any) -> None:
             self.model_runner = FakeSGLangRunner(server_args)
+            self.model_config = SimpleNamespace(is_multimodal=False)
+            self.enable_prefill_input_embeds = False
 
     def fake_build_sglang_server_args(
         checkpoint_dir: str,
@@ -126,7 +136,8 @@ def test_tts_engine_builder_phase_order_and_override_contract(monkeypatch) -> No
                 decode=SimpleNamespace(
                     max_bs=kwargs["cuda_graph_max_bs"],
                     bs=kwargs["cuda_graph_bs"],
-                )
+                ),
+                prefill=SimpleNamespace(backend="disabled", bs=None, max_bs=None),
             ),
             disable_cuda_graph=kwargs["disable_cuda_graph"],
             enable_torch_compile=kwargs["enable_torch_compile"],
@@ -324,6 +335,7 @@ def test_tts_engine_builder_phase_order_and_override_contract(monkeypatch) -> No
         "post_scheduler_setup",
     ]
     assert build_kwargs["max_running_requests"] == 2
+    assert build_kwargs["device"] == "cuda"
     assert build_kwargs["cuda_graph_max_bs"] == 8
     assert build_kwargs["torch_compile_max_bs"] == 8
     assert build_kwargs["mem_fraction_static"] == 0.7
@@ -350,12 +362,21 @@ def test_asr_engine_builder_phase_order_and_failure_cleanup(monkeypatch) -> None
         def init_cuda_graphs(self) -> None:
             events.append("init_cuda_graphs")
 
-    model_worker = SimpleNamespace(model_runner=FakeSGLangRunner())
+    model_worker = SimpleNamespace(
+        model_runner=FakeSGLangRunner(),
+        model_config=SimpleNamespace(is_multimodal=False),
+        enable_prefill_input_embeds=False,
+    )
 
     def fake_server_args(*args: Any, **kwargs: Any) -> Any:
         del args, kwargs
         events.append("server_args")
-        return SimpleNamespace()
+        return SimpleNamespace(
+            cuda_graph_config=SimpleNamespace(
+                prefill=SimpleNamespace(backend="disabled")
+            ),
+            _cuda_graph_config_locked=set(),
+        )
 
     def fake_validate(**kwargs: Any) -> None:
         assert kwargs["model_name"] == "Test ASR"

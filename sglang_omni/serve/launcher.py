@@ -208,6 +208,9 @@ def _model_capabilities_log_summary(
         "streaming_vocoder": capabilities.supports_streaming_vocoder,
         "cuda_graph": capabilities.supports_cuda_graph,
         "torch_compile": capabilities.supports_torch_compile,
+        "breakable_prefill_cuda_graph": (
+            capabilities.supports_breakable_prefill_cuda_graph
+        ),
     }
 
 
@@ -433,6 +436,7 @@ async def _run_server(
             allowed_media_domains=allowed_media_domains,
             tts_batch_max_items=tts_batch_max_items,
             architectures=[pipeline_config.architecture],
+            audio_chunking=pipeline_config.audio_chunking,
         )
         profiler_dir = os.environ.get("SGLANG_TORCH_PROFILER_DIR")
         profiler_ctl = ProfilerControlClient(mp_runner.stage_control_endpoints)
