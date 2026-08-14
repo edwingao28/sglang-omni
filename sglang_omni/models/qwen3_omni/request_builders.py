@@ -708,8 +708,8 @@ def build_sglang_talker_request(
     request data keeps a device-backed FIFO of future text rows for decode.
 
     Stores the original tensor on SGLangARRequestData.prefill_input_embeds
-    when input_embeds_are_projected, so the model runner can skip the
-    list→tensor reconversion during prefill.
+    (projected or not), so the model runner consumes it directly and no
+    CPU list conversion happens on the request path.
 
     Args:
         thinker_hidden_states: Embed layer hidden states [seq_len, hidden_size].
@@ -755,10 +755,9 @@ def build_sglang_talker_request(
         origin_input_text="",
         origin_input_ids=input_ids_list,
         sampling_params=sampling_params,
-        # Convert hidden states to list-of-lists for Req.input_embeds
-        input_embeds=(
-            None if input_embeds_are_projected else prefill_embeds_tensor.cpu().tolist()
-        ),
+        # Embeds ride SGLangARRequestData.prefill_input_embeds as a tensor;
+        # Req.input_embeds stays None so no CPU list conversion happens here.
+        input_embeds=None,
         eos_token_ids={int(codec_eos_id)} if codec_eos_id is not None else None,
         vocab_size=codec_vocab_size,
     )
@@ -817,9 +816,7 @@ def build_sglang_talker_request(
         temperature=temperature,
         output_ids=req.output_ids,
         req=req,
-        prefill_input_embeds=(
-            prefill_embeds_tensor if input_embeds_are_projected else None
-        ),
+        prefill_input_embeds=prefill_embeds_tensor,
     )
     data.suppress_tokens = list(req._codec_suppress_tokens or [])
     data.talker_model_inputs = dict(talker_model_inputs or {})
