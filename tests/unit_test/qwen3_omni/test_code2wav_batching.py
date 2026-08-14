@@ -948,3 +948,56 @@ def test_initial_codec_chunk_frames_zero_keeps_steady_threshold() -> None:
     assert _drain_outbox(scheduler) == []
     _feed_batch(scheduler, [("req-1", 2)])
     assert [m.type for m in _drain_outbox(scheduler)] == ["stream"]
+
+
+def _done(request_id: str) -> IncomingMessage:
+    return IncomingMessage(request_id=request_id, type="stream_done", data=None)
+
+
+def test_next_message_ingests_first_chunks_before_other_messages() -> None:
+    scheduler = _make_batching_scheduler(max_batch_wait_ms=0, batch_floor=2)
+    # req-a is mid-stream; its done message queues ahead of req-b first chunks.
+    _feed_batch(scheduler, [("req-a", 1), ("req-a", 2)])
+    _drain_outbox(scheduler)
+    scheduler.inbox.put(_done("req-a"))
+    scheduler.inbox.put(_stream_chunk("req-b", 5))
+    scheduler.inbox.put(_stream_chunk("req-b", 6))
+
+    msg = scheduler._next_message()
+
+    # req-b's first chunks were ingested (and decoded — threshold met) before
+    # the done message surfaced, instead of waiting behind it.
+    assert msg is not None and msg.type == "stream_done"
+    assert msg.request_id == "req-a"
+    state = scheduler._stream_states["req-b"]
+    assert state.emitted == 2
+    assert len(state.audio_parts) == 1
+
+
+def test_next_message_keeps_steady_chunks_in_fifo_order() -> None:
+    scheduler = _make_batching_scheduler(max_batch_wait_ms=0, batch_floor=2)
+    _feed_batch(scheduler, [("req-a", 1), ("req-a", 2)])
+    _drain_outbox(scheduler)
+    scheduler.inbox.put(_done("req-a"))
+    scheduler.inbox.put(_stream_chunk("req-a", 3))
+    scheduler.inbox.put(_stream_chunk("req-a", 4))
+
+    msg = scheduler._next_message()
+
+    # Steady chunks do not jump the queue: the done surfaces first, the
+    # steady chunks are still pending (not ingested).
+    assert msg is not None and msg.type == "stream_done"
+    assert len(scheduler._stream_states["req-a"].chunks) == 2
+
+    # The pending run is then re-coalesced into ONE batched ingest.
+    batches: list[int] = []
+    original = scheduler.on_stream_chunk_batch
+
+    def _recording(items):
+        batches.append(len(items))
+        return original(items)
+
+    scheduler.on_stream_chunk_batch = _recording
+    assert scheduler._next_message() is None
+    assert batches == [2]
+    assert scheduler._stream_states["req-a"].emitted == 4

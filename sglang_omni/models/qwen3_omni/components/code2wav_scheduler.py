@@ -343,7 +343,55 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
             return None
         return min(due) + self._max_batch_wait_s
 
+    def _drain_inbox(self):
+        while True:
+            try:
+                yield self.inbox.get_nowait()
+            except queue.Empty:
+                return
+
     def _next_message(self):
+        # Note (wenyao): at a wave boundary ~2x batch_ceiling stream_done
+        # finals hit the inbox together and each runs a serial eager final
+        # decode, so a newly arrived first chunk otherwise waits behind
+        # 13-17 of them (measured first-ingest p95 ~780ms at c32, p50
+        # 0.3ms). Only a request's FIRST chunk jumps the queue — that is
+        # the TTFA-critical message; steady chunks and finals keep FIFO
+        # order so final decodes are not deferred (deferring them
+        # measurably lengthens e2e and drops closed-loop rps 2-4%).
+        # Content-invariant: decode windows are pinned per request by the
+        # threshold, chunk order per request is FIFO-preserved, and a
+        # request's stream_done still follows its own chunks; only
+        # cross-request batch composition changes.
+        if self._can_batch_stream_chunks:
+            first_chunks: list = []
+            for msg in self._drain_inbox():
+                if (
+                    msg.type == "stream_chunk"
+                    and msg.request_id not in self._stream_states
+                    and not self._is_aborted(msg.request_id)
+                ):
+                    first_chunks.append(msg)
+                else:
+                    self._pending_messages.append(msg)
+            if first_chunks:
+                self._handle_stream_chunk_batch(first_chunks)
+            # Draining routes steady chunks through _pending_messages, which
+            # would defeat inbox-side coalescing (_collect_stream_chunk_batch
+            # only pulls from the inbox) — re-coalesce a consecutive run of
+            # pending chunks into one batched ingest (order preserved).
+            if (
+                self._pending_messages
+                and self._pending_messages[0].type == "stream_chunk"
+            ):
+                run: list = []
+                while (
+                    self._pending_messages
+                    and self._pending_messages[0].type == "stream_chunk"
+                ):
+                    run.append(self._pending_messages.popleft())
+                self._handle_stream_chunk_batch(run)
+                return None
         if self._pending_messages:
             return self._pending_messages.popleft()
         deadline = self._batch_deadline()
