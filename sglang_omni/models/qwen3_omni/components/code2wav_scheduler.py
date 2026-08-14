@@ -123,6 +123,7 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         sample_rate: int = 24000,
         codec_eos_token_id: int = 2150,
         enable_batching: bool = False,
+        initial_codec_chunk_frames: int = 0,
         max_batch_wait_ms: int = 0,
         batch_floor: int = 2,
         batch_ceiling: int = 8,
@@ -148,6 +149,12 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         self._enable_batching = bool(enable_batching)
         self._max_batch_wait_s = max(int(max_batch_wait_ms), 0) / 1000.0
         self._batch_floor = max(int(batch_floor), 1)
+        # First-chunk decode threshold; 0 keeps the steady chunk size. Clamped
+        # like resolve_initial_codec_chunk_frames so the window never exceeds
+        # one steady chunk.
+        self._initial_codec_chunk_frames = min(
+            max(int(initial_codec_chunk_frames), 0), int(stream_chunk_size)
+        )
         self._batch_ceiling = min(max(int(batch_ceiling), 1), _DECOMPOSE_SIZES[0])
         self._drain_mode = False
         self._last_fire_reason: str | None = None
@@ -373,6 +380,8 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         """New frames the next step consumes; capped at one chunk so a backlog
         cannot push the window outside the captured key set."""
         ready = self._ready(state)
+        if state.emitted == 0 and self._initial_codec_chunk_frames:
+            ready = min(ready, self._initial_codec_chunk_frames)
         if self._chunk_aligned_dispatch:
             return min(ready, self._stream_chunk_size)
         return ready
@@ -414,7 +423,9 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         due: dict[tuple[int, int], list[tuple[str, Code2WavStreamState]]] = {}
         for rid, state in self._stream_state_items():
             ready = self._ready(state)
-            if state.emitted == 0 and ready >= self._stream_chunk_size:
+            if state.emitted == 0 and ready >= (
+                self._initial_codec_chunk_frames or self._stream_chunk_size
+            ):
                 first_ready.append((rid, state))
                 continue
             if state.emitted > 0 and ready >= self._stream_chunk_size:
@@ -620,6 +631,7 @@ def create_code2wav_scheduler(
     stream_chunk_size: int = 10,
     left_context_size: int = 25,
     enable_batching: bool = False,
+    initial_codec_chunk_frames: int = 0,
     max_batch_wait_ms: int = 0,
     batch_floor: int = 2,
     batch_ceiling: int = 8,
@@ -686,6 +698,7 @@ def create_code2wav_scheduler(
         stream_chunk_size=stream_chunk_size,
         left_context_size=left_context_size,
         enable_batching=enable_batching,
+        initial_codec_chunk_frames=initial_codec_chunk_frames,
         max_batch_wait_ms=max_batch_wait_ms,
         batch_floor=batch_floor,
         batch_ceiling=batch_ceiling,

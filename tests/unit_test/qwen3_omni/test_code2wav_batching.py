@@ -922,3 +922,29 @@ def test_batch_end_event_reports_mixed_sub_batch_execution(monkeypatch) -> None:
         },
     ]
     assert end_meta["subbatch_decomposition"] == [2, 1]
+
+
+def test_initial_codec_chunk_frames_fires_first_window_early() -> None:
+    scheduler = _make_batching_scheduler(
+        max_batch_wait_ms=0, batch_floor=2, initial_codec_chunk_frames=1
+    )
+    _feed_batch(scheduler, [("req-1", 1)])
+    messages = _drain_outbox(scheduler)
+    assert [m.type for m in messages] == ["stream"]
+    # First window decodes only the initial frames, not a full steady chunk.
+    assert scheduler._model.calls == [(1, 2, 1)]
+    assert scheduler._stream_states["req-1"].emitted == 1
+    # Steady threshold is unchanged: one more chunk is below the steady size.
+    _feed_batch(scheduler, [("req-1", 2)])
+    assert _drain_outbox(scheduler) == []
+    _feed_batch(scheduler, [("req-1", 3)])
+    assert [m.type for m in _drain_outbox(scheduler)] == ["stream"]
+    assert scheduler._stream_states["req-1"].emitted == 3
+
+
+def test_initial_codec_chunk_frames_zero_keeps_steady_threshold() -> None:
+    scheduler = _make_batching_scheduler(max_batch_wait_ms=0, batch_floor=2)
+    _feed_batch(scheduler, [("req-1", 1)])
+    assert _drain_outbox(scheduler) == []
+    _feed_batch(scheduler, [("req-1", 2)])
+    assert [m.type for m in _drain_outbox(scheduler)] == ["stream"]
