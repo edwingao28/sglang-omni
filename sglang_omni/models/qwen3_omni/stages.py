@@ -1076,9 +1076,26 @@ def create_talker_ar_executor_from_config(
     total_gpu_memory_fraction: float | None = None,
     enable_partial_start: bool = False,
     partial_start_min_chunks: int = 3,
+    prefill_max_requests: int | None = None,
+    prefill_decode_interleave: bool = False,
 ):
     """Returns OmniScheduler for talker."""
     from sglang_omni.models.qwen3_omni.bootstrap import create_talker_scheduler
+
+    # Talker prefill quota (TTFA): each new request's talker prefill runs as a
+    # whole-sequence extend (chunked prefill is force-disabled for the talker —
+    # projected thinker embeds cannot be split across chunks), and upstream
+    # scheduling runs prefill before decode. Under a wave of arrivals the
+    # prefill batches monopolize scheduler steps and ongoing decodes lose
+    # their ~15ms cadence. `prefill_max_requests` caps how many prefills are
+    # admitted per batch (upstream ServerArgs field, enforced by
+    # PrefillAdder.add_one_req); `prefill_decode_interleave` guarantees a
+    # decode step between prefill steps (OmniScheduler knob). Both default to
+    # current behavior.
+    if prefill_max_requests is not None and int(prefill_max_requests) < 1:
+        raise ValueError(
+            f"prefill_max_requests must be >= 1 or None, got {prefill_max_requests}"
+        )
 
     # Note (Xuesong, Chenyang): cuda_graph defaults to ON for the talker
     # after #384, which routed talker MoE through `self.experts` (FusedMoE)
@@ -1088,11 +1105,15 @@ def create_talker_ar_executor_from_config(
     # Sampler.forward doesn't forward seed to flashinfer, so
     # under cuda graph the captured RNG is boot-dependent and ~5% of prompts
     # trigger degenerate AR loops (see #408). Revert once upstream lands.
+    stage_defaults: dict[str, Any] = {}
+    if prefill_max_requests is not None:
+        stage_defaults["prefill_max_requests"] = int(prefill_max_requests)
     overrides = build_generation_batch_overrides(
         max_running_requests=32,
         server_args_overrides=server_args_overrides,
         disable_cuda_graph=False,
         sampling_backend="pytorch",
+        **stage_defaults,
     )
     overrides["tp_size"] = tp_size
     _apply_colocated_ar_memory_contract(
@@ -1131,6 +1152,7 @@ def create_talker_ar_executor_from_config(
         total_gpu_memory_fraction=total_gpu_memory_fraction,
         enable_partial_start=enable_partial_start,
         partial_start_min_chunks=partial_start_min_chunks,
+        prefill_decode_interleave=prefill_decode_interleave,
     )
     post_load_process_mem = get_process_gpu_memory_bytes(gpu_id)
     logger.info(
