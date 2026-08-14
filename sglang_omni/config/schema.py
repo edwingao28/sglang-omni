@@ -307,6 +307,10 @@ class PipelineConfig(BaseModel):
     endpoints: EndpointsConfig = Field(default_factory=EndpointsConfig)
     terminal_stages_fn: str | None = None
     config_cls: str | None = None
+    # Minimum gap between request admissions into the pipeline, in
+    # milliseconds. Staggers concurrent arrivals so their prefills do not
+    # land as one wave. 0 disables the gate (default).
+    admission_min_gap_ms: float = Field(default=0.0, ge=0.0)
 
     def model_post_init(self, __context: Any = None) -> None:
         self._validate_general()
