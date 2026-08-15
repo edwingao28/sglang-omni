@@ -21,6 +21,12 @@ class QwenTalkerModelRunner(ModelRunner):
     # Frames per code2wav transport message; matches the vocoder's stream
     # chunk size so one message carries exactly one decode window's frames.
     _flush_frames: int = 10
+    # Note (wenyao): code2wav's first decode fires at initial_chunk_size (2)
+    # ready frames, but a 10-frame flush cadence leaves it starved at 1 frame
+    # until step 10, delaying first audio by ~8 AR steps. Ship the first
+    # frames one-by-one (128B each) so the vocoder can fire the moment its
+    # threshold is met; 12 also lands the steady 10-frame grid at frame 12.
+    _early_flush_frames: int = 12
     # Codec EOS in layer 0; rows at/after it never reach the vocoder.
     _codec_eos_token_id: int = 2150
 
@@ -323,9 +329,11 @@ class QwenTalkerModelRunner(ModelRunner):
             # it). A finished request is force-flushed by
             # ``on_request_finished`` ahead of the terminal payload; an
             # aborted request's buffer simply dies with ``data``.
+            total_frames = frames_sent + len(buf)
             if (
                 frames_sent == 0
-                or (frames_sent + len(buf)) % self._flush_frames == 0
+                or total_frames <= self._early_flush_frames
+                or total_frames % self._flush_frames == 0
                 or eos_flags[idx]
             ):
                 self._flush_code_rows(request_id=req.rid, data=data)

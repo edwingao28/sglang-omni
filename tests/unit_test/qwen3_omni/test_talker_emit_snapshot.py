@@ -166,14 +166,15 @@ def test_flush_cadence_and_force_flush() -> None:
         if _step(runner, model, requests, [frame]):
             emitted_at[frame] = runner._outbox.sent[-1].data
 
-    # Boundaries 1 (immediate first frame), 10, 20; frames 2-9 stay buffered.
-    assert sorted(emitted_at) == [1, 10, 20]
-    assert emitted_at[1].ndim == 1
-    assert emitted_at[1].tolist() == [1, 1001]
-    assert emitted_at[10].shape == (9, code_groups)
-    assert emitted_at[10][:, 0].tolist() == list(range(2, 11))
-    assert emitted_at[20].shape == (10, code_groups)
-    assert emitted_at[20][:, 0].tolist() == list(range(11, 21))
+    # Early window ships frames 1-12 one-by-one so code2wav's first-chunk
+    # threshold is met as soon as the frames exist; steady state resumes on
+    # the 10-frame grid (boundary 20), frames 21-25 stay buffered.
+    assert sorted(emitted_at) == list(range(1, 13)) + [20]
+    for frame in range(1, 13):
+        assert emitted_at[frame].ndim == 1
+        assert emitted_at[frame].tolist() == [frame, 1000 + frame]
+    assert emitted_at[20].shape == (8, code_groups)
+    assert emitted_at[20][:, 0].tolist() == list(range(13, 21))
 
     # Finish force-flushes the 5-frame remainder ahead of the result payload.
     runner.on_request_finished("r0", requests[0].data)
@@ -189,7 +190,17 @@ def test_flush_cadence_and_force_flush() -> None:
 
     # Second finish is a no-op: nothing left to flush.
     runner.on_request_finished("r0", requests[0].data)
-    assert len(runner._outbox.sent) == 4
+    assert len(runner._outbox.sent) == 14
+
+
+def _run_early_window(runner, model, requests) -> None:
+    """Step past the per-frame early window so later frames actually buffer."""
+    early = QwenTalkerModelRunner._early_flush_frames
+    for frame in range(1, early + 1):
+        _step(runner, model, requests, [frame])
+    assert len(runner._outbox.sent) == early
+    assert requests[0].data.code_frames_sent == early
+    assert requests[0].data.pending_code_rows == []
 
 
 def test_eos_step_flushes_immediately_with_eos_row() -> None:
@@ -197,18 +208,22 @@ def test_eos_step_flushes_immediately_with_eos_row() -> None:
     runner = _runner(model)
     requests = _requests(1)
 
-    for frame in (1, 2, 3):
+    _run_early_window(runner, model, requests)
+    early = QwenTalkerModelRunner._early_flush_frames
+
+    for frame in (early + 1, early + 2):
         _step(runner, model, requests, [frame])
-    assert len(runner._outbox.sent) == 1  # only the first frame flushed
+    assert len(runner._outbox.sent) == early  # past the window, both buffered
 
     assert _step(runner, model, requests, [2150]) == 1
     msg = runner._outbox.sent[-1]
     assert msg.data.shape == (3, 2)
-    assert msg.data[:, 0].tolist() == [2, 3, 2150]  # EOS row rides inside
+    # EOS row rides inside, behind the two buffered frames.
+    assert msg.data[:, 0].tolist() == [early + 1, early + 2, 2150]
     assert msg.metadata == {"stream": False}
 
     runner.on_request_finished("r0", requests[0].data)
-    assert len(runner._outbox.sent) == 2  # nothing left to force-flush
+    assert len(runner._outbox.sent) == early + 1  # nothing left to force-flush
 
 
 def test_aborted_request_buffer_never_emits() -> None:
@@ -216,11 +231,14 @@ def test_aborted_request_buffer_never_emits() -> None:
     runner = _runner(model)
     requests = _requests(1)
 
-    for frame in (1, 2, 3):
+    _run_early_window(runner, model, requests)
+    early = QwenTalkerModelRunner._early_flush_frames
+
+    for frame in (early + 1, early + 2):
         _step(runner, model, requests, [frame])
 
     # Abort path: no finish hook, no flush -- the buffer dies with the data.
-    assert len(runner._outbox.sent) == 1
+    assert len(runner._outbox.sent) == early
     assert len(requests[0].data.pending_code_rows) == 2
 
 
@@ -229,11 +247,14 @@ def test_buffered_rows_survive_next_step_inplace_write() -> None:
     runner = _runner(model)
     requests = _requests(1)
 
-    for frame in (1, 2, 3):
+    _run_early_window(runner, model, requests)
+    early = QwenTalkerModelRunner._early_flush_frames
+
+    for frame in (early + 1, early + 2):
         _step(runner, model, requests, [frame])
     # Clobber the fixed-address output buffer after the last step.
     model._output_codes.copy_(model._output_codes + 999)
     runner.on_request_finished("r0", requests[0].data)
 
     tail = runner._outbox.sent[-1]
-    assert tail.data[:, 0].tolist() == [2, 3]
+    assert tail.data[:, 0].tolist() == [early + 1, early + 2]
