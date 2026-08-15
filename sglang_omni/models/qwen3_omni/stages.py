@@ -852,7 +852,7 @@ def create_image_encoder_executor(
         _encode,
         batch_compute_fn=_encode_batch,
         max_batch_size=32,
-        max_batch_wait_ms=50,
+        max_batch_wait_ms=int(os.getenv("SGLANG_OMNI_ENCODER_BATCH_WAIT_MS", "50")),
         request_cost_fn=_create_image_encoder_request_cost_fn(model),
         max_batch_cost=QWEN3_IMAGE_ENCODER_BATCH_BUDGET_BYTES,
     )
@@ -924,7 +924,7 @@ def create_audio_encoder_executor(
         _encode,
         batch_compute_fn=_encode_batch,
         max_batch_size=32,
-        max_batch_wait_ms=50,
+        max_batch_wait_ms=int(os.getenv("SGLANG_OMNI_ENCODER_BATCH_WAIT_MS", "50")),
     )
 
 
