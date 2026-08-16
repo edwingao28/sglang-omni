@@ -76,6 +76,21 @@ class QwenTalkerModelRunner(ModelRunner):
         if not self._feedback_enabled:
             return
 
+        tail_pending = [
+            bool(getattr(req.data, "tail_pending", False)) for req in requests
+        ]
+        if any(tail_pending):
+            # Note (wenyao): a prompt-only row has no assistant tail yet, so the
+            # frame it would emit here is not the request's first codec frame.
+            # inflight_middle_chunks suppresses sampling and streaming but not
+            # this emission, so the batch has to be prompt-only to skip it.
+            if not all(tail_pending):
+                raise RuntimeError(
+                    "Talker tail-pending and ordinary prefill requests cannot be "
+                    "batched together"
+                )
+            return
+
         if result.next_token_ids is None:
             return
         layer0_codes = result.next_token_ids
