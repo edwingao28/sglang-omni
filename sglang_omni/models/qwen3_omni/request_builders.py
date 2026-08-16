@@ -1120,18 +1120,24 @@ def make_talker_scheduler_adapters(
             "seed": _resolve_seed(params),
         }
 
+    # Note (wenyao): both builders must resolve sampling identically or the
+    # prompt-only request and the whole build disagree on the sampling seed.
+    talker_request_kwargs: dict[str, Any] = {
+        "tokenizer": tokenizer,
+        "codec_vocab_size": codec_vocab_size,
+        "codec_bos_id": codec_bos_id,
+        "audio_token_id": audio_token_id,
+        "image_token_id": image_token_id,
+        "video_token_id": video_token_id,
+        "thinker_config": thinker_config,
+        "resolve_sampling_config": _resolve_talker_sampling_config,
+    }
+
     def request_builder(payload: StagePayload) -> SGLangARRequestData:
         return _build_talker_request_data(
             payload,
             prefill_builder=prefill_builder,
-            tokenizer=tokenizer,
-            codec_vocab_size=codec_vocab_size,
-            codec_bos_id=codec_bos_id,
-            audio_token_id=audio_token_id,
-            image_token_id=image_token_id,
-            video_token_id=video_token_id,
-            thinker_config=thinker_config,
-            resolve_sampling_config=_resolve_talker_sampling_config,
+            **talker_request_kwargs,
         )
 
     def result_adapter(data: SGLangARRequestData) -> StagePayload:
@@ -1151,14 +1157,7 @@ def make_talker_scheduler_adapters(
         return build_talker_phase_one_request(
             payload,
             segment,
-            tokenizer=tokenizer,
-            codec_vocab_size=codec_vocab_size,
-            codec_bos_id=codec_bos_id,
-            audio_token_id=audio_token_id,
-            image_token_id=image_token_id,
-            video_token_id=video_token_id,
-            thinker_config=thinker_config,
-            resolve_sampling_config=resolve_sampling_config,
+            **talker_request_kwargs,
         )
 
     return (
