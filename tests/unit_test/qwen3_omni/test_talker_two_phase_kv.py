@@ -113,6 +113,8 @@ def _scheduler(
     pool_reserve: int = 1,
     pool_free: int = 4,
     coalesce_above: int = 8,
+    slice_rows: int = 0,
+    slice_every: int = 4,
 ) -> QwenTalkerScheduler:
     scheduler = object.__new__(QwenTalkerScheduler)
     scheduler._two_phase_prefill = True
@@ -121,6 +123,13 @@ def _scheduler(
     scheduler._two_phase_min_batch = min_batch
     scheduler._two_phase_pool_reserve = pool_reserve
     scheduler._two_phase_coalesce_above = coalesce_above
+    scheduler._two_phase_slice_rows = slice_rows
+    scheduler._two_phase_slice_every = slice_every
+    scheduler._phase_one_slice_ct = -slice_every
+    scheduler.waiting_queue = []
+    scheduler.forward_ct = 0
+    scheduler.prefill_decode_interleave = True
+    scheduler._interleave_defer_prefill = False
     scheduler._phase_one_queue = deque()
     scheduler._phase_one_data = {}
     scheduler._phase_one_denied = set()
@@ -586,3 +595,70 @@ def test_a_quiet_stage_prepays_a_lone_request_immediately() -> None:
 
     assert scheduler._phase_one_ready(_running(7))
     assert not scheduler._phase_one_ready(_running(8))
+
+
+def test_the_slice_never_outranks_a_waiting_ordinary_request() -> None:
+    """The slice spends a decode step; taking one while an ordinary request is
+    queued would trade the prepay against the admission it is meant to help."""
+    scheduler = _scheduler(slice_rows=8, slice_every=4, pool_free=32)
+    scheduler.forward_ct = 100
+
+    assert scheduler._phase_one_slice_claim()
+
+    scheduler.waiting_queue = [object()]
+
+    assert not scheduler._phase_one_slice_claim()
+
+
+def test_the_slice_is_off_until_a_row_budget_is_configured() -> None:
+    scheduler = _scheduler(slice_rows=0, pool_free=32)
+    scheduler.forward_ct = 100
+
+    assert not scheduler._phase_one_slice_claim()
+
+
+def test_consecutive_slice_claims_wait_out_the_budget_period() -> None:
+    scheduler = _scheduler(slice_rows=8, slice_every=4, pool_free=32)
+    scheduler.forward_ct = 100
+    scheduler._phase_one_slice_ct = 100
+
+    assert not scheduler._phase_one_slice_claim()
+
+    scheduler.forward_ct = 103
+
+    assert not scheduler._phase_one_slice_claim()
+
+    scheduler.forward_ct = 104
+
+    assert scheduler._phase_one_slice_claim()
+
+
+def test_rows_over_the_slice_budget_stay_queued_instead_of_leaking(
+    monkeypatch,
+) -> None:
+    """A held-back row still owns a pool slot and its prompt KV, so dropping it
+    from the queue would strand both until the request aborts."""
+    scheduler = _scheduler(slice_rows=2, min_batch=1, pool_free=32)
+    _offer(scheduler, 5)
+    scheduler._admit_phase_one_requests()
+    assert len(scheduler._phase_one_queue) == 5
+
+    running = SimpleNamespace(reqs=[], batch_is_full=False)
+
+    def _admit_all(self, running_batch):
+        taken = list(self.waiting_queue)
+        self.waiting_queue = []
+        return SimpleNamespace(batch_to_run=_batch(taken), running_batch=running_batch)
+
+    monkeypatch.setattr(
+        talker_scheduler_mod._Upstream, "get_new_batch_prefill", _admit_all
+    )
+
+    plan = scheduler._phase_one_prefill_plan(running)
+
+    assert [req.rid for req in plan.batch_to_run.reqs] == ["rid-0", "rid-1"]
+    assert [req.rid for req in scheduler._phase_one_queue] == [
+        "rid-2",
+        "rid-3",
+        "rid-4",
+    ]
