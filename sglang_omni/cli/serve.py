@@ -844,6 +844,39 @@ def apply_partial_start_cli_overrides(
     return pipeline_config
 
 
+def apply_talker_two_phase_prefill_cli_overrides(
+    pipeline_config: PipelineConfig,
+    *,
+    talker_two_phase_prefill: str,
+) -> PipelineConfig:
+    """Two-phase talker prefill: build the prompt rows while the K-gate is
+    still closed, so the gate only pays for the assistant tail."""
+    mode = _normalize_stage_toggle_mode(
+        "talker_two_phase_prefill", talker_two_phase_prefill
+    )
+    if mode == "default":
+        return pipeline_config
+    flag_name = "--talker-two-phase-prefill"
+    stage_name = _resolve_talker_stage(pipeline_config, flag_name=flag_name)
+    matching_stages = _find_matching_stages(
+        pipeline_config,
+        stage_name=stage_name,
+        reason=f"talker two-phase prefill to {mode!r}",
+    )
+    for stage in matching_stages:
+        if stage.factory != _QWEN_PARTIAL_START_TALKER_FACTORY:
+            raise typer.BadParameter(
+                f"{flag_name} currently supports only the Qwen3-Omni talker; "
+                f"stage {stage.name!r} uses factory {stage.factory!r}"
+            )
+    _apply_factory_args_updates(
+        pipeline_config,
+        matching_stages,
+        {"talker_two_phase_prefill": mode == "on"},
+    )
+    return pipeline_config
+
+
 def _apply_factory_args_updates(
     pipeline_config: PipelineConfig,
     stages: list[StageConfig],
@@ -1260,6 +1293,19 @@ def serve(
             ),
         ),
     ] = "default",
+    talker_two_phase_prefill: Annotated[
+        str,
+        typer.Option(
+            "--talker-two-phase-prefill",
+            "--talker_two_phase_prefill",
+            help=(
+                "Two-phase prefill for the Qwen3-Omni talker stage: "
+                "default|on|off. When on, the talker projects the prompt rows "
+                "while it is still waiting for thinker chunks, leaving only "
+                "the assistant tail on the first-codec critical path."
+            ),
+        ),
+    ] = "default",
     thinker_torch_compile: Annotated[
         str,
         typer.Option(
@@ -1555,6 +1601,10 @@ def serve(
     merged_config = apply_partial_start_cli_overrides(
         merged_config,
         talker_partial_start=talker_partial_start,
+    )
+    merged_config = apply_talker_two_phase_prefill_cli_overrides(
+        merged_config,
+        talker_two_phase_prefill=talker_two_phase_prefill,
     )
 
     if _should_print_merged_config(colocate=colocate, log_level=log_level):
