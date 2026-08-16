@@ -118,6 +118,7 @@ def _scheduler(*, max_parked: int = 8) -> QwenTalkerScheduler:
     scheduler._two_phase_max_parked = max_parked
     scheduler._phase_one_queue = deque()
     scheduler._phase_one_data = {}
+    scheduler._phase_one_denied = set()
     scheduler._parked_reqs = {}
     scheduler._prompt_segment_futures = {}
     scheduler._deferred_request_payloads = {}
@@ -318,6 +319,65 @@ def test_phase_one_admission_stops_at_the_park_cap() -> None:
 
     assert len(scheduler._phase_one_queue) == 2
     assert len(scheduler._phase_one_data) == 2
+
+
+def test_a_failed_phase_one_build_is_not_retried_every_pass() -> None:
+    """The payload stays deferred until its gate opens, so one raise is enough."""
+    scheduler = _scheduler()
+    calls: list[str] = []
+
+    def _boom(payload, segment):
+        calls.append(payload.request_id)
+        raise RuntimeError("phase-1 exploded")
+
+    scheduler._phase_one_builder = _boom
+    scheduler._deferred_request_payloads["rid-boom"] = SimpleNamespace(
+        request_id="rid-boom"
+    )
+    scheduler._prompt_segment_futures["rid-boom"] = SimpleNamespace(
+        done=lambda: True, result=lambda: None
+    )
+
+    scheduler._admit_phase_one_requests()
+    scheduler._admit_phase_one_requests()
+
+    assert calls == ["rid-boom"]
+    assert list(scheduler._phase_one_queue) == []
+
+
+def test_both_talker_builders_resolve_sampling_the_same_way(monkeypatch) -> None:
+    """A prompt-only request that seeds differently is a different request."""
+    from sglang_omni.models.qwen3_omni import request_builders
+
+    monkeypatch.setattr(
+        request_builders,
+        "TalkerPrefillBuilder",
+        lambda **kwargs: SimpleNamespace(
+            append_text_chunk=None,
+            mark_thinker_done=None,
+            build_prompt_segment=None,
+        ),
+    )
+    captured: dict = {}
+    monkeypatch.setattr(
+        request_builders,
+        "build_talker_phase_one_request",
+        lambda payload, segment, **kwargs: captured.update(kwargs),
+    )
+
+    adapters = request_builders.make_talker_scheduler_adapters(
+        tokenizer=None,
+        codec_vocab_size=32,
+        model=SimpleNamespace(config=SimpleNamespace(codec_eos_token_id=2)),
+        model_path="<unused>",
+        thinker_config=object(),
+        required_aux_hidden_key=0,
+    )
+    adapters[5](SimpleNamespace(request_id="rid-wire"), object())
+
+    resolved = captured["resolve_sampling_config"]({})
+    assert resolved["codec_eos_id"] == 2
+    assert captured["codec_vocab_size"] == 32
 
 
 def test_phase_one_admission_skips_a_payload_whose_gate_already_opened() -> None:
