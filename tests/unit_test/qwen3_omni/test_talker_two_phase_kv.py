@@ -106,11 +106,20 @@ def test_adopting_a_parked_request_moves_the_pool_row_and_the_prefix() -> None:
     assert torch.equal(fresh.prefix_indices, parked_prefix)
 
 
-def _scheduler(*, max_parked: int = 8) -> QwenTalkerScheduler:
+def _scheduler(
+    *,
+    max_parked: int = 8,
+    min_batch: int = 1,
+    pool_reserve: int = 1,
+    pool_free: int = 4,
+) -> QwenTalkerScheduler:
     scheduler = object.__new__(QwenTalkerScheduler)
     scheduler._two_phase_prefill = True
     scheduler._two_phase_kv = True
     scheduler._two_phase_max_parked = max_parked
+    scheduler._two_phase_min_batch = min_batch
+    scheduler._two_phase_pool_reserve = pool_reserve
+    scheduler.prefill_coalesce_wait_s = 0.06
     scheduler._phase_one_queue = deque()
     scheduler._phase_one_data = {}
     scheduler._phase_one_denied = set()
@@ -119,7 +128,7 @@ def _scheduler(*, max_parked: int = 8) -> QwenTalkerScheduler:
     scheduler._deferred_request_payloads = {}
     scheduler.req_to_token_pool = SimpleNamespace(
         req_to_token=torch.arange(60, dtype=torch.int32).reshape(4, 15),
-        available_size=lambda: 4,
+        available_size=lambda: pool_free,
     )
     return scheduler
 
@@ -503,3 +512,75 @@ def test_phase_one_request_carries_mrope_over_the_prompt_plus_the_tail(
     assert captured["mrope_input_ids"].shape[0] == PROMPT_ROWS + ASSISTANT_TAIL_ROWS
     assert captured["thinker_chunks_done"] is False
     assert req_data.tail_pending is True
+
+
+def _offer(scheduler, count: int, *, start: int = 0) -> None:
+    """Make ``count`` prebuilt payloads visible to the phase-1 admission pass."""
+    scheduler._phase_one_builder = lambda payload, segment: SimpleNamespace(
+        req=_phase_one_req(payload.request_id)
+    )
+    for index in range(start, start + count):
+        request_id = f"rid-{index}"
+        scheduler._deferred_request_payloads[request_id] = SimpleNamespace(
+            request_id=request_id
+        )
+        scheduler._prompt_segment_futures[request_id] = SimpleNamespace(
+            done=lambda: True, result=lambda: {}
+        )
+
+
+def test_the_park_cap_charges_a_parked_request_once() -> None:
+    """A parked request keeps its _phase_one_data entry; counting both dicts
+    charged it twice and spent half the budget on bookkeeping."""
+    scheduler = _scheduler(max_parked=3, pool_free=32)
+    _offer(scheduler, 2)
+    scheduler._admit_phase_one_requests()
+    scheduler._park_phase_one_batch(_batch(list(scheduler._phase_one_queue)))
+    scheduler._phase_one_queue.clear()
+
+    assert len(scheduler._parked_reqs) == 2
+    _offer(scheduler, 1, start=2)
+    scheduler._admit_phase_one_requests()
+
+    assert len(scheduler._phase_one_data) == 3
+    assert [req.rid for req in scheduler._phase_one_queue] == ["rid-2"]
+
+
+def test_phase_one_admission_leaves_pool_rows_for_ordinary_admission() -> None:
+    """get_num_allocatable_reqs floors on the same pool, so prepaying down to
+    the last row would stall the ordinary pass instead of helping it."""
+    scheduler = _scheduler(pool_reserve=4, pool_free=4)
+    _offer(scheduler, 2)
+
+    scheduler._admit_phase_one_requests()
+
+    assert not scheduler._phase_one_queue
+    assert not scheduler._phase_one_data
+
+
+def test_phase_one_waits_for_a_full_batch_before_spending_a_pass() -> None:
+    scheduler = _scheduler(min_batch=4, pool_free=32)
+    _offer(scheduler, 3)
+    scheduler._admit_phase_one_requests()
+
+    assert len(scheduler._phase_one_queue) == 3
+    assert not scheduler._phase_one_ready()
+
+    _offer(scheduler, 1, start=3)
+    scheduler._admit_phase_one_requests()
+
+    assert scheduler._phase_one_ready()
+
+
+def test_a_lone_phase_one_request_still_fires_once_the_deadline_passes() -> None:
+    """Without the deadline the min-batch floor would drop the c1 win."""
+    scheduler = _scheduler(min_batch=4, pool_free=32)
+    _offer(scheduler, 1)
+    scheduler._admit_phase_one_requests()
+
+    assert not scheduler._phase_one_ready()
+
+    for req in scheduler._phase_one_queue:
+        req._coalesce_enqueue_t -= scheduler.prefill_coalesce_wait_s
+
+    assert scheduler._phase_one_ready()
