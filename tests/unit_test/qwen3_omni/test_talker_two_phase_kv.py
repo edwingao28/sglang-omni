@@ -112,6 +112,7 @@ def _scheduler(
     min_batch: int = 1,
     pool_reserve: int = 1,
     pool_free: int = 4,
+    coalesce_above: int = 8,
 ) -> QwenTalkerScheduler:
     scheduler = object.__new__(QwenTalkerScheduler)
     scheduler._two_phase_prefill = True
@@ -119,7 +120,7 @@ def _scheduler(
     scheduler._two_phase_max_parked = max_parked
     scheduler._two_phase_min_batch = min_batch
     scheduler._two_phase_pool_reserve = pool_reserve
-    scheduler.prefill_coalesce_wait_s = 0.06
+    scheduler._two_phase_coalesce_above = coalesce_above
     scheduler._phase_one_queue = deque()
     scheduler._phase_one_data = {}
     scheduler._phase_one_denied = set()
@@ -558,29 +559,30 @@ def test_phase_one_admission_leaves_pool_rows_for_ordinary_admission() -> None:
     assert not scheduler._phase_one_data
 
 
-def test_phase_one_waits_for_a_full_batch_before_spending_a_pass() -> None:
-    scheduler = _scheduler(min_batch=4, pool_free=32)
+def _running(size: int):
+    return SimpleNamespace(reqs=[object()] * size)
+
+
+def test_a_loaded_stage_waits_for_a_full_batch_before_spending_a_pass() -> None:
+    scheduler = _scheduler(min_batch=4, coalesce_above=8, pool_free=32)
     _offer(scheduler, 3)
     scheduler._admit_phase_one_requests()
 
     assert len(scheduler._phase_one_queue) == 3
-    assert not scheduler._phase_one_ready()
+    assert not scheduler._phase_one_ready(_running(8))
 
     _offer(scheduler, 1, start=3)
     scheduler._admit_phase_one_requests()
 
-    assert scheduler._phase_one_ready()
+    assert scheduler._phase_one_ready(_running(8))
 
 
-def test_a_lone_phase_one_request_still_fires_once_the_deadline_passes() -> None:
-    """Without the deadline the min-batch floor would drop the c1 win."""
-    scheduler = _scheduler(min_batch=4, pool_free=32)
+def test_a_quiet_stage_prepays_a_lone_request_immediately() -> None:
+    """The min-batch floor is what a busy stage needs; applying it below that
+    load is what cost the low-concurrency win."""
+    scheduler = _scheduler(min_batch=4, coalesce_above=8, pool_free=32)
     _offer(scheduler, 1)
     scheduler._admit_phase_one_requests()
 
-    assert not scheduler._phase_one_ready()
-
-    for req in scheduler._phase_one_queue:
-        req._coalesce_enqueue_t -= scheduler.prefill_coalesce_wait_s
-
-    assert scheduler._phase_one_ready()
+    assert scheduler._phase_one_ready(_running(7))
+    assert not scheduler._phase_one_ready(_running(8))

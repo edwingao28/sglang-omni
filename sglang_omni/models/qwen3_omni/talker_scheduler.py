@@ -81,6 +81,7 @@ class QwenTalkerScheduler(OmniScheduler):
         talker_two_phase_kv: bool = True,
         talker_two_phase_max_parked: int = 24,
         talker_two_phase_min_batch: int = 4,
+        talker_two_phase_coalesce_above: int = 8,
         talker_two_phase_pool_reserve: int = 8,
         prompt_segment_prebuilder: Callable[[Any], Any] | None = None,
         phase_one_builder: Callable[[Any, Any], Any] | None = None,
@@ -114,6 +115,7 @@ class QwenTalkerScheduler(OmniScheduler):
         self._phase_one_builder = phase_one_builder
         self._two_phase_max_parked = max(0, int(talker_two_phase_max_parked))
         self._two_phase_min_batch = max(1, int(talker_two_phase_min_batch))
+        self._two_phase_coalesce_above = max(0, int(talker_two_phase_coalesce_above))
         self._two_phase_pool_reserve = max(1, int(talker_two_phase_pool_reserve))
         self._phase_one_queue = deque()
         self._phase_one_data = {}
@@ -133,12 +135,13 @@ class QwenTalkerScheduler(OmniScheduler):
         )
         logger.info(
             "talker two-phase prefill: requested=%s active=%s kv=%s max_parked=%s "
-            "min_batch=%s pool_reserve=%s",
+            "min_batch=%s coalesce_above=%s pool_reserve=%s",
             bool(talker_two_phase_prefill),
             self._two_phase_prefill,
             self._two_phase_kv,
             self._two_phase_max_parked,
             self._two_phase_min_batch,
+            self._two_phase_coalesce_above,
             self._two_phase_pool_reserve,
         )
 
@@ -292,22 +295,22 @@ class QwenTalkerScheduler(OmniScheduler):
             " ".join(f"{k}={v}" for k, v in fields.items()),
         )
 
-    def _phase_one_ready(self) -> bool:
+    def _phase_one_ready(self, running_batch: Any) -> bool:
         """Whether a phase-1 extend is worth the forward pass it costs.
 
-        Firing on every idle step spent a whole talker pass on one or two rows,
-        and on a colocated GPU that pass competes with thinker prefill — which
-        is what erased the win at high concurrency. Coalesce on the same
-        deadline the ordinary prefill uses, so a lone request is still prepaid
-        when the stage is quiet.
+        A pass carrying one or two rows is free while the stage is quiet, but
+        on a colocated GPU it competes with thinker prefill once the talker is
+        loaded — which is what erased the win at high concurrency. So coalesce
+        only above that load; below it the prepay stays opportunistic and the
+        low-concurrency win is untouched.
         """
         queue = self._phase_one_queue
         if not queue:
             return False
         if len(queue) >= self._two_phase_min_batch:
             return True
-        oldest = min(req._coalesce_enqueue_t for req in queue)
-        return time.perf_counter() - oldest >= self.prefill_coalesce_wait_s
+        running_bs = 0 if running_batch is None else len(running_batch.reqs)
+        return running_bs < self._two_phase_coalesce_above
 
     def get_new_batch_prefill(self, running_batch: Any) -> Any:
         deferring = bool(
@@ -319,7 +322,7 @@ class QwenTalkerScheduler(OmniScheduler):
             plan.batch_to_run is not None
             or deferring
             or not self._two_phase_kv
-            or not self._phase_one_ready()
+            or not self._phase_one_ready(plan.running_batch)
         )
         p1_plan = (
             None

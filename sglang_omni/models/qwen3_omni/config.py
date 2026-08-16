@@ -196,6 +196,7 @@ def _talker_stage(
             "talker_two_phase_kv": True,
             "talker_two_phase_max_parked": 24,
             "talker_two_phase_min_batch": 4,
+            "talker_two_phase_coalesce_above": 8,
             "talker_two_phase_pool_reserve": 8,
         },
         gpu=gpu,
