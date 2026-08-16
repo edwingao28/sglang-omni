@@ -7,8 +7,8 @@ from typing import Any
 
 import torch
 
-# HF lays the assistant block out as 3 chat-header rows, 4 tts pads, tts bos and
-# the first spoken token, so the tail extend is always exactly those rows.
+# Note (wenyao): 9 is HF's assistant layout, not a tunable — 3 chat-header rows,
+# 4 tts pads, tts bos, and the first spoken token (see build_assistant_part).
 ASSISTANT_TAIL_ROWS = 9
 
 _SHADOW_ATTR = "init_next_round_input"

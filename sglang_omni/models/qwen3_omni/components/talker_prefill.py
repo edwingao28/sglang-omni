@@ -27,6 +27,7 @@ from sglang_omni.models.qwen3_omni.pending_text_queue import (
     PendingTextTensorQueue,
     coerce_pending_text_queue,
 )
+from sglang_omni.models.qwen3_omni.two_phase_kv import ASSISTANT_TAIL_ROWS
 from sglang_omni.models.weight_loader import resolve_model_path
 
 _THINKER_EMBED_CANDIDATE_KEYS = (
@@ -34,10 +35,6 @@ _THINKER_EMBED_CANDIDATE_KEYS = (
     "model.embed_tokens.weight",
 )
 
-
-# Note (wenyao): 9 is HF's assistant layout, not a tunable — 3 chat-header rows,
-# 4 tts pads, tts bos, and the first spoken token (see build_assistant_part).
-_ASSISTANT_TAIL_ROWS = 9
 
 _EMBED_SOURCE_CACHE: dict[str, tuple[Path, str]] = {}
 _EMBED_HANDLE_CACHE: dict[str, Any] = {}
@@ -353,7 +350,7 @@ class TalkerPrefillBuilder:
             input_embeds=torch.cat(all_embeds, dim=0),
             input_ids=torch.cat(all_ids, dim=0),
             tail_input_ids=torch.full(
-                (_ASSISTANT_TAIL_ROWS,),
+                (ASSISTANT_TAIL_ROWS,),
                 self._tts_pad_token_id,
                 dtype=torch.long,
             ),

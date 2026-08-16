@@ -67,8 +67,8 @@ def test_the_instance_shadow_keeps_the_parked_prefix_across_a_requeue() -> None:
     req.init_next_round_input(_chunk_cache())
 
     assert torch.equal(req.prefix_indices, parked)
-    # cache_finished_req frees [cache_protected_len, kv_committed_len); the
-    # parked range is this request's own, so it must stay inside that window.
+    # Note (wenyao): cache_finished_req frees [cache_protected_len,
+    # kv_committed_len), and the parked range is this request's own to free.
     assert req.cache_protected_len == 0
     assert len(req.full_untruncated_fill_ids) == PROMPT_ROWS + ASSISTANT_TAIL_ROWS
 
@@ -104,11 +104,6 @@ def test_adopting_a_parked_request_moves_the_pool_row_and_the_prefix() -> None:
     assert parked.req_pool_idx is None and parked.kv is None
     fresh.init_next_round_input(_chunk_cache())
     assert torch.equal(fresh.prefix_indices, parked_prefix)
-
-
-# ---------------------------------------------------------------------------
-# scheduler
-# ---------------------------------------------------------------------------
 
 
 def _scheduler(*, max_parked: int = 8) -> QwenTalkerScheduler:
@@ -410,11 +405,6 @@ def test_a_tail_pending_request_keeps_taking_chunks_through_ingress() -> None:
 
     assert scheduler._find_request_data("rid-pending") is None
     assert scheduler._find_request_data("rid-ordinary") is ordinary._omni_data
-
-
-# ---------------------------------------------------------------------------
-# model runner + builders
-# ---------------------------------------------------------------------------
 
 
 def _runner():
