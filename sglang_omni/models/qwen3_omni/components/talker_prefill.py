@@ -451,6 +451,16 @@ class TalkerPrefillBuilder:
         )
 
     def append_text_chunk(self, req_data: Any, chunk: Any) -> None:
+        if getattr(req_data, "tail_pending", False):
+            # Note (wenyao): the first four assistant tokens land inside the
+            # 9-row tail, not in the future-text FIFO, so nothing can be routed
+            # into the FIFO until that tail exists.
+            buffered = getattr(req_data, "tail_pending_chunks", None)
+            if buffered is None:
+                buffered = req_data.tail_pending_chunks = []
+            buffered.append(chunk)
+            return
+
         if req_data.thinker_chunks_done:
             return
 
@@ -465,6 +475,10 @@ class TalkerPrefillBuilder:
         pending_text_queue.append(self.project_assistant_chunk(chunk))
 
     def mark_thinker_done(self, req_data: Any) -> None:
+        if getattr(req_data, "tail_pending", False):
+            req_data.tail_pending_stream_done = True
+            return
+
         if req_data.thinker_chunks_done:
             return
 

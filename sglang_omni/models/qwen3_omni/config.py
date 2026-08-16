@@ -193,6 +193,8 @@ def _talker_stage(
             "enable_partial_start": enable_partial_start,
             "partial_start_min_chunks": 5,
             "talker_two_phase_prefill": False,
+            "talker_two_phase_kv": True,
+            "talker_two_phase_max_parked": 8,
         },
         gpu=gpu,
         runtime_arg_map={"max_seq_len": "talker_max_seq_len"},

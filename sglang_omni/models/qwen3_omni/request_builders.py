@@ -708,6 +708,7 @@ def build_sglang_talker_request(
     video_token_id: int | None = None,
     talker_input_embeds: torch.Tensor | None = None,
     talker_input_ids: torch.Tensor | list[int] | None = None,
+    mrope_input_ids: torch.Tensor | None = None,
     input_embeds_are_projected: bool = False,
     pending_text_queue: (
         PendingTextTensorQueue | Iterable[torch.Tensor] | torch.Tensor | None
@@ -795,7 +796,12 @@ def build_sglang_talker_request(
             talker_can_use_linear_mrope,
         )
 
-        ids = input_ids_tensor.to(dtype=torch.long)
+        # Note (wenyao): two-phase prefill admits the prompt rows alone, but
+        # M-RoPE has to describe the sequence the request will actually hold —
+        # the delta the talker decodes from is derived from its full length.
+        ids = (input_ids_tensor if mrope_input_ids is None else mrope_input_ids).to(
+            dtype=torch.long
+        )
         mm_model_inputs = talker_model_inputs or {}
         if talker_can_use_linear_mrope(ids, mm_model_inputs, thinker_config):
             mrope_positions, mrope_position_delta = linear_mrope_positions(
@@ -1139,12 +1145,29 @@ def make_talker_scheduler_adapters(
     def prompt_segment_prebuilder(payload: StagePayload) -> TalkerPromptSegment:
         return prefill_builder.build_prompt_segment(payload)
 
+    def phase_one_builder(
+        payload: StagePayload, segment: TalkerPromptSegment
+    ) -> SGLangARRequestData:
+        return build_talker_phase_one_request(
+            payload,
+            segment,
+            tokenizer=tokenizer,
+            codec_vocab_size=codec_vocab_size,
+            codec_bos_id=codec_bos_id,
+            audio_token_id=audio_token_id,
+            image_token_id=image_token_id,
+            video_token_id=video_token_id,
+            thinker_config=thinker_config,
+            resolve_sampling_config=resolve_sampling_config,
+        )
+
     return (
         request_builder,
         result_adapter,
         prefill_builder.append_text_chunk,
         prefill_builder.mark_thinker_done,
         prompt_segment_prebuilder,
+        phase_one_builder,
     )
 
 
@@ -1176,7 +1199,9 @@ def _talker_prompt_prefill(
                 exc_info=True,
             )
         else:
-            return prefill_builder.compose_two_phase_prefill(segment, tail)
+            composed = prefill_builder.compose_two_phase_prefill(segment, tail)
+            composed["two_phase_composed"] = True
+            return composed
     return prefill_builder.build_prompt_prefill(
         payload,
         thinker_chunks,
@@ -1259,4 +1284,64 @@ def _build_talker_request_data(
     )
     req_data.tts_eos_embed = prompt_prefill["tts_eos_embed"]
     req_data.stage_payload = payload
+    req_data.two_phase_composed = bool(prompt_prefill.get("two_phase_composed", False))
+    return req_data
+
+
+def build_talker_phase_one_request(
+    payload: StagePayload,
+    segment: TalkerPromptSegment,
+    *,
+    tokenizer: Any,
+    codec_vocab_size: int,
+    codec_bos_id: int,
+    audio_token_id: int | None,
+    image_token_id: int | None,
+    video_token_id: int | None,
+    thinker_config: Any,
+    resolve_sampling_config: Callable[[dict[str, Any]], dict[str, Any]],
+) -> SGLangARRequestData:
+    """A request carrying only the prompt rows, so its KV can be written early.
+
+    The assistant tail is not built here and no thinker chunk is consumed: the
+    9 tail rows arrive as a second extend once the readiness gate opens, and the
+    whole-sequence build then takes this request's KV over.
+    """
+    sampling_cfg = resolve_sampling_config(payload.request.params)
+    if sampling_cfg.get("seed") is None:
+        sampling_cfg["seed"] = (
+            xxhash.xxh64_intdigest(str(payload.request_id).encode("utf-8"))
+            & MAX_INT32_POSITIVE
+        )
+    req_data = build_sglang_talker_request(
+        thinker_hidden_states=torch.empty(0),
+        tokenizer=tokenizer,
+        codec_vocab_size=codec_vocab_size,
+        max_new_tokens=sampling_cfg["max_new_tokens"],
+        min_new_tokens=sampling_cfg.get("min_new_tokens", 0),
+        temperature=sampling_cfg["temperature"],
+        top_k=sampling_cfg["top_k"],
+        top_p=sampling_cfg["top_p"],
+        repetition_penalty=sampling_cfg["repetition_penalty"],
+        request_id=payload.request_id,
+        codec_bos_id=codec_bos_id,
+        codec_eos_id=sampling_cfg["codec_eos_id"],
+        suppress_tokens=sampling_cfg["suppress_tokens"],
+        audio_token_id=audio_token_id,
+        image_token_id=image_token_id,
+        video_token_id=video_token_id,
+        talker_input_embeds=segment.input_embeds,
+        talker_input_ids=segment.input_ids,
+        mrope_input_ids=torch.cat([segment.input_ids, segment.tail_input_ids], dim=0),
+        input_embeds_are_projected=True,
+        pending_text_queue=None,
+        tts_pad_embed=segment.tts_pad_embed[0].detach(),
+        thinker_chunks_done=False,
+        thinker_config=thinker_config,
+        talker_model_inputs=segment.prompt_model_inputs,
+        seed=sampling_cfg.get("seed"),
+    )
+    req_data.tts_eos_embed = segment.tts_eos_embed[0].detach()
+    req_data.stage_payload = payload
+    req_data.tail_pending = True
     return req_data

@@ -1078,6 +1078,8 @@ def create_talker_ar_executor_from_config(
     enable_partial_start: bool = False,
     partial_start_min_chunks: int = 5,
     talker_two_phase_prefill: bool = False,
+    talker_two_phase_kv: bool = True,
+    talker_two_phase_max_parked: int = 8,
 ):
     """Returns OmniScheduler for talker."""
     from sglang_omni.models.qwen3_omni.bootstrap import create_talker_scheduler
@@ -1134,6 +1136,8 @@ def create_talker_ar_executor_from_config(
         enable_partial_start=enable_partial_start,
         partial_start_min_chunks=partial_start_min_chunks,
         talker_two_phase_prefill=talker_two_phase_prefill,
+        talker_two_phase_kv=talker_two_phase_kv,
+        talker_two_phase_max_parked=talker_two_phase_max_parked,
     )
     post_load_process_mem = get_process_gpu_memory_bytes(gpu_id)
     logger.info(
