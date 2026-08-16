@@ -79,7 +79,9 @@ class QwenTalkerScheduler(OmniScheduler):
         im_end_token_id: int | None = None,
         talker_two_phase_prefill: bool = False,
         talker_two_phase_kv: bool = True,
-        talker_two_phase_max_parked: int = 8,
+        talker_two_phase_max_parked: int = 24,
+        talker_two_phase_min_batch: int = 4,
+        talker_two_phase_pool_reserve: int = 8,
         prompt_segment_prebuilder: Callable[[Any], Any] | None = None,
         phase_one_builder: Callable[[Any, Any], Any] | None = None,
         **kwargs: Any,
@@ -111,6 +113,8 @@ class QwenTalkerScheduler(OmniScheduler):
         )
         self._phase_one_builder = phase_one_builder
         self._two_phase_max_parked = max(0, int(talker_two_phase_max_parked))
+        self._two_phase_min_batch = max(1, int(talker_two_phase_min_batch))
+        self._two_phase_pool_reserve = max(1, int(talker_two_phase_pool_reserve))
         self._phase_one_queue = deque()
         self._phase_one_data = {}
         self._phase_one_denied = set()
@@ -128,11 +132,14 @@ class QwenTalkerScheduler(OmniScheduler):
             and chunked_prefill_size <= 0
         )
         logger.info(
-            "talker two-phase prefill: requested=%s active=%s kv=%s max_parked=%s",
+            "talker two-phase prefill: requested=%s active=%s kv=%s max_parked=%s "
+            "min_batch=%s pool_reserve=%s",
             bool(talker_two_phase_prefill),
             self._two_phase_prefill,
             self._two_phase_kv,
             self._two_phase_max_parked,
+            self._two_phase_min_batch,
+            self._two_phase_pool_reserve,
         )
 
     def _prebuild_deferred_payload(self, payload: Any) -> None:
@@ -218,10 +225,10 @@ class QwenTalkerScheduler(OmniScheduler):
         """
         futures = self._prompt_segment_futures or {}
         for request_id, future in list(futures.items()):
-            if (
-                len(self._parked_reqs) + len(self._phase_one_data)
-                >= self._two_phase_max_parked
-            ):
+            # Note (wenyao): every parked request still holds its _phase_one_data
+            # entry, so adding the two dicts charged those requests twice and
+            # halved the budget exactly when concurrency needed all of it.
+            if len(self._phase_one_data) >= self._two_phase_max_parked:
                 return
             if (
                 request_id in self._phase_one_data
@@ -233,8 +240,13 @@ class QwenTalkerScheduler(OmniScheduler):
             if payload is None or not future.done():
                 continue
             # Note (wenyao): parked rows hold a pool slot outside running_batch,
-            # where max_running_requests does not see them.
-            if self.req_to_token_pool.available_size() <= 1:
+            # where max_running_requests does not see them, and
+            # get_num_allocatable_reqs floors on the same pool — so prepaying
+            # down to the last row would stall ordinary admission instead.
+            if (
+                self.req_to_token_pool.available_size()
+                <= self._two_phase_pool_reserve
+            ):
                 return
             try:
                 req_data = self._phase_one_builder(payload, future.result())
@@ -280,6 +292,23 @@ class QwenTalkerScheduler(OmniScheduler):
             " ".join(f"{k}={v}" for k, v in fields.items()),
         )
 
+    def _phase_one_ready(self) -> bool:
+        """Whether a phase-1 extend is worth the forward pass it costs.
+
+        Firing on every idle step spent a whole talker pass on one or two rows,
+        and on a colocated GPU that pass competes with thinker prefill — which
+        is what erased the win at high concurrency. Coalesce on the same
+        deadline the ordinary prefill uses, so a lone request is still prepaid
+        when the stage is quiet.
+        """
+        queue = self._phase_one_queue
+        if not queue:
+            return False
+        if len(queue) >= self._two_phase_min_batch:
+            return True
+        oldest = min(req._coalesce_enqueue_t for req in queue)
+        return time.perf_counter() - oldest >= self.prefill_coalesce_wait_s
+
     def get_new_batch_prefill(self, running_batch: Any) -> Any:
         deferring = bool(
             self.prefill_decode_interleave and self._interleave_defer_prefill
@@ -290,7 +319,7 @@ class QwenTalkerScheduler(OmniScheduler):
             plan.batch_to_run is not None
             or deferring
             or not self._two_phase_kv
-            or not self._phase_one_queue
+            or not self._phase_one_ready()
         )
         p1_plan = (
             None
