@@ -8,13 +8,19 @@ This module mirrors HF's talker prefill layout, then keeps HF's
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import torch
 from safetensors import safe_open
 
-from sglang_omni.models.qwen3_omni.components.talker_input import build_prefill_input
+from sglang_omni.models.qwen3_omni.components.talker_input import (
+    build_assistant_part,
+    build_prefill_input,
+    build_user_part,
+    segment_chat_template,
+)
 from sglang_omni.models.qwen3_omni.payload_types import Qwen3OmniPipelineState
 from sglang_omni.models.qwen3_omni.pending_text_queue import (
     PendingTextTensorQueue,
@@ -27,6 +33,10 @@ _THINKER_EMBED_CANDIDATE_KEYS = (
     "model.embed_tokens.weight",
 )
 
+
+# HF lays the assistant block out as 3 chat-header rows, 4 tts pads, tts bos and
+# the first spoken token — see ``build_assistant_part``.
+_ASSISTANT_TAIL_ROWS = 9
 
 _EMBED_SOURCE_CACHE: dict[str, tuple[Path, str]] = {}
 _EMBED_HANDLE_CACHE: dict[str, Any] = {}
@@ -117,6 +127,35 @@ def merge_prompt_modality(
         dtype=prompt_embed.dtype,
     )
     prompt_hidden[mask] = 0.0
+
+
+@dataclass(frozen=True)
+class TalkerPromptSegment:
+    """Everything the talker prompt rows produce, plus what the tail still needs.
+
+    ``input_embeds``/``input_ids`` are the projected user-segment rows: the
+    leading slice of the monolithic prefill, ending exactly at the final
+    ``<|im_start|>``. The remaining fields are the state the 9-row assistant
+    tail consumes once the thinker has emitted its first tokens.
+    """
+
+    input_embeds: torch.Tensor
+    input_ids: torch.Tensor
+    tail_input_ids: torch.Tensor
+    header_embed: torch.Tensor
+    speaker_id: int
+    prompt_model_inputs: dict[str, Any]
+    tts_bos_embed: torch.Tensor
+    tts_eos_embed: torch.Tensor
+    tts_pad_embed: torch.Tensor
+
+    @property
+    def prompt_rows(self) -> int:
+        return int(self.input_embeds.shape[0])
+
+    @property
+    def tail_rows(self) -> int:
+        return int(self.tail_input_ids.shape[0])
 
 
 def resolve_speaker_id(params: dict[str, Any], speaker_map: dict[str, int]) -> int:
@@ -260,6 +299,150 @@ class TalkerPrefillBuilder:
             "tts_eos_embed": tts_eos_embed[0].detach(),
             "prompt_model_inputs": prompt_model_inputs,
         }
+
+    def build_prompt_segment(self, payload) -> TalkerPromptSegment:
+        """Phase 1: project the prompt rows, before any thinker token exists.
+
+        The rows this returns are byte-identical to the leading slice
+        ``build_prompt_prefill`` produces, so a two-segment extend writes the
+        same KV as the monolithic one. See ``build_assistant_tail`` for the
+        tail, and ``tests/unit_test/qwen3_omni/test_talker_two_phase.py`` for
+        the parity gate that keeps the two in step.
+        """
+        state = Qwen3OmniPipelineState.from_dict(payload.data)
+        prompt_ids, prompt_embed, prompt_hidden, prompt_model_inputs = (
+            self._reconstruct_prompt_states(state)
+        )
+        multimodal_mask = self.build_multimodal_mask(prompt_ids)
+        segments = segment_chat_template(
+            prompt_ids,
+            im_start_token_id=self._im_start_token_id,
+            system_token_id=self._system_token_id,
+            user_token_id=self._user_token_id,
+            assistant_token_id=self._assistant_token_id,
+        )
+        header_start = self._assistant_header_start(segments)
+
+        all_embeds: list[torch.Tensor] = []
+        all_ids: list[torch.Tensor] = []
+        for seg in segments:
+            if seg["role"] != "user":
+                continue
+            start, end = seg["start"], seg["end"]
+            all_embeds.append(
+                build_user_part(
+                    thinker_embed=prompt_embed[start:end],
+                    thinker_hidden=prompt_hidden[start:end],
+                    multimodal_mask=multimodal_mask[start:end],
+                    text_projection=self._model.text_projection,
+                    hidden_projection=self._model.hidden_projection,
+                )
+            )
+            all_ids.append(prompt_ids[start:end].to(dtype=torch.long))
+        if not all_embeds:
+            raise ValueError("talker prompt prefill found no user segment")
+
+        tts_bos_embed, tts_eos_embed, tts_pad_embed = self.get_tts_special_embeds()
+        return TalkerPromptSegment(
+            input_embeds=torch.cat(all_embeds, dim=0),
+            input_ids=torch.cat(all_ids, dim=0),
+            tail_input_ids=torch.full(
+                (_ASSISTANT_TAIL_ROWS,),
+                self._tts_pad_token_id,
+                dtype=torch.long,
+            ),
+            header_embed=prompt_embed[header_start:],
+            speaker_id=resolve_speaker_id(payload.request.params, self._speaker_map),
+            prompt_model_inputs=prompt_model_inputs,
+            tts_bos_embed=tts_bos_embed,
+            tts_eos_embed=tts_eos_embed,
+            tts_pad_embed=tts_pad_embed,
+        )
+
+    def build_assistant_tail(
+        self,
+        segment: TalkerPromptSegment,
+        thinker_chunks: list[Any],
+        *,
+        thinker_done: bool,
+    ) -> dict[str, Any]:
+        """Phase 2: the 9-row assistant block plus the future text-row FIFO."""
+        if not thinker_chunks:
+            raise ValueError("assistant tail requires thinker chunks")
+
+        assistant_token_ids = self.extract_chunk_token_ids(thinker_chunks)
+        # Note (wenyao): a generated <|im_start|> would open a later assistant
+        # segment, and the monolithic builder keeps only the last one — the
+        # split point would no longer be the prompt/assistant boundary.
+        if bool((assistant_token_ids == self._im_start_token_id).any()):
+            raise ValueError(
+                "assistant tokens contain <|im_start|>; two-phase prefill cannot "
+                "split this request at the prompt/assistant boundary"
+            )
+        assistant_embed = self._load_prompt_token_embeddings(assistant_token_ids)
+        seg_embed = torch.cat([segment.header_embed, assistant_embed], dim=0)
+        if (
+            seg_embed.shape[0] > 0
+            and int(assistant_token_ids[-1].item()) == self._im_end_token_id
+        ):
+            seg_embed = seg_embed[:-1]
+
+        tail = build_assistant_part(
+            assistant_embed=seg_embed,
+            text_projection=self._model.text_projection,
+            codec_embed_fn=self._model.get_input_embeddings(),
+            tts_bos_embed=segment.tts_bos_embed,
+            tts_eos_embed=segment.tts_eos_embed,
+            tts_pad_embed=segment.tts_pad_embed,
+            speaker_id=segment.speaker_id,
+            codec_nothink_id=self._codec_nothink_id,
+            codec_think_bos_id=self._codec_think_bos_id,
+            codec_think_eos_id=self._codec_think_eos_id,
+            codec_pad_id=self._codec_pad_id,
+            codec_bos_id=self._codec_bos_id,
+            tts_pad_token_id=self._tts_pad_token_id,
+        )
+        future_text_rows = tail["future_text_rows"]
+        if (
+            not thinker_done
+            and future_text_rows is not None
+            and future_text_rows.shape[0] > 0
+        ):
+            future_text_rows = future_text_rows[:-1]
+        return {
+            "input_embeds": tail["input_embeds"],
+            "input_ids": tail["input_ids"].to(
+                device=segment.input_ids.device,
+                dtype=torch.long,
+            ),
+            "future_text_rows": future_text_rows,
+        }
+
+    def compose_two_phase_prefill(
+        self,
+        segment: TalkerPromptSegment,
+        tail: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Join both phases into the payload ``build_prompt_prefill`` returns."""
+        return {
+            "input_embeds": torch.cat(
+                [segment.input_embeds, tail["input_embeds"]], dim=0
+            ),
+            "input_ids": torch.cat([segment.input_ids, tail["input_ids"]], dim=0),
+            "pending_text_queue": self.tensor_rows_to_queue(tail["future_text_rows"]),
+            "tts_pad_embed": segment.tts_pad_embed[0].detach(),
+            "tts_eos_embed": segment.tts_eos_embed[0].detach(),
+            "prompt_model_inputs": segment.prompt_model_inputs,
+        }
+
+    def _assistant_header_start(self, segments: list[dict]) -> int:
+        for seg in reversed(segments):
+            if seg["role"] == "assistant":
+                return int(seg["start"])
+        raise ValueError(
+            "talker prompt has no trailing assistant segment; two-phase prefill "
+            "cannot locate the prompt/assistant boundary"
+        )
 
     def append_text_chunk(self, req_data: Any, chunk: Any) -> None:
         if req_data.thinker_chunks_done:
