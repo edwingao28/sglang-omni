@@ -171,6 +171,8 @@ def create_talker_scheduler(
     talker_two_phase_min_batch: int = 4,
     talker_two_phase_coalesce_above: int = 8,
     talker_two_phase_pool_reserve: int = 8,
+    talker_two_phase_slice_rows: int = 0,
+    talker_two_phase_slice_every: int = 4,
 ):
     """Create the Qwen talker scheduler."""
     del speech_enabled
@@ -297,6 +299,8 @@ def create_talker_scheduler(
         talker_two_phase_min_batch=talker_two_phase_min_batch,
         talker_two_phase_coalesce_above=talker_two_phase_coalesce_above,
         talker_two_phase_pool_reserve=talker_two_phase_pool_reserve,
+        talker_two_phase_slice_rows=talker_two_phase_slice_rows,
+        talker_two_phase_slice_every=talker_two_phase_slice_every,
         prompt_segment_prebuilder=prompt_segment_prebuilder,
         phase_one_builder=phase_one_builder,
     )

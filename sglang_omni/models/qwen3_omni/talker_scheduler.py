@@ -70,6 +70,9 @@ class QwenTalkerScheduler(OmniScheduler):
     _phase_one_denied: set[str] | None = None
     _parked_reqs: dict[str, Any] | None = None
     _parked_total: int = 0
+    _two_phase_slice_rows: int = 0
+    _two_phase_slice_every: int = 1
+    _phase_one_slice_ct: int = -1
 
     def __init__(
         self,
@@ -83,6 +86,8 @@ class QwenTalkerScheduler(OmniScheduler):
         talker_two_phase_min_batch: int = 4,
         talker_two_phase_coalesce_above: int = 8,
         talker_two_phase_pool_reserve: int = 8,
+        talker_two_phase_slice_rows: int = 0,
+        talker_two_phase_slice_every: int = 4,
         prompt_segment_prebuilder: Callable[[Any], Any] | None = None,
         phase_one_builder: Callable[[Any, Any], Any] | None = None,
         **kwargs: Any,
@@ -117,6 +122,9 @@ class QwenTalkerScheduler(OmniScheduler):
         self._two_phase_min_batch = max(1, int(talker_two_phase_min_batch))
         self._two_phase_coalesce_above = max(0, int(talker_two_phase_coalesce_above))
         self._two_phase_pool_reserve = max(1, int(talker_two_phase_pool_reserve))
+        self._two_phase_slice_rows = max(0, int(talker_two_phase_slice_rows))
+        self._two_phase_slice_every = max(1, int(talker_two_phase_slice_every))
+        self._phase_one_slice_ct = -self._two_phase_slice_every
         self._phase_one_queue = deque()
         self._phase_one_data = {}
         self._phase_one_denied = set()
@@ -135,7 +143,8 @@ class QwenTalkerScheduler(OmniScheduler):
         )
         logger.info(
             "talker two-phase prefill: requested=%s active=%s kv=%s max_parked=%s "
-            "min_batch=%s coalesce_above=%s pool_reserve=%s",
+            "min_batch=%s coalesce_above=%s pool_reserve=%s slice_rows=%s "
+            "slice_every=%s",
             bool(talker_two_phase_prefill),
             self._two_phase_prefill,
             self._two_phase_kv,
@@ -143,6 +152,8 @@ class QwenTalkerScheduler(OmniScheduler):
             self._two_phase_min_batch,
             self._two_phase_coalesce_above,
             self._two_phase_pool_reserve,
+            self._two_phase_slice_rows,
+            self._two_phase_slice_every,
         )
 
     def _prebuild_deferred_payload(self, payload: Any) -> None:
@@ -312,15 +323,31 @@ class QwenTalkerScheduler(OmniScheduler):
         running_bs = 0 if running_batch is None else len(running_batch.reqs)
         return running_bs < self._two_phase_coalesce_above
 
+    def _phase_one_slice_claim(self) -> bool:
+        """Whether phase 1 may take a step the decode interleave just claimed.
+
+        Purely opportunistic prepay starves itself at concurrency: the ordinary
+        pass and the interleave between them own nearly every step once the
+        stage is loaded, so the requests that would gain most from a parked
+        prompt are the ones that never get it. The slice buys those steps back
+        where nothing else wants them — a queued ordinary request outranks a
+        prepay, and one claim per ``slice_every`` steps bounds what decode
+        gives up.
+        """
+        if self._two_phase_slice_rows <= 0 or self.waiting_queue:
+            return False
+        return self.forward_ct - self._phase_one_slice_ct >= self._two_phase_slice_every
+
     def get_new_batch_prefill(self, running_batch: Any) -> Any:
         deferring = bool(
             self.prefill_decode_interleave and self._interleave_defer_prefill
         )
         before = self._kvstat_state(running_batch) if KVSTAT_ENABLED else None
         plan = super().get_new_batch_prefill(running_batch)
+        slicing = deferring and self._phase_one_slice_claim()
         skip_phase_one = (
             plan.batch_to_run is not None
-            or deferring
+            or (deferring and not slicing)
             or not self._two_phase_kv
             or not self._phase_one_ready(plan.running_batch)
         )
@@ -329,6 +356,8 @@ class QwenTalkerScheduler(OmniScheduler):
             if skip_phase_one
             else self._phase_one_prefill_plan(plan.running_batch)
         )
+        if slicing and p1_plan is not None and p1_plan.batch_to_run is not None:
+            self._phase_one_slice_ct = self.forward_ct
         if KVSTAT_ENABLED and (
             before["wait"] or before["p1q"] or before["parked"] or plan.batch_to_run
         ):
@@ -355,6 +384,7 @@ class QwenTalkerScheduler(OmniScheduler):
                 ordn=-1 if ord_batch is None else len(ord_batch.reqs),
                 full_ord=after_ord["full"],
                 p1try=int(not skip_phase_one),
+                slice=int(slicing),
                 p1n=-1 if p1_batch is None else len(p1_batch.reqs),
                 full_p1=final["full"],
             )
@@ -371,10 +401,17 @@ class QwenTalkerScheduler(OmniScheduler):
 
         Their rows sample a token the runner must not ship, and the suppression
         is per batch rather than per row, so phase 1 gets its own queue and its
-        own admission pass. It runs only on a step the ordinary pass declined,
-        which keeps it behind both the decode interleave and the waiting queue.
+        own admission pass. It never runs on a step the ordinary pass claimed,
+        so the waiting queue always outranks the prepay; only the decode
+        interleave yields to it, and only for a budgeted slice.
         """
-        candidates = list(self._phase_one_queue)
+        queued = list(self._phase_one_queue)
+        rows = self._two_phase_slice_rows
+        candidates = queued[:rows] if rows > 0 else queued
+        # Note (wenyao): rows held back never enter self.waiting_queue, so they
+        # are absent from the leftover set the queue is rebuilt from and would
+        # be dropped — with their pool row and prompt KV still allocated.
+        held_back = {id(req) for req in queued[len(candidates) :]}
         saved_queue = self.waiting_queue
         # Note (wenyao): batch_is_full latches the ordinary pass's own "no room"
         # verdict and upstream clears it only when the running batch shrinks.
@@ -386,7 +423,7 @@ class QwenTalkerScheduler(OmniScheduler):
         try:
             plan = _Upstream.get_new_batch_prefill(self, running_batch)
         finally:
-            leftover = {id(req) for req in self.waiting_queue}
+            leftover = {id(req) for req in self.waiting_queue} | held_back
             self.waiting_queue = saved_queue
             running_batch.batch_is_full = saved_full
         plan.running_batch.batch_is_full = saved_full

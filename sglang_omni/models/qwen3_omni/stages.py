@@ -1083,6 +1083,8 @@ def create_talker_ar_executor_from_config(
     talker_two_phase_min_batch: int = 4,
     talker_two_phase_coalesce_above: int = 8,
     talker_two_phase_pool_reserve: int = 8,
+    talker_two_phase_slice_rows: int = 0,
+    talker_two_phase_slice_every: int = 4,
 ):
     """Returns OmniScheduler for talker."""
     from sglang_omni.models.qwen3_omni.bootstrap import create_talker_scheduler
@@ -1144,6 +1146,8 @@ def create_talker_ar_executor_from_config(
         talker_two_phase_min_batch=talker_two_phase_min_batch,
         talker_two_phase_coalesce_above=talker_two_phase_coalesce_above,
         talker_two_phase_pool_reserve=talker_two_phase_pool_reserve,
+        talker_two_phase_slice_rows=talker_two_phase_slice_rows,
+        talker_two_phase_slice_every=talker_two_phase_slice_every,
     )
     post_load_process_mem = get_process_gpu_memory_bytes(gpu_id)
     logger.info(

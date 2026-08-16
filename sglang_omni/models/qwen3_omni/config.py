@@ -198,6 +198,8 @@ def _talker_stage(
             "talker_two_phase_min_batch": 4,
             "talker_two_phase_coalesce_above": 8,
             "talker_two_phase_pool_reserve": 8,
+            "talker_two_phase_slice_rows": 0,
+            "talker_two_phase_slice_every": 4,
         },
         gpu=gpu,
         runtime_arg_map={"max_seq_len": "talker_max_seq_len"},
