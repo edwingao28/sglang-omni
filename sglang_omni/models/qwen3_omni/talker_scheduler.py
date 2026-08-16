@@ -65,6 +65,7 @@ class QwenTalkerScheduler(OmniScheduler):
     _phase_one_builder: Callable[[Any, Any], Any] | None = None
     _phase_one_queue: deque | None = None
     _phase_one_data: dict[str, Any] | None = None
+    _phase_one_denied: set[str] | None = None
     _parked_reqs: dict[str, Any] | None = None
 
     def __init__(
@@ -109,6 +110,7 @@ class QwenTalkerScheduler(OmniScheduler):
         self._two_phase_max_parked = max(0, int(talker_two_phase_max_parked))
         self._phase_one_queue = deque()
         self._phase_one_data = {}
+        self._phase_one_denied = set()
         self._parked_reqs = {}
         # Note (wenyao): a chunked phase-1 extend would claim the scheduler's
         # single ``chunked_req`` slot and serialize the stage to one request, so
@@ -161,6 +163,7 @@ class QwenTalkerScheduler(OmniScheduler):
         if not self._two_phase_kv:
             return
         self._phase_one_data.pop(request_id, None)
+        self._phase_one_denied.discard(request_id)
         self._drop_queued_phase_one(request_id)
         parked = self._parked_reqs.pop(request_id, None)
         if parked is not None:
@@ -216,7 +219,11 @@ class QwenTalkerScheduler(OmniScheduler):
                 >= self._two_phase_max_parked
             ):
                 return
-            if request_id in self._phase_one_data or request_id in self._parked_reqs:
+            if (
+                request_id in self._phase_one_data
+                or request_id in self._parked_reqs
+                or request_id in self._phase_one_denied
+            ):
                 continue
             payload = self._deferred_request_payloads.get(request_id)
             if payload is None or not future.done():
@@ -228,6 +235,10 @@ class QwenTalkerScheduler(OmniScheduler):
             try:
                 req_data = self._phase_one_builder(payload, future.result())
             except Exception:
+                # Note (wenyao): deny before logging — this payload is retried on
+                # every scheduler pass until its gate opens, so a build that
+                # always fails would otherwise raise once per iteration.
+                self._phase_one_denied.add(request_id)
                 logger.exception(
                     "talker phase-1 build failed for %s; leaving it whole",
                     request_id,
@@ -314,6 +325,7 @@ class QwenTalkerScheduler(OmniScheduler):
             return
         request_id = payload.request_id
         phase_one = self._phase_one_data.pop(request_id, None)
+        self._phase_one_denied.discard(request_id)
         self._drop_queued_phase_one(request_id)
         parked = self._parked_reqs.pop(request_id, None)
         if parked is None:
