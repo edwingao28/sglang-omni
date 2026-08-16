@@ -877,6 +877,37 @@ def apply_talker_two_phase_prefill_cli_overrides(
     return pipeline_config
 
 
+def apply_talker_two_phase_kv_cli_overrides(
+    pipeline_config: PipelineConfig,
+    *,
+    talker_two_phase_kv: str,
+) -> PipelineConfig:
+    """The KV half of two-phase prefill: write the prompt KV at prebuild time
+    so the readiness gate only extends the 9-row assistant tail."""
+    mode = _normalize_stage_toggle_mode("talker_two_phase_kv", talker_two_phase_kv)
+    if mode == "default":
+        return pipeline_config
+    flag_name = "--talker-two-phase-kv"
+    stage_name = _resolve_talker_stage(pipeline_config, flag_name=flag_name)
+    matching_stages = _find_matching_stages(
+        pipeline_config,
+        stage_name=stage_name,
+        reason=f"talker two-phase KV to {mode!r}",
+    )
+    for stage in matching_stages:
+        if stage.factory != _QWEN_PARTIAL_START_TALKER_FACTORY:
+            raise typer.BadParameter(
+                f"{flag_name} currently supports only the Qwen3-Omni talker; "
+                f"stage {stage.name!r} uses factory {stage.factory!r}"
+            )
+    _apply_factory_args_updates(
+        pipeline_config,
+        matching_stages,
+        {"talker_two_phase_kv": mode == "on"},
+    )
+    return pipeline_config
+
+
 def _apply_factory_args_updates(
     pipeline_config: PipelineConfig,
     stages: list[StageConfig],
@@ -1306,6 +1337,18 @@ def serve(
             ),
         ),
     ] = "default",
+    talker_two_phase_kv: Annotated[
+        str,
+        typer.Option(
+            "--talker-two-phase-kv",
+            "--talker_two_phase_kv",
+            help=(
+                "KV half of two-phase talker prefill: default|on|off. Follows "
+                "--talker-two-phase-prefill unless set to off, which keeps the "
+                "prompt projection early but writes all KV at the gate."
+            ),
+        ),
+    ] = "default",
     thinker_torch_compile: Annotated[
         str,
         typer.Option(
@@ -1605,6 +1648,10 @@ def serve(
     merged_config = apply_talker_two_phase_prefill_cli_overrides(
         merged_config,
         talker_two_phase_prefill=talker_two_phase_prefill,
+    )
+    merged_config = apply_talker_two_phase_kv_cli_overrides(
+        merged_config,
+        talker_two_phase_kv=talker_two_phase_kv,
     )
 
     if _should_print_merged_config(colocate=colocate, log_level=log_level):
