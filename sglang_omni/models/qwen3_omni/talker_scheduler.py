@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import time
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable
@@ -12,7 +14,14 @@ from sglang_omni.models.qwen3_omni.config import MIN_PARTIAL_START_CHUNKS
 from sglang_omni.models.qwen3_omni.request_builders import (
     PROMPT_SEGMENT_FUTURE_ATTR,
 )
-from sglang_omni.scheduling.omni_scheduler import OmniScheduler
+from sglang_omni.models.qwen3_omni.two_phase_kv import (
+    ASSISTANT_TAIL_ROWS,
+    adopt_parked_prompt_kv,
+    is_tail_pending,
+    snapshot_prompt_kv,
+    uninstall_parked_prefix_shadow,
+)
+from sglang_omni.scheduling.omni_scheduler import OmniScheduler, _detach_request_data
 from sglang_omni.vendor.sglang.server_args import override_server_args
 
 logger = logging.getLogger(__name__)
@@ -51,6 +60,12 @@ class QwenTalkerScheduler(OmniScheduler):
     _prompt_segment_prebuilder: Callable[[Any], Any] | None = None
     _prompt_segment_executor: ThreadPoolExecutor | None = None
     _prompt_segment_futures: dict[str, Future] | None = None
+    _two_phase_kv: bool = False
+    _two_phase_max_parked: int = 0
+    _phase_one_builder: Callable[[Any, Any], Any] | None = None
+    _phase_one_queue: deque | None = None
+    _phase_one_data: dict[str, Any] | None = None
+    _parked_reqs: dict[str, Any] | None = None
 
     def __init__(
         self,
@@ -59,7 +74,10 @@ class QwenTalkerScheduler(OmniScheduler):
         partial_start_min_chunks: int = MIN_PARTIAL_START_CHUNKS,
         im_end_token_id: int | None = None,
         talker_two_phase_prefill: bool = False,
+        talker_two_phase_kv: bool = True,
+        talker_two_phase_max_parked: int = 8,
         prompt_segment_prebuilder: Callable[[Any], Any] | None = None,
+        phase_one_builder: Callable[[Any, Any], Any] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -87,10 +105,28 @@ class QwenTalkerScheduler(OmniScheduler):
             if self._two_phase_prefill
             else None
         )
+        self._phase_one_builder = phase_one_builder
+        self._two_phase_max_parked = max(0, int(talker_two_phase_max_parked))
+        self._phase_one_queue = deque()
+        self._phase_one_data = {}
+        self._parked_reqs = {}
+        # Note (wenyao): a chunked phase-1 extend would claim the scheduler's
+        # single ``chunked_req`` slot and serialize the stage to one request, so
+        # the early KV write only runs where chunking is off.
+        chunked_prefill_size = int(getattr(self, "chunked_prefill_size", 0) or 0)
+        self._two_phase_kv = (
+            self._two_phase_prefill
+            and bool(talker_two_phase_kv)
+            and phase_one_builder is not None
+            and self._two_phase_max_parked > 0
+            and chunked_prefill_size <= 0
+        )
         logger.info(
-            "talker two-phase prefill: requested=%s active=%s",
+            "talker two-phase prefill: requested=%s active=%s kv=%s max_parked=%s",
             bool(talker_two_phase_prefill),
             self._two_phase_prefill,
+            self._two_phase_kv,
+            self._two_phase_max_parked,
         )
 
     def _prebuild_deferred_payload(self, payload: Any) -> None:
@@ -118,18 +154,202 @@ class QwenTalkerScheduler(OmniScheduler):
 
     def _release_prebuilt_payload(self, request_id: str) -> None:
         futures = self._prompt_segment_futures
-        if not futures:
+        if futures:
+            future = futures.pop(request_id, None)
+            if future is not None:
+                future.cancel()
+        if not self._two_phase_kv:
             return
-        future = futures.pop(request_id, None)
-        if future is not None:
-            future.cancel()
+        self._phase_one_data.pop(request_id, None)
+        self._drop_queued_phase_one(request_id)
+        parked = self._parked_reqs.pop(request_id, None)
+        if parked is not None:
+            self._reclaim_parked(parked)
+
+    def _reclaim_parked(self, req: Any) -> None:
+        """Give a parked request's prompt KV and pool row back.
+
+        Abort between the two phases arrives here through
+        ``_release_prebuilt_payload``: a parked request sits in no batch and no
+        waiting queue, so the scheduler's batch-scanning reclaim never sees it.
+        """
+        uninstall_parked_prefix_shadow(req)
+        req.cache_protected_len = 0
+        self._release_request_kv_cache(req)
+        _detach_request_data(req)
+
+    def _drop_queued_phase_one(self, request_id: str) -> None:
+        queue = self._phase_one_queue
+        if not queue:
+            return
+        for req in list(queue):
+            if req.rid == request_id:
+                queue.remove(req)
+                _detach_request_data(req)
 
     def _shutdown_resources(self) -> None:
         executor = self._prompt_segment_executor
         self._prompt_segment_executor = None
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
+        parked = self._parked_reqs
+        while parked:
+            self._reclaim_parked(parked.popitem()[1])
         super()._shutdown_resources()
+
+    def process_input_requests(self, recv_reqs: list[Any]) -> None:
+        super().process_input_requests(recv_reqs)
+        if self._two_phase_kv:
+            self._admit_phase_one_requests()
+
+    def _admit_phase_one_requests(self) -> None:
+        """Queue a prompt-only request for every prebuild that has landed.
+
+        The prompt segment consumes nothing from the thinker stream, so its
+        rows can take their KV slots while the readiness gate is still closed;
+        only the 9-row assistant tail is left on the gate's critical path.
+        """
+        futures = self._prompt_segment_futures or {}
+        for request_id, future in list(futures.items()):
+            if (
+                len(self._parked_reqs) + len(self._phase_one_data)
+                >= self._two_phase_max_parked
+            ):
+                return
+            if request_id in self._phase_one_data or request_id in self._parked_reqs:
+                continue
+            payload = self._deferred_request_payloads.get(request_id)
+            if payload is None or not future.done():
+                continue
+            # Note (wenyao): parked rows hold a pool slot outside running_batch,
+            # where max_running_requests does not see them.
+            if self.req_to_token_pool.available_size() <= 1:
+                return
+            try:
+                req_data = self._phase_one_builder(payload, future.result())
+            except Exception:
+                logger.exception(
+                    "talker phase-1 build failed for %s; leaving it whole",
+                    request_id,
+                )
+                continue
+            req = req_data.req
+            self._normalize_req_token_arrays(req)
+            req._coalesce_enqueue_t = time.perf_counter()
+            req._omni_terminal_claimed = False
+            req._omni_data = req_data
+            self._phase_one_data[request_id] = req_data
+            self._phase_one_queue.append(req)
+
+    def get_new_batch_prefill(self, running_batch: Any) -> Any:
+        deferring = bool(
+            self.prefill_decode_interleave and self._interleave_defer_prefill
+        )
+        plan = super().get_new_batch_prefill(running_batch)
+        if (
+            plan.batch_to_run is not None
+            or deferring
+            or not self._two_phase_kv
+            or not self._phase_one_queue
+        ):
+            return plan
+        return self._phase_one_prefill_plan(plan.running_batch)
+
+    def _phase_one_prefill_plan(self, running_batch: Any) -> Any:
+        """Admit prompt-only requests, and only those, into one extend batch.
+
+        Their rows sample a token the runner must not ship, and the suppression
+        is per batch rather than per row, so phase 1 gets its own queue and its
+        own admission pass. It runs only on a step the ordinary pass declined,
+        which keeps it behind both the decode interleave and the waiting queue.
+        """
+        candidates = list(self._phase_one_queue)
+        saved_queue = self.waiting_queue
+        self.waiting_queue = candidates
+        try:
+            plan = _Upstream.get_new_batch_prefill(self, running_batch)
+        finally:
+            leftover = {id(req) for req in self.waiting_queue}
+            self.waiting_queue = saved_queue
+        if plan.batch_to_run is None:
+            return plan
+        self._phase_one_queue = deque(
+            req for req in self._phase_one_queue if id(req) in leftover
+        )
+        if self.prefill_decode_interleave:
+            self._interleave_defer_prefill = True
+        return plan
+
+    def process_batch_result(self, batch: Any, result: Any) -> None:
+        if self._two_phase_kv and batch is not None and batch.forward_mode.is_extend():
+            if self._is_phase_one_batch(batch):
+                self._park_phase_one_batch(batch)
+                return
+            for req in batch.reqs:
+                uninstall_parked_prefix_shadow(req)
+        _Upstream.process_batch_result(self, batch, result)
+
+    @staticmethod
+    def _is_phase_one_batch(batch: Any) -> bool:
+        return bool(batch.reqs) and all(
+            is_tail_pending(req._omni_data) for req in batch.reqs
+        )
+
+    def _park_phase_one_batch(self, batch: Any) -> None:
+        """Keep the prompt KV and take these requests back off the scheduler.
+
+        Emptying the batch is what stops the next ``get_next_batch_to_run`` from
+        merging these rows into the running decode batch: with no assistant tail
+        they have nothing to decode from yet.
+        """
+        for req in batch.reqs:
+            prefix_indices = snapshot_prompt_kv(req, self.req_to_token_pool)
+            req.prefix_indices = prefix_indices
+            req.cache_protected_len = 0
+            self._parked_reqs[req.rid] = req
+        batch.reqs = []
+
+    def _adopt_built_request(self, payload: Any, req_data: Any) -> None:
+        if not self._two_phase_kv:
+            return
+        request_id = payload.request_id
+        phase_one = self._phase_one_data.pop(request_id, None)
+        self._drop_queued_phase_one(request_id)
+        parked = self._parked_reqs.pop(request_id, None)
+        if parked is None:
+            return
+        fresh = req_data.req
+        prompt_rows = len(parked.origin_input_ids)
+        if (
+            not getattr(req_data, "two_phase_composed", False)
+            or len(fresh.origin_input_ids) != prompt_rows + ASSISTANT_TAIL_ROWS
+        ):
+            logger.warning(
+                "talker two-phase KV: request %s built whole; reclaiming its "
+                "parked prompt KV",
+                request_id,
+            )
+            self._reclaim_parked(parked)
+            return
+        adopt_parked_prompt_kv(fresh, parked)
+        self._replay_tail_pending_stream(phase_one, req_data)
+
+    def _replay_tail_pending_stream(self, phase_one: Any, req_data: Any) -> None:
+        if phase_one is None:
+            return
+        for chunk in getattr(phase_one, "tail_pending_chunks", None) or ():
+            self._append_stream_chunk(req_data, chunk)
+        if getattr(phase_one, "tail_pending_stream_done", False):
+            self._mark_stream_done(req_data)
+
+    def _stream_skip_rids(self, sched_output: Any) -> tuple[str, ...]:
+        if not self._two_phase_kv:
+            return ()
+        return tuple(
+            sched_req.request_id
+            for sched_req in sched_output.requests
+            if is_tail_pending(sched_req.data)
+        )
 
     def _count_usable_prefetched_chunks(self, prefetched: list[Any]) -> int:
         im_end = self._im_end_token_id
@@ -216,6 +436,8 @@ class QwenTalkerScheduler(OmniScheduler):
         if self.running_batch is not None and not self.running_batch.is_empty():
             return
         if self.waiting_queue:
+            return
+        if self._parked_reqs or self._phase_one_queue:
             return
         super().self_check_during_idle()
 
