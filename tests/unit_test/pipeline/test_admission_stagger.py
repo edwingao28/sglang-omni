@@ -26,10 +26,7 @@ def test_admission_gate_default_off_admits_immediately() -> None:
         loop = asyncio.get_running_loop()
         start = loop.time()
         await asyncio.gather(
-            *(
-                coordinator._submit_request(f"req-{i}", {"text": "hi"})
-                for i in range(8)
-            )
+            *(coordinator._submit_request(f"req-{i}", {"text": "hi"}) for i in range(8))
         )
         assert loop.time() - start < 0.05
         assert len(coordinator.control_plane.submitted) == 8
@@ -43,10 +40,7 @@ def test_admission_gate_reserves_min_gap_slots() -> None:
         loop = asyncio.get_running_loop()
         start = loop.time()
         await asyncio.gather(
-            *(
-                coordinator._submit_request(f"req-{i}", {"text": "hi"})
-                for i in range(4)
-            )
+            *(coordinator._submit_request(f"req-{i}", {"text": "hi"}) for i in range(4))
         )
         elapsed = loop.time() - start
         assert elapsed >= 0.15
