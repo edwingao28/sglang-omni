@@ -11,7 +11,10 @@ from typing import Any
 import torch
 import xxhash
 
-from sglang_omni.models.qwen3_omni.components.talker_prefill import TalkerPrefillBuilder
+from sglang_omni.models.qwen3_omni.components.talker_prefill import (
+    TalkerPrefillBuilder,
+    TalkerPromptSegment,
+)
 from sglang_omni.models.qwen3_omni.payload_types import (
     Qwen3OmniPipelineState,
     ThinkerOutput,
@@ -1018,6 +1021,30 @@ def make_thinker_scheduler_adapters(
     return request_builder, result_adapter
 
 
+PROMPT_SEGMENT_FUTURE_ATTR = "_talker_prompt_segment_future"
+
+
+def take_prebuilt_prompt_segment(payload: StagePayload) -> TalkerPromptSegment | None:
+    """Consume the prompt segment a two-phase prebuild left on *payload*.
+
+    Returns ``None`` when there is nothing to consume or the prebuild failed —
+    both leave the caller on the single-phase build, which is the reference
+    numerics.
+    """
+    future = getattr(payload, PROMPT_SEGMENT_FUTURE_ATTR, None)
+    if future is None:
+        return None
+    setattr(payload, PROMPT_SEGMENT_FUTURE_ATTR, None)
+    try:
+        return future.result()
+    except Exception:
+        logger.exception(
+            "talker prompt-segment prebuild failed for %s; building inline",
+            payload.request_id,
+        )
+        return None
+
+
 def make_talker_scheduler_adapters(
     *,
     tokenizer: Any,
@@ -1109,11 +1136,51 @@ def make_talker_scheduler_adapters(
             data=payload.data,
         )
 
+    def prompt_segment_prebuilder(payload: StagePayload) -> TalkerPromptSegment:
+        return prefill_builder.build_prompt_segment(payload)
+
     return (
         request_builder,
         result_adapter,
         prefill_builder.append_text_chunk,
         prefill_builder.mark_thinker_done,
+        prompt_segment_prebuilder,
+    )
+
+
+def _talker_prompt_prefill(
+    payload: StagePayload,
+    thinker_chunks: list[Any],
+    *,
+    prefill_builder: TalkerPrefillBuilder,
+    thinker_done: bool,
+) -> dict[str, Any]:
+    """Finish a two-phase build when one was started, else build it whole.
+
+    ``compose_two_phase_prefill`` is byte-identical to ``build_prompt_prefill``
+    (test_talker_two_phase.py), so this only decides where the prompt rows were
+    computed, never what they are.
+    """
+    segment = take_prebuilt_prompt_segment(payload)
+    if segment is not None:
+        try:
+            tail = prefill_builder.build_assistant_tail(
+                segment,
+                thinker_chunks,
+                thinker_done=thinker_done,
+            )
+        except ValueError:
+            logger.warning(
+                "talker two-phase tail rejected request %s; building it whole",
+                payload.request_id,
+                exc_info=True,
+            )
+        else:
+            return prefill_builder.compose_two_phase_prefill(segment, tail)
+    return prefill_builder.build_prompt_prefill(
+        payload,
+        thinker_chunks,
+        thinker_done=thinker_done,
     )
 
 
@@ -1146,9 +1213,10 @@ def _build_talker_request_data(
             "check the partial-start readiness policy or upstream wiring"
         )
 
-    prompt_prefill = prefill_builder.build_prompt_prefill(
+    prompt_prefill = _talker_prompt_prefill(
         payload,
         thinker_chunks,
+        prefill_builder=prefill_builder,
         thinker_done=thinker_done,
     )
     pending_text_queue = prompt_prefill["pending_text_queue"]

@@ -8,6 +8,7 @@ This module mirrors HF's talker prefill layout, then keeps HF's
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -34,12 +35,16 @@ _THINKER_EMBED_CANDIDATE_KEYS = (
 )
 
 
-# HF lays the assistant block out as 3 chat-header rows, 4 tts pads, tts bos and
-# the first spoken token — see ``build_assistant_part``.
+# Note (wenyao): 9 is HF's assistant layout, not a tunable — 3 chat-header rows,
+# 4 tts pads, tts bos, and the first spoken token (see build_assistant_part).
 _ASSISTANT_TAIL_ROWS = 9
 
 _EMBED_SOURCE_CACHE: dict[str, tuple[Path, str]] = {}
 _EMBED_HANDLE_CACHE: dict[str, Any] = {}
+# Note (wenyao): the cached safetensors handle is shared, and two-phase prefill
+# builds prompt segments on a worker thread while the scheduler thread builds
+# assistant tails, so the reads have to be serialized.
+_EMBED_HANDLE_LOCK = threading.Lock()
 
 
 def _resolve_embed_source(model_path: str) -> tuple[Path, str]:
@@ -71,16 +76,17 @@ def _resolve_embed_source(model_path: str) -> tuple[Path, str]:
 
 def load_thinker_embedding_rows(model_path: str, row_ids: list[int]) -> torch.Tensor:
     shard_path, tensor_name = _resolve_embed_source(model_path)
-    handle = _EMBED_HANDLE_CACHE.get(model_path)
-    if handle is None:
-        handle = safe_open(str(shard_path), framework="pt", device="cpu")
-        _EMBED_HANDLE_CACHE[model_path] = handle
-    tensor_slice = handle.get_slice(tensor_name)
-    try:
-        rows = [tensor_slice[row_id] for row_id in row_ids]
-    except (IndexError, RuntimeError, TypeError, ValueError):
-        tensor = handle.get_tensor(tensor_name)
-        rows = [tensor[row_id].clone() for row_id in row_ids]
+    with _EMBED_HANDLE_LOCK:
+        handle = _EMBED_HANDLE_CACHE.get(model_path)
+        if handle is None:
+            handle = safe_open(str(shard_path), framework="pt", device="cpu")
+            _EMBED_HANDLE_CACHE[model_path] = handle
+        tensor_slice = handle.get_slice(tensor_name)
+        try:
+            rows = [tensor_slice[row_id] for row_id in row_ids]
+        except (IndexError, RuntimeError, TypeError, ValueError):
+            tensor = handle.get_tensor(tensor_name)
+            rows = [tensor[row_id].clone() for row_id in row_ids]
     return torch.stack(rows, dim=0)
 
 

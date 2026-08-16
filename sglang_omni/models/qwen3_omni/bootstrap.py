@@ -165,6 +165,7 @@ def create_talker_scheduler(
     total_gpu_memory_fraction: float | None = None,
     enable_partial_start: bool = False,
     partial_start_min_chunks: int = 5,
+    talker_two_phase_prefill: bool = False,
 ):
     """Create the Qwen talker scheduler."""
     del speech_enabled
@@ -240,6 +241,7 @@ def create_talker_scheduler(
         result_adapter,
         stream_chunk_handler,
         stream_done_handler,
+        prompt_segment_prebuilder,
     ) = make_talker_scheduler_adapters(
         tokenizer=tokenizer,
         codec_vocab_size=codec_vocab_size,
@@ -283,6 +285,8 @@ def create_talker_scheduler(
         enable_partial_start=enable_partial_start,
         partial_start_min_chunks=partial_start_min_chunks,
         im_end_token_id=root_config.im_end_token_id,
+        talker_two_phase_prefill=talker_two_phase_prefill,
+        prompt_segment_prebuilder=prompt_segment_prebuilder,
     )
 
     model_runner = QwenTalkerModelRunner(

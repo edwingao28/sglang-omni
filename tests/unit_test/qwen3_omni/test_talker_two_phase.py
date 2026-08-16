@@ -44,9 +44,19 @@ def _fake_model() -> SimpleNamespace:
 def _prompt_ids() -> torch.Tensor:
     return torch.tensor(
         [
-            IM_START, SYSTEM, 100, NEWLINE,
-            IM_START, USER, AUDIO, AUDIO, 101, NEWLINE,
-            IM_START, ASSISTANT, NEWLINE,
+            IM_START,
+            SYSTEM,
+            100,
+            NEWLINE,
+            IM_START,
+            USER,
+            AUDIO,
+            AUDIO,
+            101,
+            NEWLINE,
+            IM_START,
+            ASSISTANT,
+            NEWLINE,
         ],
         dtype=torch.long,
     )
@@ -80,15 +90,28 @@ def _builder(model: SimpleNamespace) -> TalkerPrefillBuilder:
     table = {
         token_id: torch.randn(THINKER_DIM)
         for token_id in (
-            IM_START, IM_END, SYSTEM, USER, ASSISTANT, NEWLINE, AUDIO,
-            100, 101, 200, 201, 202, 203, 204, TTS_BOS, TTS_EOS, TTS_PAD,
+            IM_START,
+            IM_END,
+            SYSTEM,
+            USER,
+            ASSISTANT,
+            NEWLINE,
+            AUDIO,
+            100,
+            101,
+            200,
+            201,
+            202,
+            203,
+            204,
+            TTS_BOS,
+            TTS_EOS,
+            TTS_PAD,
         )
     }
     builder._thinker_embed_cache = dict(table)
     special = torch.stack([table[TTS_BOS], table[TTS_EOS], table[TTS_PAD]], dim=0)
-    builder._tts_special_cache = tuple(
-        model.text_projection(special).chunk(3, dim=0)
-    )
+    builder._tts_special_cache = tuple(model.text_projection(special).chunk(3, dim=0))
     return builder
 
 
@@ -142,12 +165,8 @@ def test_two_phase_build_matches_monolithic(token_ids, thinker_done) -> None:
 
     assert torch.equal(two_phase["input_embeds"], monolithic["input_embeds"])
     assert torch.equal(two_phase["input_ids"], monolithic["input_ids"])
-    assert torch.equal(
-        two_phase["tts_pad_embed"], monolithic["tts_pad_embed"]
-    )
-    assert torch.equal(
-        two_phase["tts_eos_embed"], monolithic["tts_eos_embed"]
-    )
+    assert torch.equal(two_phase["tts_pad_embed"], monolithic["tts_pad_embed"])
+    assert torch.equal(two_phase["tts_eos_embed"], monolithic["tts_eos_embed"])
     expected_queue = monolithic["pending_text_queue"]
     actual_queue = two_phase["pending_text_queue"]
     assert len(actual_queue) == len(expected_queue)
@@ -221,3 +240,126 @@ def test_prompt_segment_is_a_frozen_record() -> None:
     assert segment.prompt_rows == segment.input_ids.shape[0]
     with pytest.raises(Exception):
         segment.speaker_id = 3
+
+
+def _two_phase_scheduler(prebuilder, *, active=True):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from sglang_omni.models.qwen3_omni.talker_scheduler import QwenTalkerScheduler
+
+    scheduler = object.__new__(QwenTalkerScheduler)
+    if active:
+        scheduler._two_phase_prefill = True
+        scheduler._prompt_segment_prebuilder = prebuilder
+        scheduler._prompt_segment_executor = ThreadPoolExecutor(max_workers=1)
+        scheduler._prompt_segment_futures = {}
+    return scheduler
+
+
+def test_deferred_payload_prebuilds_the_prompt_segment_once() -> None:
+    """Re-deferring a payload on every stream chunk must not requeue the build."""
+    calls: list[str] = []
+    scheduler = _two_phase_scheduler(lambda payload: calls.append(payload.request_id))
+    payload = _payload()
+
+    scheduler._prebuild_deferred_payload(payload)
+    scheduler._prebuild_deferred_payload(payload)
+    scheduler._prompt_segment_executor.shutdown(wait=True)
+
+    assert calls == [payload.request_id]
+    assert payload._talker_prompt_segment_future is not None
+
+
+def test_prebuild_stays_off_without_the_two_phase_flag() -> None:
+    scheduler = _two_phase_scheduler(lambda payload: None, active=False)
+    payload = _payload()
+
+    scheduler._prebuild_deferred_payload(payload)
+
+    assert getattr(payload, "_talker_prompt_segment_future", None) is None
+
+
+def test_releasing_a_payload_drops_its_prebuild_future() -> None:
+    """Abort and admission share this path; neither may leak the future map."""
+    scheduler = _two_phase_scheduler(lambda payload: None)
+    payload = _payload()
+    scheduler._prebuild_deferred_payload(payload)
+
+    scheduler._release_prebuilt_payload(payload.request_id)
+    scheduler._prompt_segment_executor.shutdown(wait=True)
+
+    assert scheduler._prompt_segment_futures == {}
+
+
+def test_releasing_an_unknown_payload_is_a_no_op() -> None:
+    scheduler = _two_phase_scheduler(lambda payload: None, active=False)
+
+    scheduler._release_prebuilt_payload("never-seen")
+
+
+def _completed_future(fn):
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(fn)
+
+
+def test_prefill_consumes_the_prebuilt_segment_and_matches_the_whole_build() -> None:
+    """The flag must move where the prompt rows are built, not what they are."""
+    from sglang_omni.models.qwen3_omni.request_builders import _talker_prompt_prefill
+
+    model = _fake_model()
+    builder = _builder(model)
+    chunks = _chunks([200, 201, 202, 203, 204, IM_END])
+
+    expected = builder.build_prompt_prefill(_payload(), chunks, thinker_done=True)
+
+    payload = _payload()
+    payload._talker_prompt_segment_future = _completed_future(
+        lambda: builder.build_prompt_segment(payload)
+    )
+    actual = _talker_prompt_prefill(
+        payload, chunks, prefill_builder=builder, thinker_done=True
+    )
+
+    assert torch.equal(actual["input_embeds"], expected["input_embeds"])
+    assert torch.equal(actual["input_ids"], expected["input_ids"])
+    assert payload._talker_prompt_segment_future is None
+
+
+def test_prefill_falls_back_when_the_prebuild_raised() -> None:
+    """A prebuild bug must cost latency, never a request."""
+    from sglang_omni.models.qwen3_omni.request_builders import _talker_prompt_prefill
+
+    builder = _builder(_fake_model())
+    chunks = _chunks([200, 201, 202, 203, 204, IM_END])
+    payload = _payload()
+    expected = builder.build_prompt_prefill(_payload(), chunks, thinker_done=True)
+
+    def _boom():
+        raise RuntimeError("prebuild exploded")
+
+    payload._talker_prompt_segment_future = _completed_future(_boom)
+    actual = _talker_prompt_prefill(
+        payload, chunks, prefill_builder=builder, thinker_done=True
+    )
+
+    assert torch.equal(actual["input_embeds"], expected["input_embeds"])
+
+
+def test_prefill_falls_back_when_the_tail_cannot_be_split() -> None:
+    from sglang_omni.models.qwen3_omni.request_builders import _talker_prompt_prefill
+
+    builder = _builder(_fake_model())
+    chunks = _chunks([200, IM_START, 201])
+    payload = _payload()
+    expected = builder.build_prompt_prefill(_payload(), chunks, thinker_done=False)
+
+    payload._talker_prompt_segment_future = _completed_future(
+        lambda: builder.build_prompt_segment(payload)
+    )
+    actual = _talker_prompt_prefill(
+        payload, chunks, prefill_builder=builder, thinker_done=False
+    )
+
+    assert torch.equal(actual["input_embeds"], expected["input_embeds"])

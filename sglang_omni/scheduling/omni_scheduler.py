@@ -900,6 +900,7 @@ class OmniScheduler:
                 pending_stream_done=pending_stream_done,
             ):
                 self._deferred_request_payloads[req_id] = payload
+                self._prebuild_deferred_payload(payload)
                 continue
             active_stage = _get_active_stage()
             request_build_executor = self._request_build_executor
@@ -1170,6 +1171,7 @@ class OmniScheduler:
     ) -> None:
         req_id = payload.request_id
         self._deferred_request_payloads.pop(req_id, None)
+        self._release_prebuilt_payload(req_id)
         req = req_data.req
         self._normalize_req_token_arrays(req)
         req_id = req.rid
@@ -1260,6 +1262,20 @@ class OmniScheduler:
                 deferred.append(payload)
         self._dirty_deferred_request_ids.clear()
         return deferred
+
+    def _prebuild_deferred_payload(self, payload: Any) -> None:
+        """Start whatever a deferred payload already carries the inputs for.
+
+        A payload can sit in ``_deferred_request_payloads`` for as long as the
+        readiness policy wants; a policy that knows part of the request build
+        needs nothing from the stream can start it here instead of paying for
+        it once the gate opens.
+        """
+        del payload
+
+    def _release_prebuilt_payload(self, request_id: str) -> None:
+        """Drop whatever ``_prebuild_deferred_payload`` is still holding."""
+        del request_id
 
     def _should_recheck_deferred_request_on_stream_chunk(
         self, request_id: str, chunk: Any
@@ -1803,6 +1819,7 @@ class OmniScheduler:
             self._run_abort_callback(request_id)
         self._pending_stream_ingress.pop(request_id, None)
         self._deferred_request_payloads.pop(request_id, None)
+        self._release_prebuilt_payload(request_id)
         self._dirty_deferred_request_ids.discard(request_id)
         self._first_emit_done.discard(request_id)
         # Note: (Jiaxin Deng) emit before discarding, and discard whether or

@@ -5,9 +5,13 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from typing import Any
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Any, Callable
 
 from sglang_omni.models.qwen3_omni.config import MIN_PARTIAL_START_CHUNKS
+from sglang_omni.models.qwen3_omni.request_builders import (
+    PROMPT_SEGMENT_FUTURE_ATTR,
+)
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 from sglang_omni.vendor.sglang.server_args import override_server_args
 
@@ -41,12 +45,21 @@ def configure_talker_server_args(
 class QwenTalkerScheduler(OmniScheduler):
     """Talker scheduler with Qwen-specific request and decode readiness."""
 
+    # Note (wenyao): class scope, because schedulers get built with
+    # object.__new__ in tests and the two-phase hooks run before any __init__.
+    _two_phase_prefill: bool = False
+    _prompt_segment_prebuilder: Callable[[Any], Any] | None = None
+    _prompt_segment_executor: ThreadPoolExecutor | None = None
+    _prompt_segment_futures: dict[str, Future] | None = None
+
     def __init__(
         self,
         *args: Any,
         enable_partial_start: bool = False,
         partial_start_min_chunks: int = MIN_PARTIAL_START_CHUNKS,
         im_end_token_id: int | None = None,
+        talker_two_phase_prefill: bool = False,
+        prompt_segment_prebuilder: Callable[[Any], Any] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -58,6 +71,65 @@ class QwenTalkerScheduler(OmniScheduler):
         self._enable_partial_start = bool(enable_partial_start)
         self._partial_start_min_chunks = int(partial_start_min_chunks)
         self._im_end_token_id = im_end_token_id
+        self._prompt_segment_prebuilder = prompt_segment_prebuilder
+        self._two_phase_prefill = bool(talker_two_phase_prefill) and (
+            prompt_segment_prebuilder is not None
+        )
+        self._prompt_segment_futures: dict[str, Future] = {}
+        # Note (wenyao): its own worker, not the request-build pool — that pool
+        # is sized for admission ordering and is disabled at tp_size > 1, while
+        # this work only reads the payload the talker already holds.
+        self._prompt_segment_executor: ThreadPoolExecutor | None = (
+            ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="omni-talker-prompt-segment",
+            )
+            if self._two_phase_prefill
+            else None
+        )
+        logger.info(
+            "talker two-phase prefill: requested=%s active=%s",
+            bool(talker_two_phase_prefill),
+            self._two_phase_prefill,
+        )
+
+    def _prebuild_deferred_payload(self, payload: Any) -> None:
+        """Project the prompt rows while the K-gate is still closed.
+
+        The prompt segment reads only the prompt ids and the merged multimodal
+        features, both of which the talker payload already carries on arrival,
+        so none of it has to wait for thinker chunks.
+        """
+        executor = self._prompt_segment_executor
+        if executor is None:
+            return
+        request_id = payload.request_id
+        futures = self._prompt_segment_futures
+        if futures is None:
+            futures = self._prompt_segment_futures = {}
+        if request_id in futures:
+            return
+        try:
+            future = executor.submit(self._prompt_segment_prebuilder, payload)
+        except RuntimeError:
+            return
+        futures[request_id] = future
+        setattr(payload, PROMPT_SEGMENT_FUTURE_ATTR, future)
+
+    def _release_prebuilt_payload(self, request_id: str) -> None:
+        futures = self._prompt_segment_futures
+        if not futures:
+            return
+        future = futures.pop(request_id, None)
+        if future is not None:
+            future.cancel()
+
+    def _shutdown_resources(self) -> None:
+        executor = self._prompt_segment_executor
+        self._prompt_segment_executor = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+        super()._shutdown_resources()
 
     def _count_usable_prefetched_chunks(self, prefetched: list[Any]) -> int:
         im_end = self._im_end_token_id
