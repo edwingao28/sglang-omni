@@ -90,6 +90,18 @@ class _PendingStreamIngress:
         self.done = False
 
 
+def _defers_stream_ingress(req: Any) -> bool:
+    """Whether a queued request must keep taking stream chunks through ingress.
+
+    A request whose builder has not finished consuming the stream is already on
+    the waiting queue but is not the object that will own the finished build, so
+    handing it a chunk both loses that chunk and starves the readiness gate that
+    is still watching the ingress buffer.
+    """
+    data = getattr(req, "_omni_data", None)
+    return bool(getattr(data, "tail_pending", False))
+
+
 def _detach_request_data(req: Any) -> None:
     """Break Req -> data; async snapshots retain the one-way data -> Req edge."""
     req._omni_data = None
@@ -1171,6 +1183,7 @@ class OmniScheduler:
     ) -> None:
         req_id = payload.request_id
         self._deferred_request_payloads.pop(req_id, None)
+        self._adopt_built_request(payload, req_data)
         self._release_prebuilt_payload(req_id)
         req = req_data.req
         self._normalize_req_token_arrays(req)
@@ -1276,6 +1289,15 @@ class OmniScheduler:
     def _release_prebuilt_payload(self, request_id: str) -> None:
         """Drop whatever ``_prebuild_deferred_payload`` is still holding."""
         del request_id
+
+    def _adopt_built_request(self, payload: Any, req_data: Any) -> None:
+        """Hand the finished build whatever the prebuild already reserved.
+
+        Runs before ``_release_prebuilt_payload``, so a policy that pre-admitted
+        the request can move its resources onto ``req_data.req`` instead of
+        having them reclaimed underneath it.
+        """
+        del payload, req_data
 
     def _should_recheck_deferred_request_on_stream_chunk(
         self, request_id: str, chunk: Any
@@ -1413,7 +1435,9 @@ class OmniScheduler:
         sched_output = self._build_sched_output(batch)
         mr_output = self._model_runner.execute(sched_output)
         self._emit_prefill_end_for_batch(batch)
-        self._emit_stream_output(sched_output, mr_output)
+        self._emit_stream_output(
+            sched_output, mr_output, skip_rids=self._stream_skip_rids(sched_output)
+        )
         return self._make_batch_result(mr_output)
 
     def _build_sched_output(self, batch):
@@ -1445,6 +1469,11 @@ class OmniScheduler:
                 rid,
                 self._stream_output_builder(rid, sched_req.data, req_output),
             )
+
+    def _stream_skip_rids(self, sched_output: Any) -> tuple[str, ...]:
+        """Requests in this batch whose model output must not be shipped."""
+        del sched_output
+        return ()
 
     def _put_stream_messages(self, request_id: str, messages: Any) -> None:
         emitted_any = False
@@ -2713,10 +2742,10 @@ class OmniScheduler:
             if batch is None:
                 continue
             for req in batch.reqs:
-                if req.rid == request_id:
+                if req.rid == request_id and not _defers_stream_ingress(req):
                     return req._omni_data
         for req in self.waiting_queue:
-            if req.rid == request_id:
+            if req.rid == request_id and not _defers_stream_ingress(req):
                 return req._omni_data
         return None
 
