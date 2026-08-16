@@ -597,17 +597,39 @@ def test_a_quiet_stage_prepays_a_lone_request_immediately() -> None:
     assert not scheduler._phase_one_ready(_running(8))
 
 
-def test_the_slice_never_outranks_a_waiting_ordinary_request() -> None:
-    """The slice spends a decode step; taking one while an ordinary request is
-    queued would trade the prepay against the admission it is meant to help."""
+def test_the_slice_claims_a_step_the_waiting_queue_cannot_use() -> None:
+    """Only deferred steps are on offer, and the deferral already denied the
+    waiting queue that step — so vetoing on a queued request bought it nothing
+    and starved the prepay through exactly the bursts it exists for."""
     scheduler = _scheduler(slice_rows=8, slice_every=4, pool_free=32)
     scheduler.forward_ct = 100
+    scheduler.waiting_queue = [object()]
 
     assert scheduler._phase_one_slice_claim()
 
-    scheduler.waiting_queue = [object()]
 
-    assert not scheduler._phase_one_slice_claim()
+def test_phase_one_yields_a_step_the_ordinary_pass_claimed(monkeypatch) -> None:
+    """The slice takes steps from the interleave, never from admission."""
+    scheduler = _scheduler(slice_rows=8, slice_every=4, min_batch=1, pool_free=32)
+    scheduler.forward_ct = 100
+    scheduler._interleave_defer_prefill = False
+    _offer(scheduler, 2)
+    scheduler._admit_phase_one_requests()
+    running = SimpleNamespace(reqs=[], batch_is_full=False)
+    ordinary = _batch([object()])
+
+    monkeypatch.setattr(
+        talker_scheduler_mod.OmniScheduler,
+        "get_new_batch_prefill",
+        lambda self, running_batch: SimpleNamespace(
+            batch_to_run=ordinary, running_batch=running_batch
+        ),
+    )
+
+    plan = scheduler.get_new_batch_prefill(running)
+
+    assert plan.batch_to_run is ordinary
+    assert len(scheduler._phase_one_queue) == 2
 
 
 def test_the_slice_is_off_until_a_row_budget_is_configured() -> None:

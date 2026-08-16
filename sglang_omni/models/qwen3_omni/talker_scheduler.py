@@ -330,11 +330,15 @@ class QwenTalkerScheduler(OmniScheduler):
         pass and the interleave between them own nearly every step once the
         stage is loaded, so the requests that would gain most from a parked
         prompt are the ones that never get it. The slice buys those steps back
-        where nothing else wants them — a queued ordinary request outranks a
-        prepay, and one claim per ``slice_every`` steps bounds what decode
-        gives up.
+        from the interleave, and one claim per ``slice_every`` steps bounds
+        what decode gives up.
+
+        Only steps the interleave already deferred are on offer, so a queued
+        ordinary request is not overtaken: the deferral denied it this step
+        whatever phase 1 does, and the next undeferred step still admits it
+        ahead of any prepay.
         """
-        if self._two_phase_slice_rows <= 0 or self.waiting_queue:
+        if self._two_phase_slice_rows <= 0:
             return False
         return self.forward_ct - self._phase_one_slice_ct >= self._two_phase_slice_every
 
