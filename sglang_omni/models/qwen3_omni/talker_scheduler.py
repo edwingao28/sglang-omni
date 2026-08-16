@@ -373,12 +373,20 @@ class QwenTalkerScheduler(OmniScheduler):
         """
         candidates = list(self._phase_one_queue)
         saved_queue = self.waiting_queue
+        # Note (wenyao): batch_is_full latches the ordinary pass's own "no room"
+        # verdict and upstream clears it only when the running batch shrinks.
+        # Upstream never evaluates it while the ordinary queue is empty, so a
+        # phase-1 pass tripping it there would block ordinary admission for a
+        # whole decode window on a verdict reached about a different queue.
+        saved_full = running_batch.batch_is_full
         self.waiting_queue = candidates
         try:
             plan = _Upstream.get_new_batch_prefill(self, running_batch)
         finally:
             leftover = {id(req) for req in self.waiting_queue}
             self.waiting_queue = saved_queue
+            running_batch.batch_is_full = saved_full
+        plan.running_batch.batch_is_full = saved_full
         if plan.batch_to_run is None:
             return plan
         self._phase_one_queue = deque(
