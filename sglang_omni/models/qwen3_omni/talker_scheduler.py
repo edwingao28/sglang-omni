@@ -67,6 +67,7 @@ class QwenTalkerScheduler(OmniScheduler):
     _phase_one_data: dict[str, Any] | None = None
     _phase_one_denied: set[str] | None = None
     _parked_reqs: dict[str, Any] | None = None
+    _parked_total: int = 0
 
     def __init__(
         self,
@@ -112,6 +113,7 @@ class QwenTalkerScheduler(OmniScheduler):
         self._phase_one_data = {}
         self._phase_one_denied = set()
         self._parked_reqs = {}
+        self._parked_total = 0
         # Note (wenyao): a chunked phase-1 extend would claim the scheduler's
         # single ``chunked_req`` slot and serialize the stage to one request, so
         # the early KV write only runs where chunking is off.
@@ -318,6 +320,15 @@ class QwenTalkerScheduler(OmniScheduler):
             req.prefix_indices = prefix_indices
             req.cache_protected_len = 0
             self._parked_reqs[req.rid] = req
+        # Note (wenyao): the KV half degrades silently to the compute half when
+        # the prompt segment is unusable, so its first success has to be
+        # visible in the log or a full fallback run looks like a working one.
+        if self._parked_total == 0:
+            logger.info(
+                "talker two-phase KV: first prompt extend parked (batch size %d)",
+                len(batch.reqs),
+            )
+        self._parked_total += len(batch.reqs)
         batch.reqs = []
 
     def _adopt_built_request(self, payload: Any, req_data: Any) -> None:
