@@ -26,6 +26,8 @@ from sglang_omni.vendor.sglang.server_args import override_server_args
 
 logger = logging.getLogger(__name__)
 
+KVSTAT_ENABLED = os.environ.get("SGLANG_OMNI_TALKER_KVSTAT", "0") == "1"
+
 
 def configure_talker_server_args(
     server_args: Any,
@@ -253,20 +255,84 @@ class QwenTalkerScheduler(OmniScheduler):
             req._omni_data = req_data
             self._phase_one_data[request_id] = req_data
             self._phase_one_queue.append(req)
+            if KVSTAT_ENABLED:
+                self._kvstat_log("p1queue", rid=request_id)
+
+    def _kvstat_state(self, running_batch: Any) -> dict[str, Any]:
+        return {
+            "run_bs": 0 if running_batch is None else len(running_batch.reqs),
+            "full": int(
+                bool(running_batch is not None and running_batch.batch_is_full)
+            ),
+            "wait": len(self.waiting_queue),
+            "pool": self.req_to_token_pool.available_size(),
+            "kvtok": self.token_to_kv_pool_allocator.available_size(),
+            "parked": len(self._parked_reqs or ()),
+            "p1q": len(self._phase_one_queue or ()),
+            "p1d": len(self._phase_one_data or ()),
+        }
+
+    def _kvstat_log(self, tag: str, **fields: Any) -> None:
+        logger.info(
+            "KVSTAT %s t=%.6f %s",
+            tag,
+            time.perf_counter(),
+            " ".join(f"{k}={v}" for k, v in fields.items()),
+        )
 
     def get_new_batch_prefill(self, running_batch: Any) -> Any:
         deferring = bool(
             self.prefill_decode_interleave and self._interleave_defer_prefill
         )
+        before = self._kvstat_state(running_batch) if KVSTAT_ENABLED else None
         plan = super().get_new_batch_prefill(running_batch)
-        if (
+        skip_phase_one = (
             plan.batch_to_run is not None
             or deferring
             or not self._two_phase_kv
             or not self._phase_one_queue
+        )
+        p1_plan = (
+            None
+            if skip_phase_one
+            else self._phase_one_prefill_plan(plan.running_batch)
+        )
+        if KVSTAT_ENABLED and (
+            before["wait"] or before["p1q"] or before["parked"] or plan.batch_to_run
         ):
-            return plan
-        return self._phase_one_prefill_plan(plan.running_batch)
+            ord_batch = plan.batch_to_run
+            p1_batch = None if p1_plan is None else p1_plan.batch_to_run
+            after_ord = self._kvstat_state(plan.running_batch)
+            final = (
+                after_ord
+                if p1_plan is None
+                else self._kvstat_state(p1_plan.running_batch)
+            )
+            self._kvstat_log(
+                "step",
+                ct=self.forward_ct,
+                defer=int(deferring),
+                full_in=before["full"],
+                wait_in=before["wait"],
+                run_bs=before["run_bs"],
+                pool=before["pool"],
+                kvtok=before["kvtok"],
+                parked=before["parked"],
+                p1q=before["p1q"],
+                p1d=before["p1d"],
+                ordn=-1 if ord_batch is None else len(ord_batch.reqs),
+                full_ord=after_ord["full"],
+                p1try=int(not skip_phase_one),
+                p1n=-1 if p1_batch is None else len(p1_batch.reqs),
+                full_p1=final["full"],
+            )
+            if ord_batch is not None:
+                self._kvstat_log(
+                    "admit",
+                    ct=self.forward_ct,
+                    rids=",".join(req.rid for req in ord_batch.reqs),
+                )
+        return plan if p1_plan is None else p1_plan
 
     def _phase_one_prefill_plan(self, running_batch: Any) -> Any:
         """Admit prompt-only requests, and only those, into one extend batch.
@@ -329,6 +395,12 @@ class QwenTalkerScheduler(OmniScheduler):
                 len(batch.reqs),
             )
         self._parked_total += len(batch.reqs)
+        if KVSTAT_ENABLED:
+            self._kvstat_log(
+                "p1park",
+                ct=self.forward_ct,
+                rids=",".join(req.rid for req in batch.reqs),
+            )
         batch.reqs = []
 
     def _adopt_built_request(self, payload: Any, req_data: Any) -> None:
@@ -339,6 +411,10 @@ class QwenTalkerScheduler(OmniScheduler):
         self._phase_one_denied.discard(request_id)
         self._drop_queued_phase_one(request_id)
         parked = self._parked_reqs.pop(request_id, None)
+        if KVSTAT_ENABLED:
+            self._kvstat_log(
+                "build", rid=request_id, engaged=int(parked is not None)
+            )
         if parked is None:
             return
         fresh = req_data.req
