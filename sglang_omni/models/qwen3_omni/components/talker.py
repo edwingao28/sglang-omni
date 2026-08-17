@@ -499,12 +499,15 @@ class Qwen3OmniMoeTalkerTextModel(nn.Module):
         if input_embeds is None:
             hidden_states = self.codec_embedding(input_ids)
             if self._cp_enabled:
-                bs = hidden_states.shape[0]
+                # Note (wenyao): feedback rows exist only for decode slots, so
+                # batches larger than the buffer (e.g. warmup dummy extends)
+                # have nothing to merge beyond its capacity.
+                bs = min(hidden_states.shape[0], self._feedback_mask.shape[0])
                 feedback_mask = self._feedback_mask[:bs]
-                hidden_states = torch.where(
+                hidden_states[:bs] = torch.where(
                     feedback_mask.unsqueeze(-1),
                     self._feedback_buffer[:bs].to(hidden_states.dtype),
-                    hidden_states,
+                    hidden_states[:bs],
                 )
                 self._feedback_mask[:bs] = False
         else:
