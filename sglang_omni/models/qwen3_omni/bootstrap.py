@@ -229,6 +229,21 @@ def create_talker_scheduler(
         )
         model_worker.model_runner.init_cuda_graphs()
 
+    # Opt-in (SGLANG_OMNI_MOE_AUTOTUNE_TALKER_TOKENS): extend the flashinfer
+    # MoE autotune coverage to prefill-sized token counts for the talker,
+    # whose extend batches otherwise hit the untuned fallback tactic
+    # (see moe_prefill_autotune). Must run after init_cuda_graphs so the
+    # eager runner exists.
+    from sglang_omni.model_runner.moe_prefill_autotune import (
+        MOE_AUTOTUNE_TALKER_TOKENS_ENV,
+        maybe_autotune_prefill_moe,
+    )
+
+    maybe_autotune_prefill_moe(
+        model_worker.model_runner,
+        env_var=MOE_AUTOTUNE_TALKER_TOKENS_ENV,
+    )
+
     output_proc = SGLangOutputProcessor(
         capture_hidden=False,
         capture_hidden_layers=None,
