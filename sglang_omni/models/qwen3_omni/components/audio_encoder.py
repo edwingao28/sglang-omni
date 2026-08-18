@@ -3,15 +3,21 @@
 
 from __future__ import annotations
 
+import logging
 from types import MethodType
 
 import torch
 import torch.nn as nn
 from transformers.models.qwen3_omni_moe import modeling_qwen3_omni_moe as hf_modeling
 
+from sglang_omni.models.qwen3_omni.components.audio_layer_graph import (
+    AudioLayerGraphRunner,
+)
 from sglang_omni.models.qwen3_omni.components.common import load_thinker_config
 from sglang_omni.models.weight_loader import load_module, resolve_dtype
 from sglang_omni.utils import instantiate_module
+
+logger = logging.getLogger(__name__)
 
 AUDIO_TOWER_PREFIX = ("thinker.audio_tower.", "audio_tower.")
 AUDIO_TOWER_CLASS = hf_modeling.Qwen3OmniMoeAudioEncoder
@@ -96,6 +102,32 @@ def _share_segment_splits(tower: nn.Module, splits: _SegmentSplits) -> None:
         attention.forward = MethodType(_forward_with_shared_segments, attention)
 
 
+class _GraphedLayerStack(nn.Module):
+    """Stands in for the whole layer list so the tower's loop runs once."""
+
+    def __init__(self, layers: nn.ModuleList, runner, splits: _SegmentSplits) -> None:
+        super().__init__()
+        self._layers = layers
+        self._runner = runner
+        self._splits = splits
+
+    def __iter__(self):
+        yield self
+
+    def __len__(self) -> int:
+        return 1
+
+    def forward(self, hidden_states, cu_seqlens, **kwargs):
+        segments = self._splits.value
+        if segments is not None:
+            replayed = self._runner.maybe_replay(hidden_states, cu_seqlens, segments)
+            if replayed is not None:
+                return (replayed,)
+        for layer in self._layers:
+            hidden_states = layer(hidden_states, cu_seqlens, **kwargs)[0]
+        return (hidden_states,)
+
+
 class Qwen3OmniAudioEncoder(nn.Module):
     """Audio tower extracted from the HF thinker."""
 
@@ -105,6 +137,7 @@ class Qwen3OmniAudioEncoder(nn.Module):
         *,
         device: str = "cuda",
         dtype: str | torch.dtype | None = None,
+        enable_layer_cuda_graph: bool = False,
     ) -> None:
         super().__init__()
         torch_dtype = resolve_dtype(dtype)
@@ -119,6 +152,23 @@ class Qwen3OmniAudioEncoder(nn.Module):
         self._downsample_lengths = hf_modeling._get_feat_extract_output_lengths
         self._segment_splits = _SegmentSplits()
         _share_segment_splits(self.audio_tower, self._segment_splits)
+        self._layer_graph_runner = None
+        if enable_layer_cuda_graph and self._device.type == "cuda":
+            self._enable_layer_cuda_graph()
+
+    def _enable_layer_cuda_graph(self) -> None:
+        tower = self.audio_tower
+        chunk_tokens = int(
+            self._downsample_lengths(torch.tensor([tower.n_window * 2])).item()
+        )
+        window = chunk_tokens * (tower.n_window_infer // (tower.n_window * 2))
+        runner = AudioLayerGraphRunner(tower, device=self._device, window=window)
+        runner.capture_all()
+        if not runner.has_graphs:
+            logger.warning("audio layer CUDA graphs unavailable; staying eager")
+            return
+        self._layer_graph_runner = runner
+        tower.layers = _GraphedLayerStack(tower.layers, runner, self._segment_splits)
 
     def forward(
         self,
