@@ -297,7 +297,7 @@ def _build_qwen_speech_server_parser() -> argparse.ArgumentParser:
         default=5,
         help=(
             "Chunk threshold for partial-start (default 5). When partial-start "
-            "is enabled, it must be >= MIN_PARTIAL_START_CHUNKS (3)."
+            "is enabled, it must be >= MIN_PARTIAL_START_CHUNKS (1)."
         ),
     )
     target.add_argument(

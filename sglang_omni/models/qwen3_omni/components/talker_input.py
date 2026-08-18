@@ -65,6 +65,11 @@ def build_user_part(
     return result
 
 
+# "<|im_start|>assistant\n" -- the assistant segment's fixed prompt_ids
+# prefix, which build_assistant_part consumes as text_hidden's first 3 rows.
+_ASSISTANT_HEADER_ROWS = 3
+
+
 def build_assistant_part(
     *,
     assistant_embed: torch.Tensor,
@@ -86,6 +91,20 @@ def build_assistant_part(
     dtype = assistant_embed.dtype
 
     projected = text_projection(assistant_embed)  # [N, hidden]
+
+    if projected.shape[0] < _ASSISTANT_HEADER_ROWS:
+        # Note (wenyao): this, not the partial-start chunk threshold, is the
+        # structural floor. The first three rows are the chat header
+        # ("<|im_start|>assistant\n") and always come from prompt_ids, so any
+        # caller short of them is mis-slicing the segment rather than starting
+        # early. Raise here instead of letting text_hidden come out < 9 rows
+        # and fail as an opaque broadcast error against the fixed 9-row codec
+        # side.
+        raise ValueError(
+            "assistant segment must carry its "
+            f"{_ASSISTANT_HEADER_ROWS} chat-header rows, got "
+            f"{projected.shape[0]}"
+        )
 
     # Text side: [first 3] + [4x pad] + [bos] + [4th token]
     # The initial talker request can be built before the thinker has emitted

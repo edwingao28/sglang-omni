@@ -19,7 +19,18 @@ from sglang_omni.platforms import current_platform
 _PKG = "sglang_omni.models.qwen3_omni"
 _PLACEMENT_POLICY = f"{_PKG}.placement.Qwen3OmniPlacementPolicy"
 THINKER_STAGE = "thinker"
-MIN_PARTIAL_START_CHUNKS = 3
+# Note (wenyao): one prefetched chunk = one thinker token. The talker
+# prompt's 9-row assistant tail is [3 header rows] + [4 pad] + [bos] + [first
+# generated token]; the 3 header rows are "<|im_start|>assistant\n", which
+# always arrive in prompt_ids, never as prefetched chunks. K=1 is therefore
+# already structurally complete, and its prefill tensor is bit-identical to
+# any larger K -- build_assistant_part derives input_embeds from projected[:4]
+# alone. The old floor of 3 came from a layout test that built the assistant
+# segment without the header rows, conflating segment rows with prefetched
+# chunks, off by exactly the header length. K only sizes the pre-queued decode
+# text rows (future_text_rows == K-1 after EOS stripping), so K=1 costs one
+# decode stall until chunk 2 arrives, not a malformed prompt.
+MIN_PARTIAL_START_CHUNKS = 1
 
 # SGLang reads this when DeepGEMM compile utilities are imported. Qwen AR
 # stages can first hit some dense FP8 shapes after readiness; disable all-M

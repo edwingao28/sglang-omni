@@ -663,11 +663,22 @@ def test_qwen_predictor_decode_graph_uses_tensor_device_when_current_device_diff
     torch.testing.assert_close(graph_embeds, eager_embeds)
 
 
-def _build_assistant_part_for_n_chunks(n: int) -> dict[str, torch.Tensor]:
-    """Build an assistant segment with n thinker chunks under the test layout."""
+_ASSISTANT_HEADER_ROWS = 3
+
+
+def _build_assistant_part_for_n_chunks(
+    n: int, *, header_rows: int = _ASSISTANT_HEADER_ROWS
+) -> dict[str, torch.Tensor]:
+    """Build an assistant segment with n prefetched thinker chunks.
+
+    Mirrors production: the segment always opens with the chat-header rows
+    ("<|im_start|>assistant\n" comes from prompt_ids, not from prefetched
+    chunks), followed by the n generated-token rows.
+    """
     hidden_dim = 4
-    assistant_embed = torch.arange(n * hidden_dim, dtype=torch.float32).reshape(
-        n, hidden_dim
+    rows = header_rows + n
+    assistant_embed = torch.arange(rows * hidden_dim, dtype=torch.float32).reshape(
+        rows, hidden_dim
     )
 
     def codec_embed_fn(token_ids: torch.Tensor) -> torch.Tensor:
@@ -693,50 +704,72 @@ def _build_assistant_part_for_n_chunks(n: int) -> dict[str, torch.Tensor]:
 def test_partial_prompt_prefill_layout_invariants() -> None:
     """Locks the assistant-segment row contract used by partial-start.
 
-    Source of truth for ``MIN_PARTIAL_START_CHUNKS`` and the documented
-    decode-ready operating point: below 3 chunks ``build_assistant_part``
-    fails to assemble the layout (``text_hidden`` is < 9 rows while
-    ``codec_hidden`` is fixed at 9 rows, so the subsequent tensor add raises);
-    at 3 or 4 chunks the layout is stable but ``future_text_rows`` collapses
-    to zero after the trailing EOS row is stripped on the partial path; from
-    5 chunks onward at least one consumable future text row remains.
+    The chat header (3 rows) always arrives in prompt_ids, so the 9-row
+    assistant tail assembles from the very first generated token: K=1 is the
+    minimum structurally complete operating point. Prefetching more chunks
+    only pre-queues decode text rows -- future_text_rows == K - 1 on the
+    partial path once the trailing EOS row is stripped -- so K=1 defers the
+    first decode step until chunk 2 arrives and K=2 is the smallest
+    stall-free point.
     """
-    for n in range(1, MIN_PARTIAL_START_CHUNKS):
-        try:
-            _build_assistant_part_for_n_chunks(n)
-        except RuntimeError:
-            pass
-        else:
-            raise AssertionError(
-                "layout invariant: build_assistant_part must fail "
-                f"below MIN_PARTIAL_START_CHUNKS (n={n})"
-            )
+    assert MIN_PARTIAL_START_CHUNKS == 1
 
-    for n in (MIN_PARTIAL_START_CHUNKS, 4, 5, 10):
+    for n in (MIN_PARTIAL_START_CHUNKS, 2, 3, 4, 5, 10):
         assert (
             _build_assistant_part_for_n_chunks(n)["input_embeds"].shape[0] == 9
         ), f"layout invariant: at n={n} the assistant tail must be 9 rows"
 
-    # future_text_rows count before include_assistant_eos stripping:
-    #   n <= 4 -> 1 row (just the EOS row);
-    #   n  > 4 -> (n - 4) projected rows + 1 EOS row.
-    assert _build_assistant_part_for_n_chunks(3)["future_text_rows"].shape[0] == 1
-    assert _build_assistant_part_for_n_chunks(4)["future_text_rows"].shape[0] == 1
-    assert _build_assistant_part_for_n_chunks(5)["future_text_rows"].shape[0] == 2
-    assert _build_assistant_part_for_n_chunks(6)["future_text_rows"].shape[0] == 3
+    # future_text_rows before include_assistant_eos stripping: the (n - 1)
+    # generated rows past the first spoken token, plus the trailing EOS row.
+    for n in (1, 2, 3, 5, 10):
+        assert (
+            _build_assistant_part_for_n_chunks(n)["future_text_rows"].shape[0] == n
+        ), f"future_text_rows must be n rows at n={n}"
 
     def stripped(n: int) -> int:
         rows = _build_assistant_part_for_n_chunks(n)["future_text_rows"]
         return max(rows.shape[0] - 1, 0)
 
-    # With include_assistant_eos=False on the partial path:
-    #   n in {3, 4} -> 0 future rows (decode stalls immediately after prefill);
-    #   n == 5 -> 1 future row (documented decode-ready operating point);
-    #   n >= 6 -> (n - 4) future rows.
-    assert stripped(3) == 0
-    assert stripped(4) == 0
-    assert stripped(5) == 1
-    assert stripped(6) == 2
+    # With include_assistant_eos=False on the partial path: K - 1 usable rows.
+    for n in (1, 2, 3, 5, 10):
+        assert stripped(n) == n - 1, f"stripped future rows must be n-1 at n={n}"
+
+
+def test_partial_start_prefill_tensor_is_invariant_in_chunk_count() -> None:
+    """The prefill tensor at K=1 is identical to any larger K.
+
+    This is what makes lowering MIN_PARTIAL_START_CHUNKS to 1 safe for the
+    audio head: build_assistant_part reads only projected[:4] -- the 3 chat
+    header rows plus the first generated token -- so a K=1 partial start
+    prefills exactly the same rows a fully-completed thinker stream would.
+    Everything past projected[3] lands in the future-text-row queue instead.
+    """
+    baseline = _build_assistant_part_for_n_chunks(1)
+    for n in (2, 3, 5, 10, 64):
+        later = _build_assistant_part_for_n_chunks(n)
+        assert torch.equal(baseline["input_embeds"], later["input_embeds"]), (
+            f"prefill embeds must not depend on chunk count (n={n})"
+        )
+        assert torch.equal(baseline["input_ids"], later["input_ids"])
+
+
+def test_build_assistant_part_rejects_segment_missing_chat_header() -> None:
+    """The real structural floor is the 3 chat-header rows, enforced locally.
+
+    A caller that hands over a segment shorter than the header is mis-slicing,
+    not starting early. build_assistant_part must say so rather than let
+    text_hidden come out < 9 rows and fail as an opaque broadcast error
+    against the fixed 9-row codec side.
+    """
+    for header_rows in (0, 1, 2):
+        with pytest.raises(ValueError, match="chat-header rows"):
+            _build_assistant_part_for_n_chunks(0, header_rows=header_rows)
+
+    # Exactly the header and nothing generated still assembles (the fourth-row
+    # slot falls back to zeros and is filled later from the text-row queue).
+    assert (
+        _build_assistant_part_for_n_chunks(0)["input_embeds"].shape[0] == 9
+    )
 
 
 def _fresh_partial_scheduler(

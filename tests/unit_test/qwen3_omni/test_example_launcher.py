@@ -57,7 +57,10 @@ def test_qwen_speech_help_preserves_topology_contract():
     assert "Tensor-parallel size for the thinker stage" in help_text
     assert "exactly that many GPU ids" in help_text
     assert "Defaults to on for the disaggregated topology" in help_text
-    assert "must be >= MIN_PARTIAL_START_CHUNKS (3)" in help_text
+    assert (
+        f"must be >= MIN_PARTIAL_START_CHUNKS ({MIN_PARTIAL_START_CHUNKS})"
+        in help_text
+    )
     assert "All GPU stage flags must point to the same device" in help_text
 
 
@@ -466,11 +469,33 @@ def test_partial_start_disabled_does_not_propagate_subfloor_min_chunks(
 
 
 def test_partial_start_min_chunks_rejects_below_floor(mock_launch_server):
-    args = _make_args(enable_partial_start=True, partial_start_min_chunks=2)
-    with pytest.raises(ValueError, match="partial-start-min-chunks must be >= 3"):
+    args = _make_args(
+        enable_partial_start=True,
+        partial_start_min_chunks=MIN_PARTIAL_START_CHUNKS - 1,
+    )
+    with pytest.raises(
+        ValueError,
+        match=f"partial-start-min-chunks must be >= {MIN_PARTIAL_START_CHUNKS}",
+    ):
         _launch_speech_server(args)
 
     mock_launch_server.assert_not_called()
+
+
+def test_partial_start_min_chunks_accepts_the_floor(mock_launch_server):
+    """K=1 is a legal operating point, not just the boundary of a rejection."""
+    args = _make_args(
+        enable_partial_start=True,
+        partial_start_min_chunks=MIN_PARTIAL_START_CHUNKS,
+    )
+    _launch_speech_server(args)
+
+    config = mock_launch_server.call_args[0][0]
+    talker = _stage(config, "talker_ar")
+
+    assert (
+        talker.factory_args["partial_start_min_chunks"] == MIN_PARTIAL_START_CHUNKS
+    )
 
 
 def test_colocated_defaults_use_thinker_gpu_for_gpu_stages(mock_launch_server):
