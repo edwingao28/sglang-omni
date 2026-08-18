@@ -978,7 +978,6 @@ def test_qwen_thinker_enables_and_attests_breakable_prefill_graphs(
 ) -> None:
     from sglang.srt.utils import hf_transformers_utils
 
-    from sglang_omni.model_runner import prefill_qualification
     from sglang_omni.models.qwen3_omni import bootstrap, request_builders
     from sglang_omni.models.qwen3_omni import (
         thinker_model_runner as qwen_thinker_runner,
@@ -998,11 +997,10 @@ def test_qwen_thinker_enables_and_attests_breakable_prefill_graphs(
     captured: dict[str, object] = {}
     attest_calls: list[tuple[object, object]] = []
     graph_init_workers: list[object] = []
-    qualification_calls: list[object] = []
     output_proc_kwargs: list[dict[str, object]] = []
     qwen_runner_calls: list[tuple[object, object]] = []
     model = object()
-    output_proc = SimpleNamespace(prefill_debug_snapshot=lambda: {"debug": True})
+    output_proc = object()
     model_config = SimpleNamespace(
         model_path="model",
         vocab_size=10,
@@ -1012,10 +1010,6 @@ def test_qwen_thinker_enables_and_attests_breakable_prefill_graphs(
         model_runner=SimpleNamespace(model=model),
         model_config=model_config,
     )
-    monkeypatch.setenv("SGLANG_OMNI_PREFILL_GRAPH_EAGER_REPLAY", "1")
-    if speech_enabled:
-        monkeypatch.setenv("SGLANG_OMNI_PREFILL_GRAPH_DEBUG_SNAPSHOTS", "1")
-
     def fake_create_infrastructure(*args, **kwargs):
         captured.update(kwargs)
         return (
@@ -1043,11 +1037,6 @@ def test_qwen_thinker_enables_and_attests_breakable_prefill_graphs(
         cuda_graph_batch_validator,
         "attest_prefill_cuda_graphs",
         lambda runner, args: attest_calls.append((runner, args)),
-    )
-    monkeypatch.setattr(
-        prefill_qualification,
-        "enable_prefill_qualification_eager_replay",
-        lambda runner: qualification_calls.append(runner),
     )
     monkeypatch.setattr(
         hf_transformers_utils, "get_tokenizer", lambda *a, **k: object()
@@ -1086,22 +1075,12 @@ def test_qwen_thinker_enables_and_attests_breakable_prefill_graphs(
     assert captured["defer_cuda_graph_capture"] is speech_enabled
     assert graph_init_workers == ([model_worker] if speech_enabled else [])
     assert attest_calls == [(model_worker.model_runner, server_args)]
-    assert qualification_calls == (
-        [model_worker.model_runner] if speech_enabled else []
-    )
     assert len(output_proc_kwargs) == 1
     output_args = output_proc_kwargs[0]
     assert output_args["capture_hidden"] is speech_enabled
     assert output_args["capture_hidden_layers"] == ([0, 24] if speech_enabled else None)
     assert output_args["model"] is (model if speech_enabled else None)
     assert callable(output_args["should_emit_hidden"])
-    assert output_args["capture_prefill_debug_snapshot"] is speech_enabled
-    if speech_enabled:
-        assert model_worker._prefill_cuda_graph_debug_snapshot_provider() == {
-            "debug": True
-        }
-    else:
-        assert not hasattr(model_worker, "_prefill_cuda_graph_debug_snapshot_provider")
     assert qwen_runner_calls == [(model_worker, output_proc)]
     assert scheduler.server_args is server_args
 

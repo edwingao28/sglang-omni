@@ -7,10 +7,8 @@ tests/
 ├── data/
 ├── test_model/
 │   ├── conftest.py
-│   ├── qwen3_omni_speech_prefill_bcg_assertions.py
 │   ├── test_rl_distributed_weight_update.py
 │   ├── test_qwen3_omni_*_ci.py
-│   ├── test_qwen3_omni_speech_prefill_bcg_ci.py
 │   ├── test_qwen3_omni_videoamme_talker_tp2_ci.py
 │   ├── test_tts_ci.py
 │   ├── test_asr_ci_multi_speaker.py
@@ -54,8 +52,7 @@ tests/
     ├── models/
     │   └── test_model_capabilities.py
     ├── model_runner/
-    │   ├── test_hidden_capture.py
-    │   └── test_prefill_cuda_graph_usage.py
+    │   └── test_hidden_capture.py
     ├── qwen3_omni/
     │   ├── test_cli.py
     │   ├── test_code2wav.py
@@ -68,10 +65,7 @@ tests/
     │   ├── test_logit_shaping.py
     │   ├── test_mrope_positions.py
     │   ├── test_pipeline.py
-    │   ├── test_request_builder_text_only.py
     │   ├── test_sglang_ar_budget.py
-    │   ├── test_sglang_thinker.py
-    │   ├── test_speech_prefill_bcg_qualification.py
     │   ├── test_streaming.py
     │   ├── test_talker.py
     │   ├── test_talker_prefill_embed_cache.py
@@ -79,8 +73,7 @@ tests/
     │   ├── test_talker_feedback_write.py
     │   ├── test_talker_row_ownership.py
     │   ├── test_talker_token_readback.py
-    │   ├── test_text_template.py
-    │   └── test_thinker_prefill_contract.py
+    │   └── test_text_template.py
     ├── ming_omni/
     │   ├── test_omni_serve.py
     │   ├── test_pipeline.py
@@ -190,8 +183,6 @@ Tag each test with the marker that matches its lane and use it to filter runs.
 - `benchmark`: GPU performance / parity tests in `test_model/`. May require a
   populated HF cache and tens of GB of GPU memory; per-test docstrings call
   out hardware needs.
-- `gpu`: requires a CUDA device and is auto-skipped without one. Hardware-specific
-  gates may additionally require a named accelerator such as H100.
 - `tts_stage(name)`: in-file CI stage selector for TTS benchmarks.
   Combined with `--tts-stage` (see `test_model/conftest.py`).
 
@@ -229,19 +220,6 @@ Relevant model CI ownership:
   (BF16 colocated DP2, full / thinker-only), `qwen3_omni_bf16_disagg_server`
   (BF16 disaggregated), and `qwen3_omni_fp8_tp2_server` (FP8 thinker-TP=2);
   BF16 thinker-TP=2 is exercised by thinker_length via `_start_qwen3_omni_tp2`.
-- `test_qwen3_omni_speech_prefill_bcg_ci.py`: H100-only Stage 11 qualification
-  gate. It launches natural eager, shape-matched eager replay, and a captured
-  Breakable Prefill CUDA Graph server sequentially; verifies exact
-  input-embedding transport, layer-24/logit and greedy-token parity, repeated
-  replay determinism, same-bucket refresh, both eager fallback classes,
-  replay-by-bucket counters, and valid WAV output. It writes
-  `speech_prefill_bcg_results.json`; the non-collected parity helpers live in
-  `qwen3_omni_speech_prefill_bcg_assertions.py`. The gate requires a free H100
-  and fails rather than skips on unsupported hardware. Run it with:
-
-  ```bash
-  pytest tests/test_model/test_qwen3_omni_speech_prefill_bcg_ci.py -v -s -x
-  ```
 - `test_qwen3_omni_tts_ci.py`: gates the SeedTTS speed/WER path through the
   router at TTS generation concurrency 16 and verifies both colocated workers
   receive traffic. WER reuses saved audio after the Qwen3-Omni server is
@@ -406,16 +384,7 @@ that happened to contain an older version of the test.
 - `unit_test/model_runner/`: Shared model-runner contract tests:
   - graph-safe hidden-state capture: stable registered buffers refreshed by
     decoder-layer pre-hooks, capacity validation, graph-replay row reads, and
-    buffer address stability across forwards and real Breakable Prefill CUDA
-    Graph replays.
-  - breakable-prefill usage attestation: executed replay buckets,
-    standard/custom eager fallback counters, decode-graph exclusion,
-    draft-extend inclusion, debug snapshots, and JSON-safe model-info output.
-  - Run the real capture/replay case with:
-
-    ```bash
-    pytest tests/unit_test/model_runner/test_hidden_capture.py -m gpu -q
-    ```
+    buffer address stability across forwards.
 - `unit_test/models/`: Model registry and cross-model contract tests:
   - static TTS `ModelCapabilities` declarations, registry lookup, aliases, and
     launcher startup logging.
@@ -515,10 +484,6 @@ that happened to contain an older version of the test.
     lifecycle across abort/replay-failure/exhaustion, and profiler event
     shape; the `gpu`-marked case runs real pinned buffers and CUDA events
   - logit-shaping helpers (e.g. repetition penalty) numerical equivalence with the original per-row scalar formulas.
-  - Thinker request-builder and adapter contracts
-    (`test_request_builder_text_only.py`, `test_sglang_thinker.py`): nested
-    model-input ownership, legacy flat-payload compatibility, pure-text M-RoPE
-    positions, config-driven prefill positions, and sidecar request identity.
   - Thinker prefill contracts: `OmniPrefillInputs` adoption for text and
     audio-input → text-output prefills, whole-batch fail-closed qualification,
     audio placeholder/cursor handling across chunked prefill, fresh
@@ -527,28 +492,7 @@ that happened to contain an older version of the test.
     inherited eager path. Run the focused suite with:
 
     ```bash
-    pytest \
-      tests/unit_test/qwen3_omni/test_request_builder_text_only.py \
-      tests/unit_test/qwen3_omni/test_sglang_thinker.py \
-      tests/unit_test/qwen3_omni/test_thinker_prefill_contract.py \
-      -q
-    ```
-  - Speech Breakable Prefill CUDA Graph qualification: opt-in H100 config,
-    bootstrap and runtime attestation, logical-row snapshot serialization,
-    exact and non-finite-safe parity helpers, and qualification-only eager
-    replay using the live static batch with fail-closed type checks and
-    idempotent installation. Run the focused CPU suite with:
-
-    ```bash
-    pytest \
-      tests/unit_test/model_runner/test_base_hooks.py \
-      tests/unit_test/model_runner/test_hidden_capture.py \
-      tests/unit_test/model_runner/test_prefill_cuda_graph_usage.py \
-      tests/unit_test/qwen3_omni/test_config_manager.py \
-      tests/unit_test/qwen3_omni/test_pipeline.py \
-      tests/unit_test/qwen3_omni/test_speech_prefill_bcg_qualification.py \
-      tests/unit_test/qwen3_omni/test_streaming.py \
-      -q
+    pytest tests/unit_test/qwen3_omni/test_thinker_prefill_contract.py -q
     ```
 
 - `unit_test/ming_omni/` Ming-Omni unit tests:

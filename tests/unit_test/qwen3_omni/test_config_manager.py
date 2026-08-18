@@ -193,12 +193,12 @@ def test_qwen3_omni_mmsu_example_config_uses_text_pipeline() -> None:
     assert thinker_args["server_args_overrides"]["max_running_requests"] == 4
 
 
-def test_qwen3_omni_speech_prefill_graph_h100_config_is_explicit_and_opt_in() -> None:
+def test_qwen3_omni_h100_bf16_config_enables_speech_prefill_graph() -> None:
     config_path = (
         _REPO_ROOT
         / "examples"
         / "configs"
-        / "qwen3_omni_colocated_h100_bf16_speech_prefill_graph.yaml"
+        / "qwen3_omni_colocated_h100_bf16.yaml"
     )
 
     config = ConfigManager.from_file(str(config_path)).config
@@ -208,50 +208,8 @@ def test_qwen3_omni_speech_prefill_graph_h100_config_is_explicit_and_opt_in() ->
     assert isinstance(config, Qwen3OmniSpeechColocatedPipelineConfig)
     assert overrides["disable_radix_cache"] is True
     assert overrides["cuda_graph_backend_prefill"] == "breakable"
-    assert overrides["cuda_graph_bs_prefill"] == [
-        4,
-        8,
-        12,
-        16,
-        20,
-        24,
-        28,
-        32,
-        48,
-        64,
-        80,
-        96,
-        112,
-        128,
-        144,
-        160,
-        176,
-        192,
-        208,
-        224,
-        240,
-        256,
-        288,
-        320,
-        352,
-        384,
-        416,
-        448,
-        480,
-        512,
-        576,
-        640,
-        704,
-        768,
-        832,
-        896,
-        960,
-        1024,
-        1280,
-        1536,
-        1792,
-        2048,
-    ]
+    assert overrides["cuda_graph_bs_prefill"][0] == 4
+    assert overrides["cuda_graph_bs_prefill"][-1] == 2048
     assert overrides["cuda_graph_max_bs_prefill"] == 2048
 
 

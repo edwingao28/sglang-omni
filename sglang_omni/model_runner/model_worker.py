@@ -363,24 +363,11 @@ class ModelWorker:
             "_prefill_cuda_graph_replay_buckets",
             Counter(),
         )
-        snapshot_provider = getattr(
-            self,
-            "_prefill_cuda_graph_debug_snapshot_provider",
-            None,
-        )
         return {
             "backend": backend,
             "runner": type(runner).__name__ if runner is not None else None,
             "backend_runner": (
                 type(backend_runner).__name__ if backend_runner is not None else None
-            ),
-            # Note (wenyao): expose the positive attestation so the H100
-            # gate fails closed.
-            "qualification_eager_replay": bool(
-                getattr(backend_runner, "_omni_qualification_eager_replay", False)
-            ),
-            "upstream_debug_eager": bool(
-                getattr(backend_runner, "_debug_eager", False)
             ),
             "capture_num_tokens": capture_num_tokens,
             "input_embeds_slot": input_embeds_slot,
@@ -395,9 +382,6 @@ class ModelWorker:
                 str(bucket): int(count)
                 for bucket, count in sorted(replay_buckets.items())
             },
-            "debug_snapshot": (
-                snapshot_provider() if callable(snapshot_provider) else None
-            ),
         }
 
     def model_info(self) -> dict[str, Any]:

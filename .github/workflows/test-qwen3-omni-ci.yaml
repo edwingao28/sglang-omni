@@ -26,7 +26,7 @@ env:
 #   stage-1-thinker -> stage-2-tts -> stage-3-mmmu -> stage-4-mmmu-talker
 #     -> stage-5-mmsu -> stage-6-mmsu-talker -> stage-7-videomme
 #     -> stage-8-videomme-talker -> stage-9-videoamme
-#     -> stage-10-videoamme-talker-tp2 -> stage-11-speech-prefill-bcg
+#     -> stage-10-videoamme-talker-tp2
 
 jobs:
   stage-1-thinker:
@@ -498,65 +498,3 @@ jobs:
             */videoamme_audio*/videoamme_results.json
           artifact-upload-name: qwen3-omni-videoamme-talker-tp2-results
           artifact-upload-path: /tmp/**/videoamme_audio*/videoamme_results.json
-
-  stage-11-speech-prefill-bcg:
-    name: stage 11 - speech prefill BPCG replay + parity
-    needs: stage-10-videoamme-talker-tp2
-    if: always() && !cancelled()
-    runs-on: [self-hosted, h100]
-    # Include a cold environment rebuild plus teardown headroom if the
-    # model/test step reaches its own watchdog.
-    timeout-minutes: 75
-    container:
-      image: hongccc/sglang-omni@sha256:374d0b1c30b2bff685b1716fc64a02ad3b3d0a90fe2ce73ce9861a6992c28101
-      options: >-
-        --rm
-        -e NVIDIA_VISIBLE_DEVICES
-        -e OMNI_CI_CPUSET
-        --cap-add=SYS_PTRACE
-        -v /dev/shm:/dev/shm
-        -v /data/omni-ci:/data/omni-ci
-        -v /data/cache/huggingface:/github/home/.cache/huggingface
-        -v /data/cache/huggingface:/root/.cache/huggingface
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - uses: ./.github/actions/omni-setup
-        with:
-          venv-name: omni
-
-      - name: Run speech prefill BPCG qualification
-        timeout-minutes: 50
-        shell: bash
-        run: |
-          source omni/bin/activate
-          export PYTHONPATH=$PWD
-          bash .github/scripts/run_flaky_pytest.sh \
-            pytest tests/test_model/test_qwen3_omni_speech_prefill_bcg_ci.py -v -s -x
-        env:
-          HF_ENDPOINT: https://huggingface.co
-          TORCHINDUCTOR_CACHE_DIR: ${{ env.OMNI_CI_HOME }}/.torchinductor
-          OMNI_CI_MAX_ATTEMPTS: "1"
-          OMNI_CI_STAGE_LABEL: Qwen3-Omni speech prefill BPCG replay + parity
-
-      # Reclaim before artifact collection so VRAM cleanup does not depend on
-      # the upload outcome.
-      - name: Reclaim speech qualification GPU
-        if: always()
-        shell: bash
-        run: bash .github/scripts/delete_gpu_process.sh --kill-orphans
-
-      - name: Post-stage cleanup
-        if: always()
-        uses: ./.github/actions/omni-post-stage
-        with:
-          stage-label: Speech BPCG replay + parity
-          artifact-path-globs: |
-            */speech_prefill_bcg*/speech_prefill_bcg_results.json
-          artifact-upload-name: qwen3-omni-speech-prefill-bcg-results
-          artifact-upload-path: |
-            /tmp/**/speech_prefill_bcg*/speech_prefill_bcg_results.json
-            /tmp/**/server_logs_speech_prefill_bcg_eager*/server.log
-            /tmp/**/server_logs_speech_prefill_bcg_graph*/server.log
-          artifact-if-no-files-found: error

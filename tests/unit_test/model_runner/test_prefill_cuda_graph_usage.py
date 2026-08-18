@@ -15,7 +15,7 @@ class _PrefillRunner:
 
     def __init__(self) -> None:
         self._static_num_tokens = 0
-        self.backend = SimpleNamespace(_omni_qualification_eager_replay=True)
+        self.backend = SimpleNamespace()
         self.buffer_registry = SimpleNamespace(
             has_slot=lambda name: name == "input_embeds"
         )
@@ -120,10 +120,6 @@ def test_model_worker_reports_actual_prefill_graph_replays_by_bucket() -> None:
     )
     worker.tp_rank = 0
     worker.model_arch_override = None
-    worker._prefill_cuda_graph_debug_snapshot_provider = lambda: {
-        "requests": [{"request_id": "debug-request"}]
-    }
-
     # Raw length intentionally does not predict bucket 16; the metric must read
     # the runner's executed static bucket rather than bisecting input length.
     ModelWorker.forward_batch_generation(worker, _forward_batch(5))
@@ -149,12 +145,9 @@ def test_model_worker_reports_actual_prefill_graph_replays_by_bucket() -> None:
     assert stats["capture_num_tokens"] == [16, 32]
     assert stats["runner"] == "_PrefillRunner"
     assert stats["backend_runner"] == "SimpleNamespace"
-    assert stats["qualification_eager_replay"] is True
-    assert stats["upstream_debug_eager"] is False
     assert stats["input_embeds_slot"] is True
     assert stats["replay_count"] == 3
     assert stats["standard_eager_count"] == 1
     assert stats["custom_eager_count"] == 1
     assert stats["replay_buckets"] == {"16": 2, "32": 1}
-    assert stats["debug_snapshot"] == {"requests": [{"request_id": "debug-request"}]}
     assert json.loads(json.dumps(stats)) == stats

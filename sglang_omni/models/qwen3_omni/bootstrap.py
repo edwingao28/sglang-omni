@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from sglang_omni.vendor.sglang.server_args import override_server_args
@@ -51,17 +50,6 @@ def create_thinker_scheduler(
     capture_hidden = speech_enabled
     prefill_graph_backend = get_prefill_cuda_graph_backend(server_args)
     enable_prefill_input_embeds = prefill_graph_backend == CudaGraphBackend.BREAKABLE
-    qualification_eager_replay = bool(
-        speech_enabled and os.getenv("SGLANG_OMNI_PREFILL_GRAPH_EAGER_REPLAY") == "1"
-    )
-    capture_prefill_debug_snapshot = bool(
-        speech_enabled and os.getenv("SGLANG_OMNI_PREFILL_GRAPH_DEBUG_SNAPSHOTS") == "1"
-    )
-    if qualification_eager_replay and not capture_prefill_debug_snapshot:
-        raise RuntimeError(
-            "SGLANG_OMNI_PREFILL_GRAPH_EAGER_REPLAY is qualification-only and "
-            "requires SGLANG_OMNI_PREFILL_GRAPH_DEBUG_SNAPSHOTS=1"
-        )
     want_cuda_graph = not bool(server_args.disable_cuda_graph)
     defer_cuda_graph_capture = want_cuda_graph and capture_hidden
     if defer_cuda_graph_capture:
@@ -112,13 +100,6 @@ def create_thinker_scheduler(
         cuda_graph_batch_validator.attest_prefill_cuda_graphs(
             model_worker.model_runner, server_args
         )
-    if qualification_eager_replay:
-        from sglang_omni.model_runner.prefill_qualification import (
-            enable_prefill_qualification_eager_replay,
-        )
-
-        enable_prefill_qualification_eager_replay(model_worker.model_runner)
-
     def _should_generate_qwen_audio_output(request: Any) -> bool:
         return should_generate_audio_output(request.data.stage_payload)
 
@@ -127,12 +108,7 @@ def create_thinker_scheduler(
         capture_hidden_layers=capture_hidden_layers,
         model=model_worker.model_runner.model if capture_hidden_layers else None,
         should_emit_hidden=_should_generate_qwen_audio_output,
-        capture_prefill_debug_snapshot=capture_prefill_debug_snapshot,
     )
-    if capture_prefill_debug_snapshot:
-        model_worker._prefill_cuda_graph_debug_snapshot_provider = (
-            output_proc.prefill_debug_snapshot
-        )
 
     if speech_enabled and prefill_graph_backend != CudaGraphBackend.BREAKABLE:
         model_runner = ThinkerModelRunner(model_worker, output_proc)

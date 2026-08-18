@@ -3,15 +3,12 @@
 
 from __future__ import annotations
 
-import base64
 from collections.abc import Callable, Sequence
 from typing import Any
 
 import torch
 
 from sglang_omni.scheduling.types import RequestOutput, SchedulerOutput
-
-_PREFILL_DEBUG_SNAPSHOT_MAX_ROWS = 512
 
 
 class SGLangOutputProcessor:
@@ -23,14 +20,11 @@ class SGLangOutputProcessor:
         capture_hidden_layers: list[int] | None = None,
         model: Any = None,
         should_emit_hidden: Callable[[Any], bool] | None = None,
-        capture_prefill_debug_snapshot: bool = False,
     ):
         self._capture_hidden = capture_hidden
         self._capture_hidden_layers = capture_hidden_layers
         self._model = model
         self._should_emit_hidden = should_emit_hidden
-        self._capture_prefill_debug_snapshot = capture_prefill_debug_snapshot
-        self._prefill_debug_snapshot: dict[str, Any] | None = None
 
     def process(
         self,
@@ -65,91 +59,7 @@ class SGLangOutputProcessor:
                 finished=False,
                 extra=extra,
             )
-        if self._capture_prefill_debug_snapshot:
-            self._record_prefill_debug_snapshot(
-                model_output,
-                scheduler_output=scheduler_output,
-                outputs=outputs,
-            )
         return outputs
-
-    @staticmethod
-    def _serialize_debug_tensor(tensor: torch.Tensor) -> dict[str, Any]:
-        value = tensor.detach().contiguous().cpu()
-        raw = value.view(torch.uint8).numpy().tobytes()
-        return {
-            "shape": list(value.shape),
-            "dtype": str(value.dtype).removeprefix("torch."),
-            "data": base64.b64encode(raw).decode("ascii"),
-        }
-
-    def _record_prefill_debug_snapshot(
-        self,
-        model_output: Any,
-        *,
-        scheduler_output: SchedulerOutput,
-        outputs: dict[str, RequestOutput],
-    ) -> None:
-        """Retain the latest prefill tensors for the opt-in H100 parity gate."""
-        batch_data = scheduler_output.batch_data
-        if not batch_data.forward_mode.is_extend():
-            return
-        logical_rows = self._logical_hidden_rows(scheduler_output)
-        if logical_rows > _PREFILL_DEBUG_SNAPSHOT_MAX_ROWS:
-            self._prefill_debug_snapshot = {
-                "requests": [],
-                "skipped": "logical_rows_exceed_limit",
-                "logical_rows": logical_rows,
-            }
-            return
-
-        logits_output = getattr(model_output, "logits_output", None)
-        logits = getattr(logits_output, "next_token_logits", None)
-        next_token_ids = getattr(model_output, "next_token_ids", None)
-        requests = []
-        for index, scheduler_request in enumerate(scheduler_output.requests):
-            request_output = outputs[scheduler_request.request_id]
-            hidden = (
-                request_output.extra.get("hidden_states")
-                if isinstance(request_output.extra, dict)
-                else None
-            )
-            if not isinstance(hidden, dict):
-                continue
-
-            encoded_hidden = {
-                str(layer): self._serialize_debug_tensor(tensor)
-                for layer, tensor in hidden.items()
-                if isinstance(tensor, torch.Tensor)
-            }
-            if not encoded_hidden:
-                continue
-
-            request_snapshot: dict[str, Any] = {
-                "request_id": scheduler_request.request_id,
-                "hidden_states": encoded_hidden,
-            }
-            batch_requests = getattr(batch_data, "reqs", ())
-            if index < len(batch_requests):
-                extend_range = getattr(batch_requests[index], "extend_range", None)
-                request_rows = getattr(extend_range, "length", None)
-                if request_rows is not None:
-                    request_snapshot["logical_rows"] = int(request_rows)
-            if isinstance(next_token_ids, torch.Tensor) and index < len(next_token_ids):
-                request_snapshot["next_token_id"] = int(next_token_ids[index])
-            if isinstance(logits, torch.Tensor) and index < len(logits):
-                request_snapshot["next_token_logits"] = self._serialize_debug_tensor(
-                    logits[index]
-                )
-            requests.append(request_snapshot)
-
-        self._prefill_debug_snapshot = {
-            "requests": requests,
-            "logical_rows": logical_rows,
-        }
-
-    def prefill_debug_snapshot(self) -> dict[str, Any] | None:
-        return self._prefill_debug_snapshot
 
     def _should_emit_hidden_for_request(self, request: Any) -> bool:
         if self._should_emit_hidden is None:
@@ -310,10 +220,8 @@ class SGLangOutputProcessor:
         reqs = batch_data.reqs
         num_requests = len(reqs)
 
-        # Preserve the generic output contract: ordinary hidden tensors are
-        # request-major and do not require forward-mode metadata. Static aux
-        # capture is the one token-major representation and opts into the
-        # logical-token check below before these request-major fast paths.
+        # Note (wenyao): static aux capture is token-major, so resolve logical
+        # token rows before the ordinary request-major fast paths.
         if not prefer_token_axis:
             if len(requests) == 1:
                 return tensor[0] if tensor.ndim >= 2 else tensor
