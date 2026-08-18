@@ -318,9 +318,8 @@ class ModelWorker:
             self._prefill_cuda_graph_replay_buckets = Counter()
 
         if not can_run_graph:
-            # This observes the standard SGLang forward path. Model-specific
-            # custom eager forwards (for example visual/deepstack Qwen inputs)
-            # return before ModelWorker is called and are intentionally absent.
+            # Note (wenyao): custom eager forwards (visual/deepstack) return
+            # before ModelWorker is called; intentionally absent here.
             self._prefill_cuda_graph_standard_eager_count += 1
             return
 
@@ -375,9 +374,8 @@ class ModelWorker:
             "backend_runner": (
                 type(backend_runner).__name__ if backend_runner is not None else None
             ),
-            # Qualification can retain graph admission, padding, static
-            # buffers, and live metadata while executing the body eagerly.
-            # Expose the positive attestation so the H100 gate fails closed.
+            # Note (wenyao): expose the positive attestation so the H100
+            # gate fails closed.
             "qualification_eager_replay": bool(
                 getattr(backend_runner, "_omni_qualification_eager_replay", False)
             ),
