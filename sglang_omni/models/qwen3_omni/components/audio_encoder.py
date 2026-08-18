@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from types import MethodType
+
 import torch
 import torch.nn as nn
 from transformers.models.qwen3_omni_moe import modeling_qwen3_omni_moe as hf_modeling
@@ -34,6 +36,66 @@ def _build_audio_tower(
     )
 
 
+class _SegmentSplits:
+    """Per-request attention segment sizes, shared by every encoder layer."""
+
+    __slots__ = ("value",)
+
+    def __init__(self) -> None:
+        self.value: list[int] | None = None
+
+
+def _forward_with_shared_segments(self, hidden_states, cu_seqlens, **kwargs):
+    splits = self._omni_segment_splits.value
+    if splits is None or sum(splits) != hidden_states.shape[0]:
+        # Note (wenyao): a stale or mismatched split would silently corrupt
+        # attention rather than fail, so fall back instead of trusting it.
+        return self._omni_unshared_forward(hidden_states, cu_seqlens, **kwargs)
+
+    seq_length, _ = hidden_states.size()
+    query_states = self.q_proj(hidden_states).reshape(seq_length, self.num_heads, -1)
+    key_states = self.k_proj(hidden_states).reshape(seq_length, self.num_heads, -1)
+    value_states = self.v_proj(hidden_states).reshape(seq_length, self.num_heads, -1)
+    query_states = query_states.transpose(0, 1).unsqueeze(0)
+    key_states = key_states.transpose(0, 1).unsqueeze(0)
+    value_states = value_states.transpose(0, 1).unsqueeze(0)
+
+    attention_interface = hf_modeling.ALL_ATTENTION_FUNCTIONS.get_interface(
+        self.config._attn_implementation, hf_modeling.eager_attention_forward
+    )
+    qkv_splits = [
+        torch.split(tensor, splits, dim=2)
+        for tensor in (query_states, key_states, value_states)
+    ]
+    attn_outputs = [
+        attention_interface(
+            self,
+            q,
+            k,
+            v,
+            attention_mask=None,
+            scaling=self.scaling,
+            dropout=0.0 if not self.training else self.attention_dropout,
+            is_causal=False,
+            **kwargs,
+        )[0]
+        for q, k, v in zip(*qkv_splits)
+    ]
+    attn_output = torch.cat(attn_outputs, dim=1).reshape(seq_length, -1).contiguous()
+    return self.out_proj(attn_output)
+
+
+def _share_segment_splits(tower: nn.Module, splits: _SegmentSplits) -> None:
+    # Note (wenyao): the stock attention derives its split sizes with a
+    # device-to-host copy, so every one of the 32 layers stalls on the same
+    # value; that sync is also what makes the stack uncapturable.
+    for layer in tower.layers:
+        attention = layer.self_attn
+        attention._omni_segment_splits = splits
+        attention._omni_unshared_forward = attention.forward
+        attention.forward = MethodType(_forward_with_shared_segments, attention)
+
+
 class Qwen3OmniAudioEncoder(nn.Module):
     """Audio tower extracted from the HF thinker."""
 
@@ -55,6 +117,8 @@ class Qwen3OmniAudioEncoder(nn.Module):
             device=device,
         )
         self._downsample_lengths = hf_modeling._get_feat_extract_output_lengths
+        self._segment_splits = _SegmentSplits()
+        _share_segment_splits(self.audio_tower, self._segment_splits)
 
     def forward(
         self,
@@ -76,10 +140,32 @@ class Qwen3OmniAudioEncoder(nn.Module):
             )
 
         audio_feature_lengths = audio_feature_lengths.to(self._device, dtype=torch.long)
-        outputs = self.audio_tower(
-            input_features.to(device=self._device, dtype=self.audio_tower.dtype),
-            feature_lens=audio_feature_lengths,
+        input_features = input_features.to(
+            device=self._device, dtype=self.audio_tower.dtype
         )
+        tower = self.audio_tower
+        padded_feature, chunk_lengths = hf_modeling.chunk_and_pad_features(
+            input_features, audio_feature_lengths, tower.n_window
+        )
+        valid_indices = hf_modeling.get_valid_indices(chunk_lengths)
+        cu_seqlens = hf_modeling.get_audio_cu_seqlens(
+            chunk_lengths,
+            audio_feature_lengths,
+            tower.n_window_infer,
+            tower.n_window,
+        )
+        self._segment_splits.value = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        try:
+            outputs = tower(
+                input_features,
+                feature_lens=audio_feature_lengths,
+                padded_feature=padded_feature,
+                chunk_lengths=chunk_lengths,
+                valid_indices=valid_indices,
+                cu_seqlens=cu_seqlens,
+            )
+        finally:
+            self._segment_splits.value = None
         audio_embeds = outputs.last_hidden_state
         audio_output_lengths = self._downsample_lengths(audio_feature_lengths)
         return {
