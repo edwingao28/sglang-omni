@@ -837,6 +837,9 @@ def test_qwen_thinker_cuda_graph_capture_lifecycle(
     model_worker = SimpleNamespace(
         model_runner=FakeModelRunner(),
         model_config=model_config,
+        # Real ModelWorker always carries this; init_sglang_cuda_graphs reads
+        # it to decide whether to apply the prefill embeds view.
+        enable_prefill_input_embeds=False,
     )
 
     def fake_create_infrastructure(*args, **kwargs):
