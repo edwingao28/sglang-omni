@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+
 from typing import Any
 
 from sglang_omni.vendor.sglang.server_args import override_server_args
@@ -46,7 +48,15 @@ def create_thinker_scheduler(
     capture_hidden_layers = [0, 24] if speech_enabled else None
     capture_hidden = speech_enabled
     prefill_graph_backend = get_prefill_cuda_graph_backend(server_args)
-    if speech_enabled and prefill_graph_backend != CudaGraphBackend.DISABLED:
+    # The opt-out exists so qualification runs can measure the speech path
+    # before the guard is lifted for real; it is deliberately env-only and
+    # named UNSAFE because the failure it exposes is silent — wrong-content
+    # speech of exactly the right duration, which every contract gate passes.
+    if (
+        speech_enabled
+        and prefill_graph_backend != CudaGraphBackend.DISABLED
+        and os.environ.get("SGLANG_OMNI_UNSAFE_ALLOW_SPEECH_PREFILL_GRAPH") != "1"
+    ):
         raise RuntimeError(
             "Qwen3-Omni speech output does not support a non-disabled "
             "prefill CUDA graph backend "

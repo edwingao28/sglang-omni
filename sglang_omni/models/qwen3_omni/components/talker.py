@@ -858,6 +858,11 @@ class Qwen3OmniTalker(nn.Module):
             isinstance(layer.self_attn.rotary_emb, MRotaryEmbedding)
             for layer in self.model.layers
         )
+        # The prefill CUDA graph runner picks capture-time positions by probing
+        # this; if it disagrees with forward() below, MRotaryEmbedding takes its
+        # out-of-place path and the rebuilt q/k do not survive a graph-segment
+        # boundary, leaving attention to run on zeros.
+        self.is_mrope_enabled = self._uses_mrope
         self.codec_head = ReplicatedLinear(
             config.text_config.hidden_size,
             config.text_config.vocab_size,
