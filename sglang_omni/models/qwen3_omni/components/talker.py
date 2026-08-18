@@ -1226,6 +1226,7 @@ class Qwen3OmniTalker(nn.Module):
         input_deepstack_embeds: Optional[torch.Tensor] = None,
         input_deepstack_mask: Optional[torch.Tensor] = None,
         input_embeds_are_projected: bool = False,
+        omni_prefill_rids: Optional[list[str] | tuple[str, ...]] = None,
     ):
         """Forward pass through the talker MoE backbone.
 
@@ -1241,10 +1242,13 @@ class Qwen3OmniTalker(nn.Module):
             input_deepstack_embeds: optional layer-N thinker hidden states
             input_deepstack_mask: positions that should use hidden_projection
             input_embeds_are_projected: whether `input_embeds` is already in talker space
+            omni_prefill_rids: request ids SGLModelRunner forwards alongside the
+                Omni prefill sidecar; the talker keys nothing off them
 
         Returns:
             LogitsProcessorOutput with codec logits
         """
+        del omni_prefill_rids
         if forward_batch.forward_mode.is_extend():
             self.invalidate_decode_buffers()
 
