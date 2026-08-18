@@ -10,6 +10,8 @@ from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable
 
+from sglang.srt.managers.scheduler import Scheduler as _Upstream
+
 from sglang_omni.models.qwen3_omni.config import MIN_PARTIAL_START_CHUNKS
 from sglang_omni.models.qwen3_omni.request_builders import (
     PROMPT_SEGMENT_FUTURE_ATTR,
@@ -73,6 +75,13 @@ class QwenTalkerScheduler(OmniScheduler):
     _two_phase_slice_rows: int = 0
     _two_phase_slice_every: int = 1
     _phase_one_slice_ct: int = -1
+    # Note (wenyao): the prefill/decode interleave is a wave2-only scheduler
+    # feature that this tree does not carry, so the seam phase 1 buys steps
+    # back from is permanently closed here. Declared rather than deleted
+    # because the slice logic above is written against it and porting the
+    # interleave must not require re-deriving that logic.
+    prefill_decode_interleave: bool = False
+    _interleave_defer_prefill: bool = False
 
     def __init__(
         self,
