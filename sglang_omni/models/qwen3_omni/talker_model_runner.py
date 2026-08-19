@@ -9,6 +9,11 @@ import torch
 from sglang.srt.managers.scheduler import GenerationBatchResult
 
 from sglang_omni.model_runner.base import ModelRunner
+from sglang_omni.model_runner.prefill_inputs import (
+    OmniPrefillInputs,
+    attach_omni_prefill_inputs,
+    get_omni_prefill_inputs,
+)
 from sglang_omni.model_runner.sglang_execution import attn_forward_context
 from sglang_omni.scheduling.messages import OutgoingMessage
 
@@ -32,12 +37,39 @@ class QwenTalkerModelRunner(ModelRunner):
     def execute(self, scheduler_output: Any):
         return super().execute(scheduler_output)
 
+    def before_prefill(
+        self,
+        forward_batch: Any,
+        schedule_batch: Any,
+        requests: list,
+    ) -> None:
+        del schedule_batch
+        if forward_batch.input_embeds is not None:
+            # Note (wenyao): prefill-graph admission refuses any batch carrying
+            # this SGLang-owned field, so it gains nothing from the sidecar.
+            return
+        composed = self._compose_prefill_embeds(forward_batch, requests)
+        if composed is None:
+            return
+        input_embeds, input_embeds_are_projected = composed
+        attach_omni_prefill_inputs(
+            forward_batch,
+            OmniPrefillInputs(
+                input_embeds=input_embeds,
+                input_embeds_are_projected=input_embeds_are_projected,
+            ),
+        )
+
     def custom_prefill_forward(
         self,
         forward_batch: Any,
         schedule_batch: Any,
         requests: list,
     ) -> GenerationBatchResult | None:
+        if get_omni_prefill_inputs(forward_batch) is not None:
+            # Note (wenyao): returning None is what keeps this prefill on
+            # SGLang's dispatch, and so within reach of the prefill CUDA graph.
+            return None
         return self._run_projected_prefill_forward(
             forward_batch, schedule_batch, requests
         )
@@ -169,6 +201,27 @@ class QwenTalkerModelRunner(ModelRunner):
         requests: list,
     ) -> GenerationBatchResult | None:
         del schedule_batch
+        composed = self._compose_prefill_embeds(forward_batch, requests)
+        if composed is None:
+            return None
+        input_embeds, input_embeds_are_projected = composed
+        return self._forward_with_input_embeds(
+            forward_batch,
+            input_embeds=input_embeds,
+            input_embeds_are_projected=input_embeds_are_projected,
+        )
+
+    def _compose_prefill_embeds(
+        self,
+        forward_batch: Any,
+        requests: list,
+    ) -> tuple[torch.Tensor, bool] | None:
+        """Assemble the batch's prefill embeddings, or None when it has none.
+
+        Shared by the sidecar and the custom forward so the two can never
+        compose different rows: a row misaligned against ``input_ids`` yields
+        audio of exactly the right duration saying the wrong thing.
+        """
         has_projected = forward_batch.input_embeds is not None or any(
             bool(req.data.input_embeds_are_projected) for req in requests
         )
@@ -214,12 +267,11 @@ class QwenTalkerModelRunner(ModelRunner):
                 f"got {input_embeds.shape[0]} rows for {expected_rows} input ids"
             )
 
-        result = self._forward_with_input_embeds(
-            forward_batch,
-            input_embeds=input_embeds,
-            input_embeds_are_projected=input_embeds_are_projected,
+        input_embeds = input_embeds.to(
+            device=forward_batch.input_ids.device,
+            dtype=self.model.activation_dtype,
         )
-        return result
+        return input_embeds, input_embeds_are_projected
 
     @staticmethod
     def _projected_prefill_slice(

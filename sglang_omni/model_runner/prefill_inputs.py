@@ -28,9 +28,14 @@ class OmniPrefillInputs:
     input_embeds covers exactly the extend-window tokens of the batch, in
     model dtype. Request identity remains owned by ``ForwardBatch.rids`` and
     is forwarded separately by ``SGLModelRunner``.
+
+    input_embeds_are_projected stays ``None`` for models whose forward does
+    not declare the parameter; only a runner composing embeddings already in
+    model space sets it, and only then is it forwarded.
     """
 
     input_embeds: torch.Tensor
+    input_embeds_are_projected: bool | None = None
 
 
 def attach_omni_prefill_inputs(
