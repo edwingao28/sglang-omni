@@ -98,6 +98,18 @@ def _batch(
     return forward_batch, schedule_batch
 
 
+def test_custom_prefill_hook_records_eager_fallback() -> None:
+    runner = object.__new__(Qwen3OmniThinkerModelRunner)
+    calls: list[str] = []
+    runner.tp_worker = SimpleNamespace(
+        record_custom_prefill_eager=lambda: calls.append("recorded")
+    )
+
+    runner.on_custom_prefill_forward(object(), object(), object(), [])
+
+    assert calls == ["recorded"]
+
+
 def test_text_only_prefill_attaches_live_embeddings_without_official_batch_mutation():
     runner = _runner()
     request = _request([7, 8, 9], None)

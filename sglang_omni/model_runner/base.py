@@ -441,13 +441,12 @@ class ModelRunner:
                     forward_batch, schedule_batch, requests
                 )
                 if batch_result is not None:
-                    record_custom_eager = getattr(
-                        self.tp_worker,
-                        "record_custom_prefill_eager",
-                        None,
+                    self.on_custom_prefill_forward(
+                        batch_result,
+                        forward_batch,
+                        schedule_batch,
+                        requests,
                     )
-                    if callable(record_custom_eager):
-                        record_custom_eager()
             else:
                 self.before_decode(
                     forward_batch,
@@ -645,6 +644,15 @@ class ModelRunner:
         batch, or None to use the standard tp_worker forward path.
         """
         return None
+
+    def on_custom_prefill_forward(
+        self,
+        result: Any,
+        forward_batch: Any,
+        schedule_batch: Any,
+        requests: list,
+    ) -> None:
+        """Observe a model-specific prefill result before post-processing."""
 
     def custom_decode_forward(
         self, forward_batch: Any, schedule_batch: Any, requests: list

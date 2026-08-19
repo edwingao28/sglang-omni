@@ -313,5 +313,15 @@ class Qwen3OmniThinkerModelRunner(ThinkerModelRunner):
 
         return super().custom_prefill_forward(forward_batch, schedule_batch, requests)
 
+    def on_custom_prefill_forward(
+        self,
+        result: Any,
+        forward_batch: Any,
+        schedule_batch: Any,
+        requests: list[Any],
+    ) -> None:
+        del result, forward_batch, schedule_batch, requests
+        self.tp_worker.record_custom_prefill_eager()
+
 
 __all__ = ["Qwen3OmniThinkerModelRunner"]

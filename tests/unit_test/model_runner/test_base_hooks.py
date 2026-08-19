@@ -94,6 +94,12 @@ def _runner(calls: list[str], *, custom_result):
             calls.append("custom_prefill")
             return custom_result
 
+        def on_custom_prefill_forward(
+            self, result, forward_batch, schedule_batch, requests
+        ):
+            del result, forward_batch, schedule_batch, requests
+            calls.append("custom_prefill_hook")
+
         def before_decode(
             self,
             forward_batch,
@@ -140,7 +146,6 @@ def _runner(calls: list[str], *, custom_result):
     runner.tp_worker = SimpleNamespace(
         model_runner=object(),
         forward_batch_generation=standard_forward,
-        record_custom_prefill_eager=lambda: calls.append("record_custom_eager"),
     )
     return runner
 
@@ -169,7 +174,7 @@ def test_resolve_deferred_prefill_inputs_materializes_staged_ids():
             [
                 "before_prefill",
                 "custom_prefill",
-                "record_custom_eager",
+                "custom_prefill_hook",
                 "post_prefill",
             ],
         ),
