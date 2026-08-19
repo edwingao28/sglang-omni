@@ -205,8 +205,7 @@ def test_qwen3_omni_h100_bf16_config_enables_speech_prefill_graph() -> None:
     assert isinstance(config, Qwen3OmniSpeechColocatedPipelineConfig)
     assert "disable_radix_cache" not in overrides
     assert overrides["cuda_graph_backend_prefill"] == "breakable"
-    assert overrides["cuda_graph_bs_prefill"][0] == 4
-    assert overrides["cuda_graph_bs_prefill"][-1] == 2048
+    assert "cuda_graph_bs_prefill" not in overrides
     assert overrides["cuda_graph_max_bs_prefill"] == 2048
 
 

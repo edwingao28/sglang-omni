@@ -8,49 +8,6 @@ runtime_overrides:
   thinker:
     server_args_overrides:
       cuda_graph_backend_prefill: breakable
-      cuda_graph_bs_prefill:
-        - 4
-        - 8
-        - 12
-        - 16
-        - 20
-        - 24
-        - 28
-        - 32
-        - 48
-        - 64
-        - 80
-        - 96
-        - 112
-        - 128
-        - 144
-        - 160
-        - 176
-        - 192
-        - 208
-        - 224
-        - 240
-        - 256
-        - 288
-        - 320
-        - 352
-        - 384
-        - 416
-        - 448
-        - 480
-        - 512
-        - 576
-        - 640
-        - 704
-        - 768
-        - 832
-        - 896
-        - 960
-        - 1024
-        - 1280
-        - 1536
-        - 1792
-        - 2048
       cuda_graph_max_bs_prefill: 2048
 
 stage_overrides:

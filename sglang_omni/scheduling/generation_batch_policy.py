@@ -155,6 +155,13 @@ def build_generation_batch_overrides(
     # operator-stated list is never trimmed; contradictions fail validation.
     prefill_bs = overrides.get("cuda_graph_bs_prefill")
     prefill_max_bs = overrides.get("cuda_graph_max_bs_prefill")
+    if (
+        prefill_bs is None
+        and prefill_max_bs is not None
+        and overrides.get("cuda_graph_backend_prefill") == CudaGraphBackend.BREAKABLE
+    ):
+        prefill_bs = build_default_prefill_cuda_graph_bs(prefill_max_bs)
+        overrides["cuda_graph_bs_prefill"] = prefill_bs
     if prefill_bs and prefill_max_bs is None:
         overrides["cuda_graph_max_bs_prefill"] = max(int(b) for b in prefill_bs)
     elif (
