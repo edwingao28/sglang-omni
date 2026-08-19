@@ -7,7 +7,6 @@ model_path: Qwen/Qwen3-Omni-30B-A3B-Instruct
 runtime_overrides:
   thinker:
     server_args_overrides:
-      disable_radix_cache: true
       cuda_graph_backend_prefill: breakable
       cuda_graph_bs_prefill:
         - 4
