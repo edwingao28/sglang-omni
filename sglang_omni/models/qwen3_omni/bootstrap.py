@@ -94,6 +94,9 @@ def create_thinker_scheduler(
     ) = infrastructure
 
     if defer_cuda_graph_capture:
+        # Deferring capture must not also skip the omni wrapper: without it the
+        # prefill embeds view is never applied, so the graph's input_embeds slot
+        # exists only when the model config happens to be multimodal.
         init_sglang_cuda_graphs(model_worker)
 
     if prefill_graph_backend == CudaGraphBackend.BREAKABLE:
@@ -174,7 +177,10 @@ def create_talker_scheduler(
         QwenTalkerScheduler,
         configure_talker_server_args,
     )
-    from sglang_omni.scheduling.bootstrap import create_sglang_infrastructure
+    from sglang_omni.scheduling.bootstrap import (
+        create_sglang_infrastructure,
+        init_sglang_cuda_graphs,
+    )
     from sglang_omni.scheduling.sglang_backend import SGLangOutputProcessor
 
     want_cuda_graph = configure_talker_server_args(
@@ -215,7 +221,10 @@ def create_talker_scheduler(
             "sglang_omni.qwen3_omni.talker_restore_cuda_graph_capture",
             disable_cuda_graph=False,
         )
-        model_worker.model_runner.init_cuda_graphs()
+        # Equivalent to init_cuda_graphs() while the talker requests no prefill
+        # embeds slot, but keeps both stages on one path so enabling talker
+        # prefill graphs later cannot silently miss the embeds view.
+        init_sglang_cuda_graphs(model_worker)
 
     output_proc = SGLangOutputProcessor(
         capture_hidden=False,
