@@ -4,7 +4,7 @@ import logging
 import os
 import socket
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +31,14 @@ class ModelWorkerConfig:
     nccl_port: int | None = None
     total_gpu_memory_fraction: float | None = None
     enable_prefill_input_embeds: bool = False
+
+
+@dataclass(slots=True)
+class _PrefillCudaGraphUsage:
+    replay_count: int = 0
+    standard_eager_count: int = 0
+    custom_eager_count: int = 0
+    replay_buckets: Counter[int] = field(default_factory=Counter)
 
 
 _ARCH_CONFIG_MAP: dict[str, tuple[str, str | None]] = {
@@ -69,10 +77,7 @@ class ModelWorker:
         self._configure_backend_policy()
         self._init_model_runner()
         self._init_dllm_algorithm()
-        self._prefill_cuda_graph_replay_count = 0
-        self._prefill_cuda_graph_standard_eager_count = 0
-        self._prefill_cuda_graph_custom_eager_count = 0
-        self._prefill_cuda_graph_replay_buckets: Counter[int] = Counter()
+        self._prefill_cuda_graph_usage = _PrefillCudaGraphUsage()
 
         self.device = self.model_runner.device
         from sglang.srt.utils import broadcast_pyobj, set_random_seed
@@ -311,16 +316,10 @@ class ModelWorker:
         ):
             return
 
-        if not hasattr(self, "_prefill_cuda_graph_replay_count"):
-            self._prefill_cuda_graph_replay_count = 0
-            self._prefill_cuda_graph_standard_eager_count = 0
-            self._prefill_cuda_graph_custom_eager_count = 0
-            self._prefill_cuda_graph_replay_buckets = Counter()
-
         if not can_run_graph:
             # Note (wenyao): custom eager forwards (visual/deepstack) return
             # before ModelWorker is called; intentionally absent here.
-            self._prefill_cuda_graph_standard_eager_count += 1
+            self._prefill_cuda_graph_usage.standard_eager_count += 1
             return
 
         runner = getattr(self.model_runner, "prefill_cuda_graph_runner", None)
@@ -332,14 +331,12 @@ class ModelWorker:
                 type(runner).__name__,
             )
             return
-        self._prefill_cuda_graph_replay_count += 1
-        self._prefill_cuda_graph_replay_buckets[int(actual_bucket)] += 1
+        self._prefill_cuda_graph_usage.replay_count += 1
+        self._prefill_cuda_graph_usage.replay_buckets[int(actual_bucket)] += 1
 
     def record_custom_prefill_eager(self) -> None:
         """Record a custom prefill forward that bypasses SGLang graph dispatch."""
-        if not hasattr(self, "_prefill_cuda_graph_custom_eager_count"):
-            self._prefill_cuda_graph_custom_eager_count = 0
-        self._prefill_cuda_graph_custom_eager_count += 1
+        self._prefill_cuda_graph_usage.custom_eager_count += 1
 
     def _prefill_cuda_graph_info(self) -> dict[str, Any]:
         runner = getattr(self.model_runner, "prefill_cuda_graph_runner", None)
@@ -358,11 +355,7 @@ class ModelWorker:
             None,
         )
         backend = getattr(prefill_config, "backend", None)
-        replay_buckets = getattr(
-            self,
-            "_prefill_cuda_graph_replay_buckets",
-            Counter(),
-        )
+        usage = self._prefill_cuda_graph_usage
         return {
             "backend": backend,
             "runner": type(runner).__name__ if runner is not None else None,
@@ -371,16 +364,12 @@ class ModelWorker:
             ),
             "capture_num_tokens": capture_num_tokens,
             "input_embeds_slot": input_embeds_slot,
-            "replay_count": int(getattr(self, "_prefill_cuda_graph_replay_count", 0)),
-            "standard_eager_count": int(
-                getattr(self, "_prefill_cuda_graph_standard_eager_count", 0)
-            ),
-            "custom_eager_count": int(
-                getattr(self, "_prefill_cuda_graph_custom_eager_count", 0)
-            ),
+            "replay_count": int(usage.replay_count),
+            "standard_eager_count": int(usage.standard_eager_count),
+            "custom_eager_count": int(usage.custom_eager_count),
             "replay_buckets": {
                 str(bucket): int(count)
-                for bucket, count in sorted(replay_buckets.items())
+                for bucket, count in sorted(usage.replay_buckets.items())
             },
         }
 
