@@ -1010,6 +1010,7 @@ def test_qwen_thinker_enables_and_attests_breakable_prefill_graphs(
         model_runner=SimpleNamespace(model=model),
         model_config=model_config,
     )
+
     def fake_create_infrastructure(*args, **kwargs):
         captured.update(kwargs)
         return (

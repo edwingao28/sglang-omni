@@ -195,10 +195,7 @@ def test_qwen3_omni_mmsu_example_config_uses_text_pipeline() -> None:
 
 def test_qwen3_omni_h100_bf16_config_enables_speech_prefill_graph() -> None:
     config_path = (
-        _REPO_ROOT
-        / "examples"
-        / "configs"
-        / "qwen3_omni_colocated_h100_bf16.yaml"
+        _REPO_ROOT / "examples" / "configs" / "qwen3_omni_colocated_h100_bf16.yaml"
     )
 
     config = ConfigManager.from_file(str(config_path)).config

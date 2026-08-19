@@ -100,6 +100,7 @@ def create_thinker_scheduler(
         cuda_graph_batch_validator.attest_prefill_cuda_graphs(
             model_worker.model_runner, server_args
         )
+
     def _should_generate_qwen_audio_output(request: Any) -> bool:
         return should_generate_audio_output(request.data.stage_payload)
 
