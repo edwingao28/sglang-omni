@@ -156,11 +156,10 @@ class SGLangOutputProcessor:
             aux_hidden_states,
         ):
             key = "embed" if layer_id == 0 else layer_id
-            per_request_hidden[key] = self._slice_per_request_tensor(
+            per_request_hidden[key] = self._slice_static_aux_hidden_tensor(
                 tensor,
                 request_index=request_index,
                 scheduler_output=scheduler_output,
-                prefer_token_axis=True,
             ).clone()
 
         extra: dict[str, Any] = {"hidden_states": per_request_hidden}
@@ -205,12 +204,45 @@ class SGLangOutputProcessor:
         return len(batch_data.reqs)
 
     @staticmethod
+    def _slice_static_aux_hidden_tensor(
+        tensor: torch.Tensor,
+        *,
+        request_index: int,
+        scheduler_output: SchedulerOutput,
+    ) -> torch.Tensor:
+        batch_data = scheduler_output.batch_data
+        reqs = batch_data.reqs
+        is_extend = bool(batch_data.forward_mode.is_extend())
+
+        if is_extend:
+            layout = "token-major prefill"
+            lengths = [req.extend_range.length for req in reqs]
+            expected_rows = sum(lengths)
+        else:
+            layout = "request-major decode"
+            lengths = None
+            expected_rows = len(reqs)
+
+        actual_rows = int(tensor.shape[0]) if tensor.ndim else None
+        if actual_rows != expected_rows:
+            actual = "a scalar" if actual_rows is None else f"{actual_rows} rows"
+            raise RuntimeError(
+                f"Static aux hidden tensor violates {layout} layout: "
+                f"expected {expected_rows} rows, got {actual}"
+            )
+
+        if lengths is None:
+            return tensor[request_index]
+        start = sum(lengths[:request_index])
+        end = start + lengths[request_index]
+        return tensor[start:end]
+
+    @staticmethod
     def _slice_per_request_tensor(
         tensor: torch.Tensor,
         *,
         request_index: int,
         scheduler_output: SchedulerOutput,
-        prefer_token_axis: bool = False,
     ) -> torch.Tensor:
         if tensor.ndim == 0:
             return tensor
@@ -220,13 +252,10 @@ class SGLangOutputProcessor:
         reqs = batch_data.reqs
         num_requests = len(reqs)
 
-        # Note (wenyao): static aux capture is token-major, so resolve logical
-        # token rows before the ordinary request-major fast paths.
-        if not prefer_token_axis:
-            if len(requests) == 1:
-                return tensor[0] if tensor.ndim >= 2 else tensor
-            if tensor.shape[0] == num_requests:
-                return tensor[request_index]
+        if len(requests) == 1:
+            return tensor[0] if tensor.ndim >= 2 else tensor
+        if tensor.shape[0] == num_requests:
+            return tensor[request_index]
 
         is_extend_fn = getattr(
             getattr(batch_data, "forward_mode", None),
@@ -234,22 +263,7 @@ class SGLangOutputProcessor:
             None,
         )
         is_extend = bool(callable(is_extend_fn) and is_extend_fn())
-        lengths = None
-        if prefer_token_axis and is_extend:
-            lengths = [req.extend_range.length for req in reqs]
-        if lengths is not None and tensor.shape[0] == sum(lengths):
-            start = sum(lengths[:request_index])
-            end = start + lengths[request_index]
-            return tensor[start:end]
-
-        if prefer_token_axis:
-            if len(requests) == 1:
-                return tensor[0] if tensor.ndim >= 2 else tensor
-            if tensor.shape[0] == num_requests:
-                return tensor[request_index]
-
-        if lengths is None and is_extend:
-            lengths = [req.extend_range.length for req in reqs]
+        lengths = [req.extend_range.length for req in reqs] if is_extend else None
         if lengths is not None and tensor.shape[0] == sum(lengths):
             start = sum(lengths[:request_index])
             end = start + lengths[request_index]
