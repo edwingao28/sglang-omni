@@ -251,6 +251,13 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         self, request_id: str, state: Code2WavStreamState, codes: torch.Tensor
     ) -> None:
         del request_id
+        if codes.ndim == 2:
+            # The talker strips the EOS row before a coalesced flush. Mark the
+            # rows checked so #1237's lazy serial-path scan does not add one
+            # D2H sync per frame after this sync-free ingest.
+            state.chunks.extend(codes.unbind(0))
+            state.checked = len(state.chunks)
+            return
         if self._eos_lazy_scan:
             # Note (edwardzh): one frame per message, so checking here
             # costs one sync per frame; should_decode batches them per window.
