@@ -206,6 +206,12 @@ def _talker_stage(
             max_seq_len=32768,
             enable_partial_start=enable_partial_start,
             partial_start_min_chunks=5,
+            # Keep coalescing divisor-aligned with code2wav's steady decode
+            # chunk so message reduction does not change decode readiness.
+            codec_coalesce_frames=10,
+            # Zero follows codec_coalesce_frames. Deployments can align this
+            # with a smaller code2wav initial chunk when configured.
+            codec_coalesce_first_frames=0,
         ),
         gpu=gpu,
         next="code2wav",
