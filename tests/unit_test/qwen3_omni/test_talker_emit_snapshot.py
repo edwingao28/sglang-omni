@@ -33,34 +33,34 @@ def _runner(model: SimpleNamespace) -> QwenTalkerModelRunner:
     return runner
 
 
-def _data() -> SimpleNamespace:
+def _data(i: int) -> SimpleNamespace:
     return SimpleNamespace(
         pending_feedback_count=0,
         stage_payload=None,
+        req=SimpleNamespace(rid=f"r{i}", req_pool_idx=POOL_IDS[i]),
     )
 
 
 def _requests(n: int) -> list:
-    return [SimpleNamespace(data=_data()) for _ in range(n)]
+    return [SimpleNamespace(data=_data(i)) for i in range(n)]
 
 
-def _sched_batch(n: int) -> SimpleNamespace:
-    return SimpleNamespace(
-        reqs=[SimpleNamespace(rid=f"r{i}", req_pool_idx=POOL_IDS[i]) for i in range(n)],
-        req_pool_indices=torch.tensor(POOL_IDS[:n], dtype=torch.long),
+def _pool_indices(requests: list) -> torch.Tensor:
+    return torch.tensor(
+        [
+            0 if r.data.req.req_pool_idx is None else int(r.data.req.req_pool_idx)
+            for r in requests
+        ],
+        dtype=torch.long,
     )
 
 
-def _emit_frame(
-    runner: QwenTalkerModelRunner, schedule_batch: SimpleNamespace, requests: list
-) -> None:
-    runner._emit_code_chunks_and_feedback(
-        schedule_batch=schedule_batch,
-        requests=requests,
-        pool_indices=QwenTalkerModelRunner._batch_pool_indices(
-            schedule_batch, len(requests)
-        ),
+def _emit_step(runner, requests: list) -> torch.Tensor:
+    codes_snap = runner._emit_code_chunks_and_feedback(
+        requests=requests, pool_indices=_pool_indices(requests)
     )
+    runner._put_code_chunks(requests, codes_snap)
+    return codes_snap
 
 
 def test_emitted_rows_survive_next_step_inplace_write() -> None:
@@ -72,7 +72,7 @@ def test_emitted_rows_survive_next_step_inplace_write() -> None:
     embeds_before = model._output_embeds.clone()
 
     requests = _requests(n)
-    _emit_frame(runner, _sched_batch(n), requests)
+    _emit_step(runner, requests)
 
     model._output_codes.copy_(model._output_codes + 999)
     model._output_embeds.copy_(model._output_embeds + 999.0)
@@ -88,7 +88,7 @@ def test_emit_writes_feedback_to_pool_indexed_slots() -> None:
     runner = _runner(model)
 
     requests = _requests(n)
-    _emit_frame(runner, _sched_batch(n), requests)
+    _emit_step(runner, requests)
 
     for i in range(n):
         assert torch.equal(model._feedback_slots[POOL_IDS[i]], model._output_embeds[i])
@@ -115,7 +115,7 @@ def test_emit_keeps_one_batched_clone_for_codes() -> None:
     requests = _requests(n)
     torch.Tensor.clone = _counting_clone
     try:
-        _emit_frame(runner, _sched_batch(n), requests)
+        _emit_step(runner, requests)
     finally:
         torch.Tensor.clone = orig_clone
 
@@ -131,11 +131,10 @@ def test_emit_counts_accumulate_across_steps() -> None:
     runner = _runner(model)
 
     requests = _requests(n)
-    schedule_batch = _sched_batch(n)
 
-    _emit_frame(runner, schedule_batch, requests)
+    _emit_step(runner, requests)
     model._output_embeds.copy_(model._output_embeds + 1.0)
-    _emit_frame(runner, schedule_batch, requests)
+    _emit_step(runner, requests)
 
     for i in range(n):
         assert requests[i].data.pending_feedback_count == 2

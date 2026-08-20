@@ -73,18 +73,35 @@ def _data(req: SimpleNamespace) -> SimpleNamespace:
     return data
 
 
+def _pool_indices(requests: list) -> torch.Tensor:
+    return torch.tensor(
+        [
+            0 if r.data.req.req_pool_idx is None else int(r.data.req.req_pool_idx)
+            for r in requests
+        ],
+        dtype=torch.long,
+    )
+
+
+def _emit_step(runner, requests: list) -> torch.Tensor:
+    codes_snap = runner._emit_code_chunks_and_feedback(
+        requests=requests, pool_indices=_pool_indices(requests)
+    )
+    runner._put_code_chunks(requests, codes_snap)
+    return codes_snap
+
+
 def _emit(
     runner: QwenTalkerModelRunner,
     req: SimpleNamespace,
     data: SimpleNamespace,
     value: float,
 ) -> None:
+    # The emit reads req_pool_idx off data.req, so the batch row and the request
+    # record must be the same object.
+    assert data.req is req
     runner.model._output_embeds[0] = torch.full((HIDDEN,), value)
-    runner._emit_code_chunks_and_feedback(
-        schedule_batch=SimpleNamespace(reqs=[req]),
-        requests=[SimpleNamespace(data=data)],
-        pool_indices=torch.tensor([req.req_pool_idx], dtype=torch.long),
-    )
+    _emit_step(runner, [SimpleNamespace(data=data)])
 
 
 def _retract_scheduler(
@@ -111,7 +128,10 @@ def _retract(scheduler: QwenTalkerScheduler, req: SimpleNamespace) -> None:
 
 def _consume_one_frame(runner: QwenTalkerModelRunner, data: SimpleNamespace) -> None:
     data.pending_text_queue.append(TEXT_ROW)
-    runner._write_feedback_buffers([SimpleNamespace(data=data)])
+    runner._write_feedback_buffers(
+        [SimpleNamespace(data=data)],
+        _pool_indices([SimpleNamespace(data=data)]),
+    )
 
 
 def _drive_to_second_retract(

@@ -49,35 +49,35 @@ def _runner(model: SimpleNamespace) -> QwenTalkerModelRunner:
     return runner
 
 
-def _sched_batch(pool_ids: list[int]) -> SimpleNamespace:
-    return SimpleNamespace(
-        reqs=[
-            SimpleNamespace(rid=f"r{i}", req_pool_idx=pool_idx)
-            for i, pool_idx in enumerate(pool_ids)
-        ],
-        req_pool_indices=torch.tensor(pool_ids, dtype=torch.long),
-    )
-
-
-def _emit_requests(n: int) -> list:
+def _emit_requests(pool_ids: list[int]) -> list:
     return [
         SimpleNamespace(
-            data=SimpleNamespace(pending_feedback_count=0, stage_payload=None)
+            data=SimpleNamespace(
+                pending_feedback_count=0,
+                stage_payload=None,
+                req=SimpleNamespace(rid=f"r{i}", req_pool_idx=pool_idx),
+            )
         )
-        for _ in range(n)
+        for i, pool_idx in enumerate(pool_ids)
     ]
 
 
-def _emit_frame(
-    runner: QwenTalkerModelRunner, schedule_batch: SimpleNamespace, requests: list
-) -> None:
-    runner._emit_code_chunks_and_feedback(
-        schedule_batch=schedule_batch,
-        requests=requests,
-        pool_indices=QwenTalkerModelRunner._batch_pool_indices(
-            schedule_batch, len(requests)
-        ),
+def _pool_indices(requests: list) -> torch.Tensor:
+    return torch.tensor(
+        [
+            0 if r.data.req.req_pool_idx is None else int(r.data.req.req_pool_idx)
+            for r in requests
+        ],
+        dtype=torch.long,
     )
+
+
+def _emit_step(runner, requests: list) -> torch.Tensor:
+    codes_snap = runner._emit_code_chunks_and_feedback(
+        requests=requests, pool_indices=_pool_indices(requests)
+    )
+    runner._put_code_chunks(requests, codes_snap)
+    return codes_snap
 
 
 def _consume_data(
@@ -101,9 +101,9 @@ def _consume_data(
 def test_emit_scatter_lands_at_top_pool_index() -> None:
     model = _model(bs=1)
     runner = _runner(model)
-    requests = _emit_requests(1)
+    requests = _emit_requests([TOP_POOL_IDX])
 
-    _emit_frame(runner, _sched_batch([TOP_POOL_IDX]), requests)
+    _emit_step(runner, requests)
 
     assert torch.equal(model._feedback_slots[TOP_POOL_IDX], model._output_embeds[0])
     assert requests[0].data.feedback_slot_idx == TOP_POOL_IDX
@@ -114,7 +114,7 @@ def test_emit_scatter_covers_every_allocatable_index() -> None:
     model = _model(bs=len(pool_ids))
     runner = _runner(model)
 
-    _emit_frame(runner, _sched_batch(pool_ids), _emit_requests(len(pool_ids)))
+    _emit_step(runner, _emit_requests(pool_ids))
 
     for i, pool_idx in enumerate(pool_ids):
         assert torch.equal(model._feedback_slots[pool_idx], model._output_embeds[i])
@@ -124,11 +124,10 @@ def test_emit_scatter_covers_every_allocatable_index() -> None:
 def test_emit_ignores_cuda_graph_padded_rows() -> None:
     # Note (wenyao): CUDA-graph padding uses row 0, not a request row.
     real_pool_ids = [1, TOP_POOL_IDX]
-    model = _model(bs=len(real_pool_ids))
+    model = _model(bs=len(real_pool_ids) + 2)
     runner = _runner(model)
 
-    schedule_batch = _sched_batch(real_pool_ids + [0, 0])
-    _emit_frame(runner, schedule_batch, _emit_requests(len(real_pool_ids)))
+    _emit_step(runner, _emit_requests(real_pool_ids))
 
     for i, pool_idx in enumerate(real_pool_ids):
         assert torch.equal(model._feedback_slots[pool_idx], model._output_embeds[i])
@@ -144,7 +143,10 @@ def test_consume_gather_reads_top_pool_index() -> None:
     text = torch.full((HIDDEN,), 10.0)
     data = _consume_data(TOP_POOL_IDX, text)
 
-    runner._write_feedback_buffers([SimpleNamespace(data=data)])
+    runner._write_feedback_buffers(
+        [SimpleNamespace(data=data)],
+        _pool_indices([SimpleNamespace(data=data)]),
+    )
 
     assert torch.equal(model._feedback_buffer[0], feedback + text)
     assert model._feedback_mask.tolist() == [True]
@@ -176,7 +178,10 @@ def test_consume_gather_row_zero_fallback_is_discarded() -> None:
     text = torch.full((HIDDEN,), 10.0)
     data = _consume_data(None, text, override=override)
 
-    runner._write_feedback_buffers([SimpleNamespace(data=data)])
+    runner._write_feedback_buffers(
+        [SimpleNamespace(data=data)],
+        _pool_indices([SimpleNamespace(data=data)]),
+    )
 
     assert torch.equal(model._feedback_buffer[0], override + text)
 

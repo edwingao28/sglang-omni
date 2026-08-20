@@ -941,6 +941,11 @@ class Qwen3OmniTalker(nn.Module):
             dtype=torch.bool,
             device=device,
         )
+        # Note (wenyao): the value the decode fast path writes into the mask, held
+        # on the device. Assigning a Python True through advanced indexing makes
+        # torch build the scalar host-side and copy it in, which blocks the host
+        # once the async loop lets it run ahead of the stream.
+        self._mask_set_value = torch.ones((), dtype=torch.bool, device=device)
         self._repetition_penalties = torch.ones(
             max_batch_size,
             1,
@@ -1001,7 +1006,7 @@ class Qwen3OmniTalker(nn.Module):
             torch.get_device_module().Event() if device.type != "cpu" else None
         )
         self._decode_prep_rids: list | None = None
-        self._decode_prep_out_lens: list[int] = []
+        self._decode_prep_step_ids: list[int] = []
         self._decode_prep_rep_rows: torch.Tensor | None = None
         self._output_codes = torch.zeros(
             max_batch_size,
@@ -1051,20 +1056,30 @@ class Qwen3OmniTalker(nn.Module):
         prev_rids = self._decode_prep_rids
         if prev_rids is None or len(prev_rids) != len(requests):
             return False
-        prev_lens = self._decode_prep_out_lens
+        prev_steps = self._decode_prep_step_ids
         for row_idx, sched_req in enumerate(requests):
             req = sched_req.data.req
             if req.rid != prev_rids[row_idx]:
                 return False
-            out_len = len(req.output_ids) if req.output_ids else 0
-            if out_len != prev_lens[row_idx] + 1:
+            # Note (wenyao): keyed on the batch-side decode counter rather than
+            # len(req.output_ids), which the async-decode loop only appends to a
+            # step after the batch is built — an output-length key would drop the
+            # first lagged step onto the rebuild path, and that path reconstructs
+            # the repetition mask from the same one-token-stale history.
+            if int(req.decode_batch_idx) != prev_steps[row_idx] + 1:
                 return False
 
         rep_rows = self._decode_prep_rep_rows
         if rep_rows is not None:
-            self._repetition_mask[rep_rows, self._sampled_token_ids[rep_rows]] = True
-        for row_idx in range(len(prev_lens)):
-            prev_lens[row_idx] += 1
+            # Note (wenyao): index_put_ with a device-resident value, not
+            # ``mask[rows, toks] = True`` — the scalar form hands torch a Python
+            # bool it has to materialize on the host and copy in, and that copy is
+            # the one host-blocking op left on the launch path.
+            self._repetition_mask.index_put_(
+                (rep_rows, self._sampled_token_ids[rep_rows]), self._mask_set_value
+            )
+        for row_idx in range(len(prev_steps)):
+            prev_steps[row_idx] += 1
         return True
 
     def invalidate_decode_buffers(self) -> None:
@@ -1095,8 +1110,18 @@ class Qwen3OmniTalker(nn.Module):
         sampling_seeds: list[int] = []
         rep_rows: list[int] = []
         rep_toks: list[int] = []
+        lagged_rep_rows: list[int] = []
+        lagged_sample_rows: list[int] = []
         sup_rows: list[int] = []
         sup_toks: list[int] = []
+
+        prev_rids = self._decode_prep_rids
+        prev_steps = self._decode_prep_step_ids
+        prev_row_by_rid = (
+            {rid: row_idx for row_idx, rid in enumerate(prev_rids)}
+            if prev_rids is not None and len(prev_rids) == len(prev_steps)
+            else {}
+        )
 
         for row_idx, sched_req in enumerate(requests):
             data = sched_req.data
@@ -1119,15 +1144,26 @@ class Qwen3OmniTalker(nn.Module):
                 sp.sampling_seed = seed
             sampling_seeds.append(seed)
 
-            if penalty != 1.0 and req.output_ids:
-                unique = {
-                    t
-                    for t in (int(tok) for tok in req.output_ids)
-                    if 0 <= t < rep_vocab
-                }
-                if unique:
-                    rep_rows.extend([row_idx] * len(unique))
-                    rep_toks.extend(unique)
+            if penalty != 1.0:
+                if req.output_ids:
+                    unique = {
+                        t
+                        for t in (int(tok) for tok in req.output_ids)
+                        if 0 <= t < rep_vocab
+                    }
+                    if unique:
+                        rep_rows.extend([row_idx] * len(unique))
+                        rep_toks.extend(unique)
+                prev_row = prev_row_by_rid.get(req.rid)
+                if (
+                    prev_row is not None
+                    and int(req.decode_batch_idx) == prev_steps[prev_row] + 1
+                ):
+                    # The async loop builds this batch before resolving the prior
+                    # launch, so its token is device-resident but not in output_ids.
+                    # Remap by rid: batch rows can shrink or reorder after a finish.
+                    lagged_rep_rows.append(row_idx)
+                    lagged_sample_rows.append(prev_row)
 
             suppress_tokens = data.suppress_tokens or req._codec_suppress_tokens
             if suppress_tokens:
@@ -1180,6 +1216,20 @@ class Qwen3OmniTalker(nn.Module):
                 rep_pairs[: len(rep_rows)], rep_pairs[len(rep_rows) :]
             ] = True
 
+        if lagged_rep_rows:
+            lagged_pairs = torch.tensor(
+                lagged_rep_rows + lagged_sample_rows,
+                dtype=torch.long,
+                device=device,
+            )
+            lagged_rows = lagged_pairs[: len(lagged_rep_rows)]
+            sampled_tokens = self._sampled_token_ids[
+                lagged_pairs[len(lagged_rep_rows) :]
+            ]
+            self._repetition_mask.index_put_(
+                (lagged_rows, sampled_tokens), self._mask_set_value
+            )
+
         if sup_rows:
             sup_pairs = torch.tensor(
                 sup_rows + sup_toks, dtype=torch.long, device=device
@@ -1189,9 +1239,8 @@ class Qwen3OmniTalker(nn.Module):
             ] = True
 
         self._decode_prep_rids = [sched_req.data.req.rid for sched_req in requests]
-        self._decode_prep_out_lens = [
-            len(sched_req.data.req.output_ids) if sched_req.data.req.output_ids else 0
-            for sched_req in requests
+        self._decode_prep_step_ids = [
+            int(sched_req.data.req.decode_batch_idx) for sched_req in requests
         ]
         rep_active_rows = [
             row_idx for row_idx, penalty in enumerate(rep_penalties) if penalty != 1.0

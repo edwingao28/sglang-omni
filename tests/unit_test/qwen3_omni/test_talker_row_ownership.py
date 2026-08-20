@@ -98,6 +98,24 @@ def _sched_batch(reqs: list) -> SimpleNamespace:
     )
 
 
+def _pool_indices(requests: list) -> torch.Tensor:
+    return torch.tensor(
+        [
+            0 if r.data.req.req_pool_idx is None else int(r.data.req.req_pool_idx)
+            for r in requests
+        ],
+        dtype=torch.long,
+    )
+
+
+def _emit_step(runner, requests: list) -> torch.Tensor:
+    codes_snap = runner._emit_code_chunks_and_feedback(
+        requests=requests, pool_indices=_pool_indices(requests)
+    )
+    runner._put_code_chunks(requests, codes_snap)
+    return codes_snap
+
+
 def _pool_req(rid: str, pool_idx: int | None) -> SimpleNamespace:
     return SimpleNamespace(rid=rid, req_pool_idx=pool_idx)
 
@@ -118,26 +136,15 @@ def _retract_scheduler(
     return scheduler
 
 
-def _emit_frame(
-    runner: QwenTalkerModelRunner, schedule_batch: SimpleNamespace, requests: list
-) -> None:
-    runner._emit_code_chunks_and_feedback(
-        schedule_batch=schedule_batch,
-        requests=requests,
-        pool_indices=QwenTalkerModelRunner._batch_pool_indices(
-            schedule_batch, len(requests)
-        ),
-    )
-
-
 def _emit(
     runner: QwenTalkerModelRunner,
     req: SimpleNamespace,
     data: SimpleNamespace,
     embed: torch.Tensor,
 ) -> None:
+    assert data.req is req
     runner.model._output_embeds[0] = embed
-    _emit_frame(runner, _sched_batch([req]), [_req_wrap(data)])
+    _emit_step(runner, [_req_wrap(data)])
 
 
 def test_recycled_pool_slot_cannot_feed_stale_feedback() -> None:
@@ -157,7 +164,10 @@ def test_recycled_pool_slot_cannot_feed_stale_feedback() -> None:
     assert not QwenTalkerModelRunner._data_has_next_decode_input(new_data)
 
     _emit(runner, new_req, new_data, torch.full((hidden,), 7.0))
-    runner._write_feedback_buffers([_req_wrap(new_data)])
+    runner._write_feedback_buffers(
+        [_req_wrap(new_data)],
+        _pool_indices([_req_wrap(new_data)]),
+    )
 
     assert torch.equal(model._feedback_buffer[0], torch.full((hidden,), 27.0))
 
@@ -175,7 +185,10 @@ def test_retract_replay_reproduces_history_rows() -> None:
         )
         data.pending_feedback_count = 1
         data.pending_text_queue.append(torch.full((hidden,), float(10 * (step + 1))))
-        runner._write_feedback_buffers([_req_wrap(data)])
+        runner._write_feedback_buffers(
+            [_req_wrap(data)],
+            _pool_indices([_req_wrap(data)]),
+        )
     history = [row.clone() for row in data.decode_input_embeds]
     assert len(history) == 2
 
@@ -336,13 +349,13 @@ def test_row_ownership_survives_prep_then_emit() -> None:
     for i in range(n):
         assert requests[i].data.req is schedule_batch.reqs[i]
 
-    runner._write_feedback_buffers(requests)
+    runner._write_feedback_buffers(requests, _pool_indices(requests))
 
     assert torch.equal(model._feedback_mask, torch.ones(n, dtype=torch.bool))
     for i in range(n):
         assert torch.equal(model._feedback_buffer[i], feedbacks[i] + texts[i])
 
-    _emit_frame(runner, schedule_batch, requests)
+    _emit_step(runner, requests)
 
     sent = runner._outbox.sent
     assert [m.request_id for m in sent] == [f"r{i}" for i in range(n)]
@@ -371,7 +384,7 @@ def test_sparse_feedback_row_stays_unwritten() -> None:
     for i in range(n):
         model._feedback_slots[POOL_BY_RID[f"r{i}"]] = feedbacks[i]
 
-    runner._write_feedback_buffers(requests)
+    runner._write_feedback_buffers(requests, _pool_indices(requests))
 
     assert model._feedback_mask.tolist() == [True, False, True]
     assert torch.equal(model._feedback_buffer[1], torch.zeros(hidden))
@@ -401,7 +414,7 @@ def test_stale_mask_cannot_leak_into_reused_slot() -> None:
     model._feedback_slots[POOL_BY_RID["r0"]] = torch.full((hidden,), 1.0)
     model._feedback_slots[POOL_BY_RID["r1"]] = feedback1
 
-    runner._write_feedback_buffers(requests)
+    runner._write_feedback_buffers(requests, _pool_indices(requests))
 
     assert model._feedback_mask.tolist() == [False, True]
     assert torch.equal(model._feedback_buffer[0], torch.zeros(hidden))
@@ -456,7 +469,7 @@ def test_row_ownership_tracks_current_batch_order_across_steps() -> None:
             for rid in order
         ]
 
-        runner._write_feedback_buffers(requests)
+        runner._write_feedback_buffers(requests, _pool_indices(requests))
 
         assert model._feedback_mask.tolist() == [True] * len(order) + [False] * (
             n - len(order)
@@ -489,7 +502,7 @@ def test_row_ownership_tracks_current_batch_order_across_steps() -> None:
 
         result = SimpleNamespace()
         runner._stage_token_ids(result, tokens)
-        _emit_frame(runner, schedule_batch, requests)
+        _emit_step(runner, requests)
 
         emitted = runner._outbox.sent[-len(order) :]
         assert [message.request_id for message in emitted] == list(order)
@@ -520,6 +533,59 @@ def test_row_ownership_tracks_current_batch_order_across_steps() -> None:
         batch_result = OmniScheduler._make_batch_result(model_runner_output)
         assert batch_result.next_token_ids is model_runner_output.host_token_ids
         assert batch_result.next_token_ids.tolist() == tokens.tolist()
+
+
+def test_run_batch_resolve_hands_upstream_the_staged_host_copy() -> None:
+    # Async sibling of _make_batch_result. Upstream's process_batch_result calls
+    # .tolist() on whatever it is handed, and on the device tensor that copy is
+    # enqueued BEHIND the forward this iteration's launch already submitted — so
+    # the host waits a whole step for a value the launch staged before it.
+    device_ids = torch.tensor([11, 22], dtype=torch.long)
+    host_ids = torch.tensor([11, 22], dtype=torch.long)
+    pending = SimpleNamespace(batch_result=SimpleNamespace(next_token_ids=device_ids))
+    scheduler = object.__new__(OmniScheduler)
+    scheduler._model_runner = SimpleNamespace(
+        execute_resolve=lambda step: ModelRunnerOutput(
+            outputs={}, can_run_cuda_graph=False, host_token_ids=host_ids
+        )
+    )
+    scheduler._emit_stream_output = lambda *args, **kwargs: None
+
+    result = scheduler._run_batch_resolve(None, None, pending)
+
+    assert result.next_token_ids is host_ids
+    assert result.next_token_ids is not device_ids
+
+
+def test_run_batch_resolve_keeps_device_ids_when_nothing_was_staged() -> None:
+    device_ids = torch.tensor([5], dtype=torch.long)
+    scheduler = object.__new__(OmniScheduler)
+    scheduler._model_runner = SimpleNamespace(
+        execute_resolve=lambda step: SimpleNamespace(
+            next_token_ids=device_ids, can_run_cuda_graph=False, host_token_ids=None
+        )
+    )
+    scheduler._emit_stream_output = lambda *args, **kwargs: None
+
+    result = scheduler._run_batch_resolve(None, None, None)
+
+    assert result.next_token_ids is device_ids
+
+
+def test_run_batch_resolve_prefers_the_staged_host_copy() -> None:
+    device_ids = torch.tensor([5], dtype=torch.long)
+    host_ids = [5]
+    scheduler = object.__new__(OmniScheduler)
+    scheduler._model_runner = SimpleNamespace(
+        execute_resolve=lambda step: SimpleNamespace(
+            next_token_ids=device_ids, can_run_cuda_graph=False, host_token_ids=host_ids
+        )
+    )
+    scheduler._emit_stream_output = lambda *args, **kwargs: None
+
+    result = scheduler._run_batch_resolve(None, None, None)
+
+    assert result.next_token_ids is host_ids
 
 
 def test_make_batch_result_requires_declared_host_token_ids() -> None:

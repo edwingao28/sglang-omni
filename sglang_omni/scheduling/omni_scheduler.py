@@ -78,6 +78,7 @@ _ABORTED_REQUEST_ID_RETAINED = 5000
 _COMPLETED_REQUEST_ID_LIMIT = 10000
 _PENDING_STREAM_REQUEST_LIMIT = 10000
 _PENDING_STREAM_REQUEST_RETAINED = 5000
+_LOOKAHEAD_REPORT_INTERVAL = 500
 
 
 class _PendingStreamIngress:
@@ -1497,9 +1498,18 @@ class OmniScheduler:
         if mr_output is None:
             return _FAILED_BATCH_RESULT
         self._emit_stream_output(sched_output, mr_output, skip_rids=skip_rids)
+        next_token_ids = mr_output.next_token_ids
+        # Note (wenyao): same host-copy substitution the sync path makes in
+        # _make_batch_result, and the async path needs it more: a .tolist() on the
+        # device tensor enqueues its copy BEHIND the forward this iteration's
+        # launch already submitted, so the mixin would wait a whole step for a
+        # value the launch had staged before that forward.
+        host_token_ids = mr_output.host_token_ids
+        if host_token_ids is not None:
+            next_token_ids = host_token_ids
         return GenerationBatchResult(
             logits_output=None,
-            next_token_ids=mr_output.next_token_ids,
+            next_token_ids=next_token_ids,
             can_run_cuda_graph=mr_output.can_run_cuda_graph,
         )
 
@@ -1728,11 +1738,19 @@ class OmniScheduler:
         self._running = True
         model_path_status = "error"
         try:
+            who = type(self).__name__
             if self.enable_async_decode:
+                logger.info(
+                    "%s event loop: async_decode (async_decode_min_batch_size=%d)",
+                    who,
+                    self.async_decode_min_batch_size,
+                )
                 self._event_loop_async_decode()
             elif self.enable_overlap:
+                logger.info("%s event loop: overlap", who)
                 self._event_loop_overlap()
             else:
+                logger.info("%s event loop: normal", who)
                 self._event_loop_normal()
             model_path_status = "aborted"
         finally:
@@ -2539,6 +2557,9 @@ class OmniScheduler:
         D1 in design.md section 1.3). Prefill / empty batches flush any in-flight
         decode first and run synchronously (the in-flight step is never stranded).
         """
+        lookahead_steps = 0
+        sync_decode_steps = 0
+        next_report = _LOOKAHEAD_REPORT_INTERVAL
         while self._running:
             self._process_admin_requests()
             recv_reqs = self.recv_requests()
@@ -2574,6 +2595,7 @@ class OmniScheduler:
             )
 
             if use_lookahead:
+                lookahead_steps += 1
                 try:
                     sched_output, pending_step = self._run_batch_launch(batch)
                 except Exception as exc:
@@ -2606,6 +2628,8 @@ class OmniScheduler:
                     batch = self._drop_stale_overrun(batch)
                     self.cur_batch = batch
                 if batch:
+                    if self._batch_is_decode(batch):
+                        sync_decode_steps += 1
                     result = self.run_batch(batch)
                     if result is not _FAILED_BATCH_RESULT:
                         self.process_batch_result(batch, result)
@@ -2613,6 +2637,17 @@ class OmniScheduler:
                     self._sched_idled = True
                     self.self_check_during_idle()
                     self._sleep_during_idle()
+
+            decode_steps = lookahead_steps + sync_decode_steps
+            if decode_steps >= next_report:
+                logger.info(
+                    "%s async decode lookahead: %d/%d decode steps overlapped (%.1f%%)",
+                    type(self).__name__,
+                    lookahead_steps,
+                    decode_steps,
+                    100.0 * lookahead_steps / decode_steps,
+                )
+                next_report = decode_steps + _LOOKAHEAD_REPORT_INTERVAL
 
             self.last_batch = batch
             if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
