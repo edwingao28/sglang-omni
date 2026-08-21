@@ -8,6 +8,7 @@ This module mirrors HF's talker prefill layout, then keeps HF's
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ from sglang_omni.models.qwen3_omni.pending_text_queue import (
     coerce_pending_text_queue,
 )
 from sglang_omni.models.weight_loader import resolve_model_path
+from sglang_omni.profiler.event_recorder import emit as _emit_event
 
 _THINKER_EMBED_CANDIDATE_KEYS = (
     "thinker.model.embed_tokens.weight",
@@ -199,13 +201,16 @@ class TalkerPrefillBuilder:
         if not thinker_chunks:
             raise ValueError("prompt prefill requires thinker chunks")
 
+        started_ns = time.perf_counter_ns()
         state = Qwen3OmniPipelineState.from_dict(payload.data)
         prompt_ids, prompt_embed, prompt_hidden, prompt_model_inputs = (
             self._reconstruct_prompt_states(state)
         )
+        prompt_ns = time.perf_counter_ns()
 
         assistant_token_ids = self.extract_chunk_token_ids(thinker_chunks)
         assistant_embed = self._load_prompt_token_embeddings(assistant_token_ids)
+        assistant_embed_ns = time.perf_counter_ns()
         assistant_hidden = torch.stack(
             [
                 self.chunk_layer_hidden_or_embed(chunk).to(
@@ -215,15 +220,19 @@ class TalkerPrefillBuilder:
             ],
             dim=0,
         )
+        assistant_hidden_ns = time.perf_counter_ns()
 
         thinker_input_ids = torch.cat([prompt_ids, assistant_token_ids], dim=0)
         thinker_embed = torch.cat([prompt_embed, assistant_embed], dim=0)
         thinker_hidden = torch.cat([prompt_hidden, assistant_hidden], dim=0)
         multimodal_mask = self.build_multimodal_mask(thinker_input_ids)
+        assemble_ns = time.perf_counter_ns()
 
         tts_bos_embed, tts_eos_embed, tts_pad_embed = self.get_tts_special_embeds()
         speaker_id = resolve_speaker_id(payload.request.params, self._speaker_map)
+        specials_ns = time.perf_counter_ns()
 
+        prefill_timings: dict[str, int] = {}
         prefill = build_prefill_input(
             thinker_embed=thinker_embed,
             thinker_hidden=thinker_hidden,
@@ -248,6 +257,22 @@ class TalkerPrefillBuilder:
             tts_pad_token_id=self._tts_pad_token_id,
             include_assistant_eos=thinker_done,
             im_end_token_id=self._im_end_token_id,
+            timings=prefill_timings,
+        )
+        prefill_ns = time.perf_counter_ns()
+        _emit_event(
+            request_id=payload.request_id,
+            stage=None,
+            event_name="talker_request_build_breakdown",
+            metadata={
+                "prompt_ns": prompt_ns - started_ns,
+                "assistant_embed_ns": assistant_embed_ns - prompt_ns,
+                "assistant_hidden_ns": assistant_hidden_ns - assistant_embed_ns,
+                "assemble_ns": assemble_ns - assistant_hidden_ns,
+                "specials_ns": specials_ns - assemble_ns,
+                "prefill_ns": prefill_ns - specials_ns,
+                **prefill_timings,
+            },
         )
 
         return {

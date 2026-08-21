@@ -2,7 +2,14 @@
 """TalkerInputBuilder — construct HF-parity talker prefill inputs."""
 from __future__ import annotations
 
+import time
+
 import torch
+
+
+def _add_timing(timings: dict[str, int] | None, key: str, started_ns: int) -> None:
+    if timings is not None:
+        timings[key] = timings.get(key, 0) + time.perf_counter_ns() - started_ns
 
 
 def segment_chat_template(
@@ -49,19 +56,34 @@ def build_user_part(
     multimodal_mask: torch.Tensor,
     text_projection,
     hidden_projection,
+    timings: dict[str, int] | None = None,
 ) -> torch.Tensor:
     """Build user segment: text_projection for text, hidden_projection for multimodal."""
+    started_ns = time.perf_counter_ns() if timings is not None else 0
     out_size = text_projection(thinker_embed[:1]).shape[-1]
+    _add_timing(timings, "user_out_size_probe_ns", started_ns)
     result = torch.empty(
         (thinker_embed.shape[0], out_size),
         device=thinker_embed.device,
         dtype=thinker_embed.dtype,
     )
-    if multimodal_mask.any():
+
+    started_ns = time.perf_counter_ns() if timings is not None else 0
+    has_multimodal = bool(multimodal_mask.any())
+    _add_timing(timings, "user_multimodal_predicate_ns", started_ns)
+    if has_multimodal:
+        started_ns = time.perf_counter_ns() if timings is not None else 0
         result[multimodal_mask] = hidden_projection(thinker_hidden[multimodal_mask])
+        _add_timing(timings, "user_hidden_projection_ns", started_ns)
+
+    started_ns = time.perf_counter_ns() if timings is not None else 0
     text_mask = ~multimodal_mask
-    if text_mask.any():
+    has_text = bool(text_mask.any())
+    _add_timing(timings, "user_text_predicate_ns", started_ns)
+    if has_text:
+        started_ns = time.perf_counter_ns() if timings is not None else 0
         result[text_mask] = text_projection(thinker_embed[text_mask])
+        _add_timing(timings, "user_text_projection_ns", started_ns)
     return result
 
 
@@ -80,12 +102,15 @@ def build_assistant_part(
     codec_pad_id: int,
     codec_bos_id: int,
     tts_pad_token_id: int,
+    timings: dict[str, int] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Build assistant segment matching HF's _get_talker_assistant_parts."""
     device = assistant_embed.device
     dtype = assistant_embed.dtype
 
+    started_ns = time.perf_counter_ns() if timings is not None else 0
     projected = text_projection(assistant_embed)  # [N, hidden]
+    _add_timing(timings, "assistant_text_projection_ns", started_ns)
 
     # Text side: [first 3] + [4x pad] + [bos] + [4th token]
     # The initial talker request can be built before the thinker has emitted
@@ -119,7 +144,11 @@ def build_assistant_part(
         device=device,
         dtype=torch.long,
     )
+    started_ns = time.perf_counter_ns() if timings is not None else 0
     codec_embeds = codec_embed_fn(codec_special_ids)  # [6, hidden]
+    _add_timing(timings, "assistant_codec_embed_ns", started_ns)
+
+    started_ns = time.perf_counter_ns() if timings is not None else 0
     codec_hidden = torch.cat(
         [
             torch.zeros((3, text_hidden.shape[-1]), device=device, dtype=dtype),
@@ -143,6 +172,7 @@ def build_assistant_part(
         future_text_rows = torch.cat([projected[4:], tts_eos_embed], dim=0)
     else:
         future_text_rows = tts_eos_embed.clone()
+    _add_timing(timings, "assistant_assemble_ns", started_ns)
 
     return {
         "input_embeds": input_embeds,
@@ -176,6 +206,7 @@ def build_prefill_input(
     tts_pad_token_id: int,
     include_assistant_eos: bool = True,
     im_end_token_id: int | None = None,
+    timings: dict[str, int] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Build full talker prefill input from thinker outputs.
 
@@ -185,6 +216,7 @@ def build_prefill_input(
     before emitting one), so including the raw embedding introduces an
     off-by-one that shifts the future text-row queue.
     """
+    started_ns = time.perf_counter_ns() if timings is not None else 0
     segments = segment_chat_template(
         thinker_input_ids,
         im_start_token_id=im_start_token_id,
@@ -192,6 +224,7 @@ def build_prefill_input(
         user_token_id=user_token_id,
         assistant_token_id=assistant_token_id,
     )
+    _add_timing(timings, "segment_chat_template_ns", started_ns)
 
     all_embeds = []
     all_ids = []
@@ -220,6 +253,7 @@ def build_prefill_input(
                 multimodal_mask=seg_mm_mask,
                 text_projection=text_projection,
                 hidden_projection=hidden_projection,
+                timings=timings,
             )
             all_embeds.append(user_part)
             all_ids.append(thinker_input_ids[start:end].to(dtype=torch.long))
@@ -250,6 +284,7 @@ def build_prefill_input(
                 codec_pad_id=codec_pad_id,
                 codec_bos_id=codec_bos_id,
                 tts_pad_token_id=tts_pad_token_id,
+                timings=timings,
             )
             all_embeds.append(assistant_result["input_embeds"])
             all_ids.append(
@@ -266,8 +301,11 @@ def build_prefill_input(
             ):
                 future_text_rows = future_text_rows[:-1]
 
-    return {
+    started_ns = time.perf_counter_ns() if timings is not None else 0
+    result = {
         "input_embeds": torch.cat(all_embeds, dim=0),
         "input_ids": torch.cat(all_ids, dim=0),
         "future_text_rows": future_text_rows,
     }
+    _add_timing(timings, "prefill_final_concat_ns", started_ns)
+    return result
