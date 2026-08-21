@@ -356,6 +356,52 @@ def test_row_ownership_survives_prep_then_emit() -> None:
         )
 
 
+def test_emit_uses_explicit_row_copy_for_permuted_pool_slots() -> None:
+    """Keep the feedback scatter on the explicit row-copy kernel."""
+
+    class IndexCopyOnlySlots:
+        def __init__(self, tensor: torch.Tensor) -> None:
+            self.tensor = tensor
+            self.calls: list[tuple[int, torch.Tensor, torch.Tensor]] = []
+
+        def __getitem__(self, index: Any) -> torch.Tensor:
+            return self.tensor[index]
+
+        def __setitem__(self, index: Any, value: torch.Tensor) -> None:
+            raise AssertionError(
+                "advanced-index assignment must not handle the scatter"
+            )
+
+        def index_copy_(
+            self, dim: int, index: torch.Tensor, source: torch.Tensor
+        ) -> IndexCopyOnlySlots:
+            self.calls.append((dim, index.clone(), source.clone()))
+            self.tensor.index_copy_(dim, index, source)
+            return self
+
+    n, hidden, code_groups = 3, 3, 2
+    model = _fake_model(n, hidden, code_groups)
+    slots = IndexCopyOnlySlots(model._feedback_slots)
+    model._feedback_slots = slots
+    runner = _runner(model)
+    order = ["r1", "r0", "r2"]
+    reqs = [_make_req(rid) for rid in order]
+    requests = [_req_wrap(_data(None, None, req=req)) for req in reqs]
+    schedule_batch = _sched_batch(reqs)
+    expected_indices = schedule_batch.req_pool_indices.clone()
+    expected_source = model._output_embeds.clone()
+
+    _emit_frame(runner, schedule_batch, requests)
+
+    assert len(slots.calls) == 1
+    dim, indices, source = slots.calls[0]
+    assert dim == 0
+    assert torch.equal(indices, expected_indices)
+    assert torch.equal(source, expected_source)
+    for row, pool_idx in enumerate(expected_indices.tolist()):
+        assert torch.equal(slots.tensor[pool_idx], expected_source[row])
+
+
 def test_sparse_feedback_row_stays_unwritten() -> None:
     n, hidden, code_groups = 3, 3, 2
     model = _fake_model(n, hidden, code_groups)

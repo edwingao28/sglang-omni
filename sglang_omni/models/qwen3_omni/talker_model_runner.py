@@ -159,7 +159,9 @@ class QwenTalkerModelRunner(ModelRunner):
         # Note (wenyao): preserve codes before the next graph replay overwrites them.
         codes_snap = self.model._output_codes[:bs].detach().clone()
         # Note (wenyao): same-stream ordering avoids a synchronization here.
-        self.model._feedback_slots[pool_indices] = self.model._output_embeds[:bs]
+        self.model._feedback_slots.index_copy_(
+            0, pool_indices, self.model._output_embeds[:bs]
+        )
         for idx, sched_req in enumerate(requests):
             req = schedule_batch.reqs[idx]
             code_chunk = codes_snap[idx]
