@@ -166,6 +166,7 @@ def create_talker_scheduler(
     partial_start_min_chunks: int = 5,
     codec_coalesce_frames: int = 0,
     codec_coalesce_first_frames: int = 0,
+    codec_coalesce_early_frames: int = 0,
 ):
     """Create the Qwen talker scheduler."""
     del speech_enabled
@@ -299,6 +300,7 @@ def create_talker_scheduler(
         feedback_enabled=feedback_enabled,
         codec_coalesce_frames=codec_coalesce_frames,
         codec_coalesce_first_frames=codec_coalesce_first_frames,
+        codec_coalesce_early_frames=codec_coalesce_early_frames,
     )
     scheduler.bind_model_runner(model_runner)
     return scheduler
