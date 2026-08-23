@@ -27,6 +27,7 @@ class QwenTalkerModelRunner(ModelRunner):
         feedback_enabled: bool = True,
         codec_coalesce_frames: int = 0,
         codec_coalesce_first_frames: int = 0,
+        codec_coalesce_early_frames: int = 0,
     ) -> None:
         super().__init__(tp_worker, output_processor)
         self._outbox = outbox
@@ -34,6 +35,9 @@ class QwenTalkerModelRunner(ModelRunner):
         self._feedback_enabled = bool(feedback_enabled)
         self._codec_coalesce_frames = max(int(codec_coalesce_frames), 0)
         self._codec_coalesce_first_frames = max(int(codec_coalesce_first_frames), 0)
+        self._codec_coalesce_early_frames = max(
+            int(codec_coalesce_early_frames), 0
+        )
 
     def execute(self, scheduler_output: Any):
         return super().execute(scheduler_output)
@@ -142,13 +146,34 @@ class QwenTalkerModelRunner(ModelRunner):
             code_chunk = codes_snap[idx]
             feedback_row = embeds_snap[idx]
             if coalesce > 1:
-                pending = sched_req.data.pending_codec_rows
-                # Flush before appending. The newest row is the only one that
-                # can be EOS, so threshold flushes remain EOS-free without a
-                # sender-side sync. The finish hook drops a terminal EOS row.
-                if len(pending) >= self._coalesce_threshold(sched_req.data):
-                    self._flush_codec_rows(req.rid, sched_req.data)
-                pending.append(code_chunk)
+                data = sched_req.data
+                pending = data.pending_codec_rows
+                data.codec_frames_seen += 1
+                if data.codec_frames_seen <= self._codec_coalesce_early_frames:
+                    self._outbox.put(
+                        OutgoingMessage(
+                            request_id=req.rid,
+                            type="stream",
+                            data=code_chunk,
+                            target=self._code2wav_target,
+                            metadata={"stream": self._is_streaming(data)},
+                        )
+                    )
+                else:
+                    # Flush before appending. The newest row is the only one
+                    # that can be EOS, so threshold flushes remain EOS-free
+                    # without a sender-side sync. The finish hook drops a
+                    # terminal EOS row.
+                    if self._codec_coalesce_early_frames > 0:
+                        flush_ready = (
+                            (data.codec_frames_seen - 1) % coalesce == 0
+                            and bool(pending)
+                        )
+                    else:
+                        flush_ready = len(pending) >= self._coalesce_threshold(data)
+                    if flush_ready:
+                        self._flush_codec_rows(req.rid, data)
+                    pending.append(code_chunk)
             else:
                 self._outbox.put(
                     OutgoingMessage(
