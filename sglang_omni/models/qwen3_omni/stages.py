@@ -1137,6 +1137,7 @@ def create_talker_ar_executor_from_config(
     partial_start_min_chunks: int = 5,
     codec_coalesce_frames: int = 0,
     codec_coalesce_first_frames: int = 0,
+    codec_coalesce_early_frames: int = 0,
 ):
     """Returns OmniScheduler for talker."""
     from sglang_omni.models.qwen3_omni.bootstrap import create_talker_scheduler
@@ -1194,6 +1195,7 @@ def create_talker_ar_executor_from_config(
         partial_start_min_chunks=partial_start_min_chunks,
         codec_coalesce_frames=codec_coalesce_frames,
         codec_coalesce_first_frames=codec_coalesce_first_frames,
+        codec_coalesce_early_frames=codec_coalesce_early_frames,
     )
     post_load_process_mem = get_process_gpu_memory_bytes(gpu_id)
     logger.info(
