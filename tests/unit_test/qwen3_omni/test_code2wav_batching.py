@@ -692,6 +692,23 @@ def test_large_batch_classes_stay_on_the_early_windows() -> None:
     assert {key.batch_size for key in _batched_graph_keys(10, 25, 8, 2)} == {1, 2, 4, 8}
 
 
+def test_pinned_slot_pool_covers_a_coalesced_step() -> None:
+    model = FakeCode2WavModel(total_upsample=2)
+    scheduler = Code2WavScheduler(
+        model,
+        device="cpu",
+        stream_chunk_size=10,
+        left_context_size=25,
+        sample_rate=24000,
+        enable_batching=True,
+        batch_ceiling=16,
+    )
+    # Every participant of the widest step holds a slot at once, on top of the
+    # per-stream reserve; without the headroom the overflow falls back to a
+    # blocking pageable D2H.
+    assert scheduler._max_pinned_slots == scheduler._MAX_PINNED_SLOTS + 16
+
+
 def test_bucket_batch_ceiling_is_per_window() -> None:
     model = FakeCode2WavModel(total_upsample=2)
     scheduler = Code2WavScheduler(

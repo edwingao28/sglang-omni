@@ -503,7 +503,7 @@ def test_overlap_pool_exhaustion_falls_back_sync_per_window(monkeypatch) -> None
 
     scheduler = _make_scheduler(overlap=True)
     _force_pipeline(scheduler, monkeypatch)
-    scheduler._MAX_PINNED_SLOTS = 1
+    scheduler._max_pinned_slots = 1
     _seed(scheduler, "req-a")
     _seed(scheduler, "req-b")
 
