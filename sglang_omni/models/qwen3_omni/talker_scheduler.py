@@ -4,14 +4,21 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections import deque
 from typing import Any
 
-from sglang_omni.models.qwen3_omni.config import MIN_PARTIAL_START_CHUNKS
+from sglang_omni.models.qwen3_omni.config import (
+    ENABLE_TALKER_START_TOPOLOGY,
+    MIN_PARTIAL_START_CHUNKS,
+    TALKER_START_MIN_CHUNKS,
+)
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 from sglang_omni.vendor.sglang.server_args import override_server_args
 
 logger = logging.getLogger(__name__)
+
+_CHUNK_WAIT_LOG_INTERVAL_S = 10.0
 
 
 def configure_talker_server_args(
@@ -41,12 +48,19 @@ def configure_talker_server_args(
 class QwenTalkerScheduler(OmniScheduler):
     """Talker scheduler with Qwen-specific request and decode readiness."""
 
+    # Class-level defaults so partially constructed instances (and any caller
+    # that predates the topology path) resolve the same values as __init__.
+    _talker_start_topology: bool = ENABLE_TALKER_START_TOPOLOGY
+    _chunk_wait_steps: int = 0
+    _chunk_wait_last_log_s: float = 0.0
+
     def __init__(
         self,
         *args: Any,
         enable_partial_start: bool = False,
         partial_start_min_chunks: int = MIN_PARTIAL_START_CHUNKS,
         im_end_token_id: int | None = None,
+        enable_talker_start_topology: bool | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -58,6 +72,21 @@ class QwenTalkerScheduler(OmniScheduler):
         self._enable_partial_start = bool(enable_partial_start)
         self._partial_start_min_chunks = int(partial_start_min_chunks)
         self._im_end_token_id = im_end_token_id
+        self._talker_start_topology = (
+            ENABLE_TALKER_START_TOPOLOGY
+            if enable_talker_start_topology is None
+            else bool(enable_talker_start_topology)
+        )
+        self._chunk_wait_steps = 0
+        self._chunk_wait_last_log_s = 0.0
+        if self._talker_start_topology:
+            logger.info(
+                "talker-start topology on: building at %d thinker chunk(s); "
+                "later chunks gate decode per step "
+                "(partial_start_min_chunks=%d applies to the legacy path only)",
+                TALKER_START_MIN_CHUNKS,
+                self._partial_start_min_chunks,
+            )
 
     def _count_usable_prefetched_chunks(self, prefetched: list[Any]) -> int:
         im_end = self._im_end_token_id
@@ -77,13 +106,17 @@ class QwenTalkerScheduler(OmniScheduler):
     ) -> bool:
         if pending_stream_done:
             return True
+        prefetched = getattr(payload, "prefetched_chunks", None) or []
+        usable = self._count_usable_prefetched_chunks(prefetched)
+        if self._talker_start_topology:
+            # Build as soon as the first thinker text token exists: that token
+            # is the one the prompt embeds. Waiting for more only delays the
+            # talker prefill, because every later chunk is consumed one row per
+            # decode step and is gated there instead.
+            return usable >= TALKER_START_MIN_CHUNKS
         if not self._enable_partial_start:
             return False
-        prefetched = getattr(payload, "prefetched_chunks", None) or []
-        return (
-            self._count_usable_prefetched_chunks(prefetched)
-            >= self._partial_start_min_chunks
-        )
+        return usable >= self._partial_start_min_chunks
 
     def _initialize_request_stream_state(self, req_data: Any, payload: Any) -> None:
         del req_data, payload
@@ -93,7 +126,7 @@ class QwenTalkerScheduler(OmniScheduler):
         self, request_id: str, chunk: Any
     ) -> bool:
         del request_id, chunk
-        return self._enable_partial_start
+        return self._enable_partial_start or self._talker_start_topology
 
     def _is_batch_ready_to_run(self, batch: Any) -> bool:
         if (
@@ -103,11 +136,35 @@ class QwenTalkerScheduler(OmniScheduler):
             and hasattr(self._model_runner, "is_decode_batch_ready")
             and not self._model_runner.is_decode_batch_ready(batch)
         ):
-            logger.debug(
-                "Deferring decode batch until talker feedback/text input is ready"
-            )
+            # This is the port's K-gate: a talker row whose next thinker chunk
+            # has not arrived holds the step, the same role vLLM-Omni's
+            # WAITING_FOR_CHUNK state plays on its 1ms poll. The event loop
+            # sleeps and re-polls, so an arriving chunk releases the batch.
+            self._note_chunk_wait(batch)
             return False
         return True
+
+    def _note_chunk_wait(self, batch: Any) -> None:
+        """Count and periodically report decode steps held by the chunk gate.
+
+        Under the topology path a freshly prefilled row reaches decode with an
+        empty future-text queue by construction, so this counter is the signal
+        that separates "waiting one thinker step" from a wedged batch.
+        """
+        self._chunk_wait_steps += 1
+        logger.debug(
+            "Deferring decode batch until talker feedback/text input is ready"
+        )
+        now = time.monotonic()
+        if now - self._chunk_wait_last_log_s < _CHUNK_WAIT_LOG_INTERVAL_S:
+            return
+        self._chunk_wait_last_log_s = now
+        logger.info(
+            "talker chunk gate: %d decode steps deferred so far "
+            "(current batch rows=%d)",
+            self._chunk_wait_steps,
+            len(getattr(batch, "reqs", ()) or ()),
+        )
 
     def get_next_batch_to_run(self) -> Any | None:
         # Via OmniScheduler, which supplies running_batch/last_batch and unpacks

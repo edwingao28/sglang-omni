@@ -19,7 +19,27 @@ from sglang_omni.platforms import current_platform
 _PKG = "sglang_omni.models.qwen3_omni"
 _PLACEMENT_POLICY = f"{_PKG}.placement.Qwen3OmniPlacementPolicy"
 THINKER_STAGE = "thinker"
+# Floor for ``partial_start_min_chunks``. It counts THINKER CHUNKS, but the
+# layout limit it was derived from is a row count on the talker prompt's
+# assistant segment (see TALKER_START_MIN_CHUNKS), so it sits three chunks
+# high. Configs and the pre-boot key gate pin this value; the topology floor
+# below is the one the prompt layout actually requires.
 MIN_PARTIAL_START_CHUNKS = 3
+
+# Talker-start topology, ported from vLLM-Omni
+# (qwen3_omni.py::_get_talker_assistant_parts). The assistant tail of the
+# talker prompt is a fixed 9 rows:
+#   [3 chat-template rows] + [4 tts_pad] + [1 tts_bos] + [1 first text]
+# The first three rows are the generation prompt ``<|im_start|>assistant\n``,
+# which tokenizes to exactly three ids, so the layout assembles from ONE
+# thinker chunk: that chunk fills the trailing first-text row. Every later
+# chunk is a decode-step input, gated per step rather than at build time.
+TALKER_START_MIN_CHUNKS = 1
+
+# Branch default for the topology path. Structured as a module constant the
+# scheduler reads through a keyword argument so a config field can gate it
+# later; on this tree the default is the screening arm.
+ENABLE_TALKER_START_TOPOLOGY = True
 
 # SGLang reads this when DeepGEMM compile utilities are imported. Qwen AR
 # stages can first hit some dense FP8 shapes after readiness; disable all-M
