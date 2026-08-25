@@ -40,22 +40,49 @@ logger = logging.getLogger(__name__)
 _DECOMPOSE_SIZES = (8, 4, 2, 1)
 
 
+def _serial_window_frames(
+    stream_chunk_size: int,
+    left_context_size: int,
+    initial_chunk_frames: int = 0,
+) -> tuple[int, ...]:
+    """Window lengths the serial walk actually visits, in visit order.
+
+    Each decode advances by one chunk while its context grows to the
+    configured cap. A configured ``initial_chunk_frames`` makes the first
+    decode advance by less than a chunk, which offsets every window until the
+    context saturates, so the walk is replayed here rather than assumed: keys
+    derived from the wrong offset miss on exactly the windows that carry
+    time-to-first-audio, and a missed key runs eager.
+    """
+    initial = min(max(int(initial_chunk_frames), 0), stream_chunk_size)
+    steady = left_context_size + stream_chunk_size
+    frames: list[int] = []
+    seen: set[int] = set()
+    emitted = 0
+    # The context saturates after at most ``left_context_size`` frames and the
+    # step is at least one frame, so this bound is only a backstop.
+    for _ in range(left_context_size + 2):
+        step = initial if (emitted == 0 and initial) else stream_chunk_size
+        window = min(left_context_size, emitted) + step
+        if window not in seen:
+            seen.add(window)
+            frames.append(window)
+        emitted += step
+        if window == steady:
+            break
+    return tuple(frames)
+
+
 def _serial_threshold_graph_keys(
     stream_chunk_size: int,
     left_context_size: int,
+    initial_chunk_frames: int = 0,
 ) -> tuple[GraphKey, ...]:
-    # Each serial threshold decode advances by one chunk while its context grows
-    # to the configured cap.
-    frames = (
-        *range(
-            stream_chunk_size,
-            stream_chunk_size + left_context_size,
-            stream_chunk_size,
-        ),
-        stream_chunk_size + left_context_size,
-    )
     return tuple(
-        GraphKey(batch_size=1, frames=window_frames) for window_frames in frames
+        GraphKey(batch_size=1, frames=window_frames)
+        for window_frames in _serial_window_frames(
+            stream_chunk_size, left_context_size, initial_chunk_frames
+        )
     )
 
 
@@ -63,10 +90,13 @@ def _batched_graph_keys(
     stream_chunk_size: int,
     left_context_size: int,
     batch_ceiling: int,
+    initial_chunk_frames: int = 0,
 ) -> tuple[GraphKey, ...]:
     # Same window lengths as the serial keys: the batch-former only coalesces
     # same-bucket windows, so batching adds batch sizes, not new frame counts.
-    serial = _serial_threshold_graph_keys(stream_chunk_size, left_context_size)
+    serial = _serial_threshold_graph_keys(
+        stream_chunk_size, left_context_size, initial_chunk_frames
+    )
     return serial + tuple(
         GraphKey(batch_size=batch_size, frames=key.frames)
         for batch_size in sorted(size for size in _DECOMPOSE_SIZES if size > 1)
@@ -1044,11 +1074,13 @@ def create_code2wav_scheduler(
                 stream_chunk_size,
                 left_context_size,
                 min(max(int(batch_ceiling), 1), 8),
+                initial_codec_chunk_frames,
             )
         else:
             graph_keys = _serial_threshold_graph_keys(
                 stream_chunk_size,
                 left_context_size,
+                initial_codec_chunk_frames,
             )
         cuda_graph_runner = Code2WavCudaGraphRunner.build(
             model,
