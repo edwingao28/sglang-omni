@@ -679,6 +679,59 @@ def test_serial_graph_keys_follow_initial_chunk_offset() -> None:
     }
 
 
+def test_large_batch_classes_stay_on_the_early_windows() -> None:
+    by_frames: dict[int, set[int]] = {}
+    for key in _batched_graph_keys(10, 25, 16, 2):
+        by_frames.setdefault(key.frames, set()).add(key.batch_size)
+    assert by_frames[2] == {1, 2, 4, 8, 16}
+    assert by_frames[12] == {1, 2, 4, 8, 16}
+    # The steady window keeps the pool's peak where it already was.
+    assert by_frames[22] == {1, 2, 4, 8}
+    assert by_frames[35] == {1, 2, 4, 8}
+    # The configured ceiling still caps the whole matrix.
+    assert {key.batch_size for key in _batched_graph_keys(10, 25, 8, 2)} == {1, 2, 4, 8}
+
+
+def test_bucket_batch_ceiling_is_per_window() -> None:
+    model = FakeCode2WavModel(total_upsample=2)
+    scheduler = Code2WavScheduler(
+        model,
+        device="cpu",
+        stream_chunk_size=10,
+        left_context_size=25,
+        sample_rate=24000,
+        enable_batching=True,
+        enable_cuda_graph=True,
+        initial_codec_chunk_frames=2,
+        batch_ceiling=16,
+        _cuda_graph_runner=_FakeGraphRunner(model, _batched_graph_keys(10, 25, 16, 2)),
+    )
+    assert scheduler._bucket_batch_ceiling(2) == 16
+    assert scheduler._bucket_batch_ceiling(12) == 16
+    assert scheduler._bucket_batch_ceiling(35) == 8
+    # Only a published large graph lifts the cap: an unknown window, and a
+    # runner that published nothing, both stay where they were before.
+    assert scheduler._bucket_batch_ceiling(7) == 8
+
+
+def test_bucket_batch_ceiling_honours_a_lower_configured_ceiling() -> None:
+    model = FakeCode2WavModel(total_upsample=2)
+    scheduler = Code2WavScheduler(
+        model,
+        device="cpu",
+        stream_chunk_size=10,
+        left_context_size=25,
+        sample_rate=24000,
+        enable_batching=True,
+        enable_cuda_graph=True,
+        initial_codec_chunk_frames=2,
+        batch_ceiling=4,
+        _cuda_graph_runner=_FakeGraphRunner(model, _batched_graph_keys(10, 25, 4, 2)),
+    )
+    assert scheduler._bucket_batch_ceiling(2) == 4
+    assert scheduler._bucket_batch_ceiling(35) == 4
+
+
 def test_batched_graph_keys_cover_decompose_sizes() -> None:
     keys = _batched_graph_keys(2, 1, 8)
     assert set(keys) == {
