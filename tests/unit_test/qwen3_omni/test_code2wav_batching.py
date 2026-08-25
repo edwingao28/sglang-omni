@@ -18,6 +18,7 @@ from sglang_omni.models.qwen3_omni.components.code2wav_scheduler import (
     Code2WavStreamState,
     _batched_graph_keys,
     _serial_threshold_graph_keys,
+    _serial_window_frames,
 )
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.scheduling.messages import IncomingMessage
@@ -662,6 +663,20 @@ def test_chunk_aligned_buckets_merge_mixed_backlogs() -> None:
         (True, "cuda_graph"),
         (True, "cuda_graph"),
     ]
+
+
+def test_serial_graph_keys_follow_initial_chunk_offset() -> None:
+    assert _serial_window_frames(10, 25) == (10, 20, 30, 35)
+    # A short first chunk offsets every window until the context saturates, so
+    # the unoffset keys miss on all four windows that carry first audio.
+    assert _serial_window_frames(10, 25, 2) == (2, 12, 22, 32, 35)
+    assert {key.frames for key in _batched_graph_keys(10, 25, 8, 2)} == {
+        2,
+        12,
+        22,
+        32,
+        35,
+    }
 
 
 def test_batched_graph_keys_cover_decompose_sizes() -> None:
