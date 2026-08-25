@@ -37,7 +37,15 @@ logger = logging.getLogger(__name__)
 
 # Note (ruoyu): the decomposition, the captured batched keys and the batch
 # ceiling all derive from this tuple so a captured key can never go missing.
-_DECOMPOSE_SIZES = (8, 4, 2, 1)
+_DECOMPOSE_SIZES = (16, 8, 4, 2, 1)
+
+# One graph's pool footprint scales with batch_size * frames, and the pool
+# keeps only the peak, which the steady window's largest batch already pays.
+# Batch classes above _STEADY_BATCH_MAX therefore stay free as long as they
+# are confined to windows short enough to sit under that peak; allowing them
+# on the steady window instead would roughly double the pool.
+_STEADY_BATCH_MAX = 8
+_LARGE_BATCH_MAX_FRAMES = 20
 
 
 def _serial_window_frames(
@@ -102,6 +110,7 @@ def _batched_graph_keys(
         for batch_size in sorted(size for size in _DECOMPOSE_SIZES if size > 1)
         if batch_size <= batch_ceiling
         for key in serial
+        if batch_size <= _STEADY_BATCH_MAX or key.frames <= _LARGE_BATCH_MAX_FRAMES
     )
 
 
@@ -745,8 +754,24 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         context = min(self._left_context_size, state.emitted)
         return (context, context + self._step_frames(state))
 
+    def _bucket_batch_ceiling(self, frames: int) -> int:
+        """How many same-bucket streams one step may coalesce.
+
+        The early windows publish batch classes the steady window does not, so
+        the cap is per bucket rather than global. Reading the published sizes
+        keeps it honest when capture shrank the matrix under memory pressure,
+        and it never rises above the configured ceiling or falls below the cap
+        that held before the large classes existed.
+        """
+        largest_graph = 1
+        if self._cuda_graph_runner is not None:
+            sizes = self._cuda_graph_runner.available_batch_sizes(frames)
+            if sizes:
+                largest_graph = max(sizes)
+        return min(self._batch_ceiling, max(largest_graph, _STEADY_BATCH_MAX))
+
     @staticmethod
-    def _decompose_batch(n: int, sizes: tuple[int, ...] = (8, 4, 2, 1)) -> list[int]:
+    def _decompose_batch(n: int, sizes: tuple[int, ...] = _DECOMPOSE_SIZES) -> list[int]:
         plan: list[int] = []
         for size in sizes:
             while n >= size:
@@ -852,7 +877,7 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
             self._last_fire_reason = "first"
             self._last_oldest_wait_ms = 0.0
             self._last_due_bucket_count = len(due)
-            return same_bucket[: self._batch_ceiling]
+            return same_bucket[: self._bucket_batch_ceiling(key[1])]
         if not due:
             return []
         anchor_key = min(due, key=lambda k: min(s.due_since for _, s in due[k]))
@@ -874,7 +899,7 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         self._last_fire_reason = reason
         self._last_oldest_wait_ms = oldest_wait * 1000.0
         self._last_due_bucket_count = len(due)
-        return anchor[: self._batch_ceiling]
+        return anchor[: self._bucket_batch_ceiling(anchor_key[1])]
 
     def build_step_plan(
         self, participants: list[tuple[str, Code2WavStreamState]]
@@ -1073,7 +1098,7 @@ def create_code2wav_scheduler(
             graph_keys = _batched_graph_keys(
                 stream_chunk_size,
                 left_context_size,
-                min(max(int(batch_ceiling), 1), 8),
+                min(max(int(batch_ceiling), 1), _DECOMPOSE_SIZES[0]),
                 initial_codec_chunk_frames,
             )
         else:
