@@ -248,6 +248,26 @@ class StreamingVocoderBase(
         self._record_completed_stream_request_id(request_id)
         return messages
 
+    def on_stream_done_before_payload(self, request_id: str) -> list[OutgoingMessage]:
+        """Emit the decoded tail as soon as the producer signals EOS.
+
+        The producer sends ``stream_done`` before it routes the terminal
+        payload, so deferring the whole of ``on_stream_done`` parks the last
+        window -- everything below ``stream_chunk_size``, which no decode
+        threshold or batch deadline can release -- behind an unrelated
+        stage-to-stage handoff. Only the terminal result needs the payload;
+        the audio does not. Re-running the deferred ``on_stream_done`` is a
+        no-op here because ``decode_delta`` finds nothing left to emit.
+        """
+        state = self._stream_states.get(request_id)
+        if state is None:
+            return []
+        waveform = self.decode_delta(request_id, state, is_final=True)
+        if waveform is None:
+            return []
+        self._mark_stream_emitted(request_id)
+        return [self._stream_chunk_message(request_id, waveform)]
+
     def clear_stream_state(self, request_id: str) -> None:
         self._emitted_stream_ids.discard(request_id)
         state = self._stream_states.pop(request_id, None)
