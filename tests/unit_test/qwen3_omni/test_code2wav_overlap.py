@@ -739,3 +739,21 @@ def test_overlap_gpu_real_pinned_event_bitwise() -> None:
         "stream",
         "result",
     ]
+
+
+def test_stream_done_flushes_tail_before_the_payload_latch() -> None:
+    """talker_ar signals EOS before it routes the code2wav payload, and that
+    payload carries no codes -- it only latches the request. The last window is
+    below the decode threshold, so no threshold or batch deadline can release
+    it; parking it behind that handoff is what stalls the final audio chunk."""
+    scheduler = _make_scheduler(overlap=False, stream_chunk_size=10)
+    _feed(scheduler, "req-1", range(13))
+    assert [item[1] for item in _drain_snapshot(scheduler)] == ["stream"]
+
+    scheduler._on_done("req-1")
+    assert "req-1" in scheduler._pending_done
+    assert [item[1] for item in _drain_snapshot(scheduler)] == ["stream"]
+
+    scheduler._on_streaming_new_request("req-1", make_qwen_payload(request_id="req-1"))
+    assert [item[1] for item in _drain_snapshot(scheduler)] == ["result"]
+    assert scheduler._stream_states == {}

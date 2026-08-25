@@ -300,7 +300,10 @@ def test_registry_lifecycle_and_hook_call_order() -> None:
     scheduler._on_done("r")
     scheduler._on_streaming_new_request("r", _payload())
     messages = _drain(scheduler)
+    # note (wenyao): done flushes the tail before the payload latches the
+    # request; the deferred run re-checks and finds nothing left to emit.
     assert scheduler.calls == [
+        "decode:r:final",
         "latch:r:payload",
         "decode:r:final",
         "final:r",
@@ -334,17 +337,19 @@ def test_threshold_accumulate_then_flush_on_done() -> None:
     assert "fallback:r" not in scheduler.calls
 
 
-def test_stream_done_before_payload_is_buffered() -> None:
+def test_stream_done_before_payload_flushes_audio_and_defers_result() -> None:
     scheduler = _FakeStreamingVocoder(threshold=10)
     scheduler._on_chunk("r", _item([7]))
     scheduler._on_done("r")
     assert "r" in scheduler._pending_done
-    assert _drain(scheduler) == []
-    assert not any(call.startswith("decode:") for call in scheduler.calls)
+    # The tail is decoded audio the client is already owed; only the terminal
+    # result needs the payload, so only the result waits for it.
+    messages = _drain(scheduler)
+    assert [m.type for m in messages] == ["stream"]
+    np.testing.assert_array_equal(_waveform(messages[0].data), [7.0])
     scheduler._on_streaming_new_request("r", _payload())
     messages = _drain(scheduler)
-    assert [m.type for m in messages] == ["stream", "result"]
-    np.testing.assert_array_equal(_waveform(messages[0].data), [7.0])
+    assert [m.type for m in messages] == ["result"]
     assert scheduler._stream_states == {}
 
 

@@ -732,22 +732,42 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         self._drain_mode = True
         super().stop()
 
+    def _drain_pending_window(self, request_id: str) -> list[OutgoingMessage]:
+        # Note (edwardzh): emitted as its own message, not merged into the
+        # tail, so message boundaries match the synchronous path; must precede
+        # whatever the caller emits after it.
+        state = self._stream_states.get(request_id)
+        if state is None or state.pending is None:
+            return []
+        _, waveform = self._flush_pending(request_id, state)
+        if waveform is None:
+            return []
+        self._mark_stream_emitted(request_id)
+        return [self._stream_chunk_message(request_id, waveform)]
+
     def on_stream_done(self, request_id: str):
         state = self._stream_states.get(request_id)
         prev_drain = self._drain_mode
         if state is not None and state.due_since is not None:
             self._drain_mode = True
         try:
-            messages: list[OutgoingMessage] = []
-            if state is not None and state.pending is not None:
-                # Note (edwardzh): emitted as its own message, not
-                # merged into the tail, so message boundaries match the
-                # synchronous path; must precede the base's terminal result.
-                _, waveform = self._flush_pending(request_id, state)
-                if waveform is not None:
-                    self._mark_stream_emitted(request_id)
-                    messages.append(self._stream_chunk_message(request_id, waveform))
+            messages = self._drain_pending_window(request_id)
             messages.extend(super().on_stream_done(request_id))
+            return messages
+        finally:
+            self._drain_mode = prev_drain
+
+    def on_stream_done_before_payload(self, request_id: str) -> list[OutgoingMessage]:
+        # talker_ar signals EOS before it routes the code2wav latch, which
+        # carries no codes at all, so the audio must leave here and not wait
+        # for it; the terminal result still does.
+        state = self._stream_states.get(request_id)
+        prev_drain = self._drain_mode
+        if state is not None and state.due_since is not None:
+            self._drain_mode = True
+        try:
+            messages = self._drain_pending_window(request_id)
+            messages.extend(super().on_stream_done_before_payload(request_id))
             return messages
         finally:
             self._drain_mode = prev_drain
