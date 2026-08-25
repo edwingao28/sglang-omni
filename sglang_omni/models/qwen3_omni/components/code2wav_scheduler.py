@@ -244,9 +244,16 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         self._pinned_created = 0
         # Note (wenyao): a slot must have exactly one owner at any time.
         # Quarantined slots are never reused but still count against
-        # _MAX_PINNED_SLOTS, so an event failure cannot inflate the cap.
+        # the cap, so an event failure cannot inflate it.
         self._pinned_retired: list[_PinnedSlot] = []
         self._pinned_quarantined: list[_PinnedSlot] = []
+        # A coalesced step acquires one slot per participant before any of them
+        # is flushed, so the per-stream reserve alone leaves a wide batch
+        # borrowing from streams that still hold a pending window. Running out
+        # is not fatal but falls back to a blocking pageable D2H per window,
+        # which serializes the vocoder; the headroom is ~75 KiB of pinned host
+        # memory per slot, far cheaper than the stall it avoids.
+        self._max_pinned_slots = self._MAX_PINNED_SLOTS + self._batch_ceiling
 
     @property
     def _chunk_aligned_dispatch(self) -> bool:
@@ -545,7 +552,7 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         self._reap_retired_slots()
         if self._pinned_free:
             slot = self._pinned_free.pop()
-        elif self._pinned_created < self._MAX_PINNED_SLOTS:
+        elif self._pinned_created < self._max_pinned_slots:
             slot = _PinnedSlot(
                 buffer=self._alloc_pinned(max(samples, self._default_slot_samples)),
                 event=torch.cuda.Event(),
