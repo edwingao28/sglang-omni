@@ -17,7 +17,7 @@ MODEL_PATH=$(hf download Qwen/Qwen3-ASR-1.7B --revision "${MODEL_REVISION}")
 
 Qwen3-ASR runs a single ASR stage on one GPU. Its default `auto` dtype follows
 the checkpoint configuration (BF16 for Qwen3-ASR-1.7B); pass
-`--stages.asr.factory-args.dtype float16` to force FP16.
+`--asr.factory.dtype float16` to force FP16.
 Async decode is enabled by default for all decode batch sizes, allowing the
 shared one-step-lookahead path to overlap host-side result processing with the
 next GPU decode forward even for a single request. Use `--asr.factory.enable_async_decode false` to
