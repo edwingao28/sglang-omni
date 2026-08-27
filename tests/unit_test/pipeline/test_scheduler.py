@@ -52,6 +52,9 @@ def _init_sync_request_build_state(scheduler: OmniScheduler) -> None:
     scheduler._pending_request_admissions = {}
     scheduler._backlogged_request_build_payloads = deque()
     scheduler._request_build_max_pending_observed = 0
+    scheduler._staged_request_build_count = 0
+    scheduler.request_build_max_batch = 1
+    scheduler._batch_request_builder = None
     scheduler._async_pending = None
     scheduler.enable_priority_scheduling = False
     scheduler.abort_on_priority_when_disabled = False
@@ -541,6 +544,7 @@ def _staging_scheduler(
     )
     scheduler._deferred_request_payloads = {}
     scheduler._aborted_request_ids = set()
+    scheduler._staged_request_build_count = 0
     scheduler.max_queued_requests = max_queued_requests
     scheduler.waiting_queue = [SimpleNamespace(rid="req-occupant")] if waiting else []
     return scheduler

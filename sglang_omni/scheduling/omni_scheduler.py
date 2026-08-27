@@ -195,6 +195,8 @@ class OmniScheduler:
         prefill_coalesce_after_builds_during_decode: bool = False,
         request_build_max_workers: int = 1,
         request_build_max_pending: int | None = None,
+        request_build_max_batch: int | None = None,
+        batch_request_builder: Callable | None = None,
         shutdown_callback: Callable[[], None] | None = None,
     ):
         self.inbox: _queue_mod.Queue[IncomingMessage] = _queue_mod.Queue()
@@ -203,6 +205,7 @@ class OmniScheduler:
 
         # --- Request builder: StagePayload → SGLangARRequestData ----------
         self._request_builder = request_builder
+        self._batch_request_builder = batch_request_builder
         self._result_adapter = result_adapter
         self._model_runner = None
         self._stream_output_builder = stream_output_builder
@@ -253,6 +256,34 @@ class OmniScheduler:
             self.request_build_max_workers,
             self.request_build_max_pending,
             "pool" if self._request_build_executor is not None else "inline",
+        )
+        # Opportunistic build batching, inline path only. There is NO
+        # batch-wait timer: a pass batches exactly what it already has, so the
+        # first request of a batch is never charged for the arrival of a
+        # second. With a build pool the executor owns admission ordering, so
+        # batching stays off there rather than racing it.
+        resolved_max_batch = (
+            1 if request_build_max_batch is None else int(request_build_max_batch)
+        )
+        if resolved_max_batch > 1 and self._batch_request_builder is None:
+            logger.warning(
+                "OmniScheduler request_build_max_batch=%d ignored: this model "
+                "supplied no batch request builder",
+                resolved_max_batch,
+            )
+            resolved_max_batch = 1
+        if resolved_max_batch > 1 and self._request_build_executor is not None:
+            logger.warning(
+                "OmniScheduler request_build_max_batch=%d ignored: the build "
+                "pool owns admission ordering when workers > 1",
+                resolved_max_batch,
+            )
+            resolved_max_batch = 1
+        self.request_build_max_batch = max(1, resolved_max_batch)
+        logger.info(
+            "OmniScheduler request-build batching: max_batch=%d mode=%s",
+            self.request_build_max_batch,
+            "batched" if self.request_build_max_batch > 1 else "serial",
         )
         self._pending_request_builds: dict[str, tuple[Any, bool, Future]] = {}
         self._pending_request_admissions: dict[
@@ -507,6 +538,10 @@ class OmniScheduler:
         # Bounded id set so the ready event fires once per request even though a
         # deferred payload is re-examined on every scheduler pass.
         self._request_build_ready_seen: set[str] = set()
+        # Builds staged by the current pass but not yet admitted. They count as
+        # queued so a batched pass makes the same queue-full decisions the
+        # serial loop would have made as it admitted them one at a time.
+        self._staged_request_build_count = 0
         self._dirty_deferred_request_ids: set[str] = set()
         self._first_emit_done: set[str] = set()
         self._prefill_start_done: set[str] = set()
@@ -847,6 +882,7 @@ class OmniScheduler:
         """Convert incoming payloads to SGLang Reqs and enqueue."""
         self._drain_request_admission_results()
         self._drain_request_build_results()
+        staged: list[tuple[Any, bool, str | None]] = []
         recv_reqs, rejected = self._stage_request_build_payloads(recv_reqs)
         for payload in rejected:
             self._reject_queue_full(payload)
@@ -924,6 +960,12 @@ class OmniScheduler:
                         len(self._pending_request_builds),
                     )
                 continue
+            if self.request_build_max_batch > 1:
+                staged.append((payload, pending_stream_done, active_stage))
+                self._staged_request_build_count = len(staged)
+                if len(staged) >= self.request_build_max_batch:
+                    self._flush_staged_request_builds(staged)
+                continue
             try:
                 req_data = self._run_request_builder(payload, active_stage)
             except Exception as exc:
@@ -932,6 +974,7 @@ class OmniScheduler:
                 self.abort(req_id)
                 continue
             self._admit_or_defer_built_request(payload, pending_stream_done, req_data)
+        self._flush_staged_request_builds(staged)
         self._drain_request_build_results()
         self._drain_request_admission_results()
 
@@ -948,6 +991,94 @@ class OmniScheduler:
                 self._backlogged_request_build_payloads
             )
         return queued <= self.request_build_max_workers
+
+    def _flush_staged_request_builds(self, staged: list) -> None:
+        """Build every payload this pass already staged, then admit in order.
+
+        Admission order is the order the serial loop would have used; only the
+        moment moves, from between builds to after them.
+        """
+        if not staged:
+            return
+        batch = list(staged)
+        staged.clear()
+        try:
+            built = self._build_request_batch(batch)
+        finally:
+            self._staged_request_build_count = 0
+        for (payload, pending_stream_done, _stage), req_data in zip(batch, built):
+            if req_data is None:
+                continue
+            self._admit_or_defer_built_request(payload, pending_stream_done, req_data)
+
+    def _build_request_batch(self, batch: list) -> list:
+        """Pooled build, with the serial path as the failure-isolation net.
+
+        One raised exception inside a pooled call would lose every request in
+        the batch, where the serial path only ever loses the one that failed.
+        So a failed batch is rebuilt serially and the blame stays local.
+        """
+        for payload, _done, stage in batch:
+            _emit_event(
+                request_id=payload.request_id,
+                stage=stage,
+                event_name="scheduler_request_build_start",
+            )
+        started = time.perf_counter()
+        built: list | None = None
+        try:
+            candidate = list(
+                self._batch_request_builder([payload for payload, _d, _s in batch])
+            )
+            if len(candidate) != len(batch):
+                raise RuntimeError(
+                    "batch request builder returned "
+                    f"{len(candidate)} results for {len(batch)} payloads"
+                )
+            built = candidate
+        except Exception:
+            logger.exception(
+                "OmniScheduler: batched request builder failed for %d requests; "
+                "rebuilding them serially so the failure stays with the "
+                "request that caused it",
+                len(batch),
+            )
+        batched = built is not None
+        if built is None:
+            built = []
+            for payload, _done, _stage in batch:
+                try:
+                    built.append(self._request_builder(payload))
+                except Exception as exc:
+                    logger.exception(
+                        "OmniScheduler: request builder failed for "
+                        f"{payload.request_id}"
+                    )
+                    self._emit_request_error(payload.request_id, exc)
+                    self.abort(payload.request_id)
+                    built.append(None)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        for payload, _done, stage in batch:
+            _emit_event(
+                request_id=payload.request_id,
+                stage=stage,
+                event_name="scheduler_request_build_end",
+            )
+            # Realised batch size, per request, so the median over a run is a
+            # direct read rather than an inference. A cell whose median lands
+            # at 1 batched nothing and is invalid, not null.
+            _emit_event(
+                request_id=payload.request_id,
+                stage=stage,
+                event_name="scheduler_request_build_batch",
+                metadata={
+                    "batch_size": len(batch),
+                    "batched": batched,
+                    "batch_ms": elapsed_ms,
+                    "per_request_ms": elapsed_ms / len(batch),
+                },
+            )
+        return built
 
     def _run_request_builder(self, payload: Any, active_stage: str | None) -> Any:
         req_id = payload.request_id
@@ -978,6 +1109,7 @@ class OmniScheduler:
             + len(self._pending_request_admissions)
             + len(self._backlogged_request_build_payloads)
             + len(self._deferred_request_payloads)
+            + self._staged_request_build_count
         )
 
     def _waiting_queue_is_full(self) -> bool:
