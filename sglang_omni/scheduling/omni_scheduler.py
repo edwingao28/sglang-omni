@@ -495,6 +495,9 @@ class OmniScheduler:
         # drop oldest-first.
         self._pending_stream_ingress: dict[str, _PendingStreamIngress] = {}
         self._deferred_request_payloads: dict[str, Any] = {}
+        # Bounded id set so the ready event fires once per request even though a
+        # deferred payload is re-examined on every scheduler pass.
+        self._request_build_ready_seen: set[str] = set()
         self._dirty_deferred_request_ids: set[str] = set()
         self._first_emit_done: set[str] = set()
         self._prefill_start_done: set[str] = set()
@@ -873,6 +876,20 @@ class OmniScheduler:
                 self._deferred_request_payloads[req_id] = payload
                 continue
             active_stage = _get_active_stage()
+            if req_id not in self._request_build_ready_seen:
+                self._record_bounded_request_id(
+                    self._request_build_ready_seen, req_id
+                )
+                _emit_event(
+                    request_id=req_id,
+                    stage=active_stage,
+                    event_name="scheduler_request_build_ready",
+                    metadata={
+                        "pending_builds": len(self._pending_request_builds),
+                        "deferred": len(self._deferred_request_payloads),
+                        "backlog": len(self._backlogged_request_build_payloads),
+                    },
+                )
             request_build_executor = self._request_build_executor
             if request_build_executor is not None:
                 with self._request_admission_lock:

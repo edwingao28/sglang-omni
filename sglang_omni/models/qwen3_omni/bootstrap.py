@@ -143,6 +143,8 @@ def create_talker_scheduler(
     codec_coalesce_frames: int = 0,
     codec_coalesce_first_frames: int = 0,
     codec_coalesce_early_frames: int = 0,
+    request_build_max_workers: int = 1,
+    request_build_max_pending: int | None = None,
 ):
     """Create the Qwen talker scheduler."""
     del speech_enabled
@@ -245,6 +247,8 @@ def create_talker_scheduler(
     )
 
     scheduler = QwenTalkerScheduler(
+        request_build_max_workers=request_build_max_workers,
+        request_build_max_pending=request_build_max_pending,
         tp_worker=model_worker,
         tree_cache=tree_cache,
         req_to_token_pool=req_to_token_pool,
