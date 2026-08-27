@@ -142,6 +142,7 @@ def create_talker_scheduler(
     partial_start_min_chunks: int = 5,
     request_build_max_workers: int = 1,
     request_build_max_pending: int | None = None,
+    request_build_max_batch: int | None = None,
 ):
     """Create the Qwen talker scheduler."""
     del speech_enabled
@@ -213,6 +214,7 @@ def create_talker_scheduler(
     codec_vocab_size = talker_config.text_config.vocab_size
     (
         request_builder,
+        batch_request_builder,
         result_adapter,
         stream_chunk_handler,
         stream_done_handler,
@@ -246,6 +248,8 @@ def create_talker_scheduler(
     scheduler = QwenTalkerScheduler(
         request_build_max_workers=request_build_max_workers,
         request_build_max_pending=request_build_max_pending,
+        request_build_max_batch=request_build_max_batch,
+        batch_request_builder=batch_request_builder,
         tp_worker=model_worker,
         tree_cache=tree_cache,
         req_to_token_pool=req_to_token_pool,

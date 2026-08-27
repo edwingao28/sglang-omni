@@ -179,6 +179,11 @@ class ResizeMLP(nn.Module):
             quant_config=quant_config,
             prefix=add_prefix("linear_fc2", prefix),
         )
+        # Output width, published so callers do not have to discover it with a
+        # probe forward. build_user_part looks for exactly this attribute; a
+        # ResizeMLP without it silently falls back to a one-row forward on
+        # every user segment.
+        self.out_features = out_size
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out, _ = self.linear_fc1(x)

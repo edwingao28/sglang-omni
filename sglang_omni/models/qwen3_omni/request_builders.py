@@ -1123,6 +1123,22 @@ def make_talker_scheduler_adapters(
             resolve_sampling_config=_resolve_talker_sampling_config,
         )
 
+    def batch_request_builder(
+        payloads: list[StagePayload],
+    ) -> list[SGLangARRequestData]:
+        return _build_talker_request_data_batch(
+            payloads,
+            prefill_builder=prefill_builder,
+            tokenizer=tokenizer,
+            codec_vocab_size=codec_vocab_size,
+            codec_bos_id=codec_bos_id,
+            audio_token_id=audio_token_id,
+            image_token_id=image_token_id,
+            video_token_id=video_token_id,
+            thinker_config=thinker_config,
+            resolve_sampling_config=_resolve_talker_sampling_config,
+        )
+
     def result_adapter(data: SGLangARRequestData) -> StagePayload:
         payload = data.stage_payload
         return StagePayload(
@@ -1133,25 +1149,19 @@ def make_talker_scheduler_adapters(
 
     return (
         request_builder,
+        batch_request_builder,
         result_adapter,
         prefill_builder.append_text_chunk,
         prefill_builder.mark_thinker_done,
     )
 
 
-def _build_talker_request_data(
+def _prepare_talker_build(
     payload: StagePayload,
     *,
-    prefill_builder: TalkerPrefillBuilder,
-    tokenizer: Any,
-    codec_vocab_size: int,
-    codec_bos_id: int,
-    audio_token_id: int | None,
-    image_token_id: int | None,
-    video_token_id: int | None,
-    thinker_config: Any,
     resolve_sampling_config: Callable[[dict[str, Any]], dict[str, Any]],
-) -> SGLangARRequestData:
+) -> tuple[dict[str, Any], list[Any], bool]:
+    """Per-request work that must happen before any prefill, serial or pooled."""
     params = payload.request.params
     sampling_cfg = resolve_sampling_config(params)
     if sampling_cfg.get("seed") is None:
@@ -1167,12 +1177,114 @@ def _build_talker_request_data(
             "talker request_builder requires prefetched thinker chunks; "
             "check the partial-start readiness policy or upstream wiring"
         )
+    return sampling_cfg, thinker_chunks, thinker_done
 
+
+def _build_talker_request_data_batch(
+    payloads: list[StagePayload],
+    *,
+    prefill_builder: TalkerPrefillBuilder,
+    tokenizer: Any,
+    codec_vocab_size: int,
+    codec_bos_id: int,
+    audio_token_id: int | None,
+    image_token_id: int | None,
+    video_token_id: int | None,
+    thinker_config: Any,
+    resolve_sampling_config: Callable[[dict[str, Any]], dict[str, Any]],
+) -> list[SGLangARRequestData]:
+    """Pooled sibling of _build_talker_request_data.
+
+    Only the prefill is pooled; every request keeps its own sampling config,
+    seed and chunk list.
+    """
+    prepared = [
+        _prepare_talker_build(payload, resolve_sampling_config=resolve_sampling_config)
+        for payload in payloads
+    ]
+    prompt_prefills = prefill_builder.build_prompt_prefill_batch(
+        [
+            {
+                "payload": payload,
+                "thinker_chunks": thinker_chunks,
+                "thinker_done": thinker_done,
+            }
+            for payload, (_cfg, thinker_chunks, thinker_done) in zip(payloads, prepared)
+        ]
+    )
+    return [
+        _finish_talker_request_data(
+            payload,
+            prompt_prefill,
+            sampling_cfg=sampling_cfg,
+            thinker_chunks=thinker_chunks,
+            thinker_done=thinker_done,
+            tokenizer=tokenizer,
+            codec_vocab_size=codec_vocab_size,
+            codec_bos_id=codec_bos_id,
+            audio_token_id=audio_token_id,
+            image_token_id=image_token_id,
+            video_token_id=video_token_id,
+            thinker_config=thinker_config,
+        )
+        for payload, (sampling_cfg, thinker_chunks, thinker_done), prompt_prefill in zip(
+            payloads, prepared, prompt_prefills
+        )
+    ]
+
+
+def _build_talker_request_data(
+    payload: StagePayload,
+    *,
+    prefill_builder: TalkerPrefillBuilder,
+    tokenizer: Any,
+    codec_vocab_size: int,
+    codec_bos_id: int,
+    audio_token_id: int | None,
+    image_token_id: int | None,
+    video_token_id: int | None,
+    thinker_config: Any,
+    resolve_sampling_config: Callable[[dict[str, Any]], dict[str, Any]],
+) -> SGLangARRequestData:
+    sampling_cfg, thinker_chunks, thinker_done = _prepare_talker_build(
+        payload, resolve_sampling_config=resolve_sampling_config
+    )
     prompt_prefill = prefill_builder.build_prompt_prefill(
         payload,
         thinker_chunks,
         thinker_done=thinker_done,
     )
+    return _finish_talker_request_data(
+        payload,
+        prompt_prefill,
+        sampling_cfg=sampling_cfg,
+        thinker_chunks=thinker_chunks,
+        thinker_done=thinker_done,
+        tokenizer=tokenizer,
+        codec_vocab_size=codec_vocab_size,
+        codec_bos_id=codec_bos_id,
+        audio_token_id=audio_token_id,
+        image_token_id=image_token_id,
+        video_token_id=video_token_id,
+        thinker_config=thinker_config,
+    )
+
+
+def _finish_talker_request_data(
+    payload: StagePayload,
+    prompt_prefill: dict[str, Any],
+    *,
+    sampling_cfg: dict[str, Any],
+    thinker_chunks: list[Any],
+    thinker_done: bool,
+    tokenizer: Any,
+    codec_vocab_size: int,
+    codec_bos_id: int,
+    audio_token_id: int | None,
+    image_token_id: int | None,
+    video_token_id: int | None,
+    thinker_config: Any,
+) -> SGLangARRequestData:
     pending_text_queue = prompt_prefill["pending_text_queue"]
     pending_text_rows = len(pending_text_queue) if pending_text_queue is not None else 0
     logger.debug(
