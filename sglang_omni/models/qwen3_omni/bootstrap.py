@@ -146,6 +146,7 @@ def create_talker_scheduler(
     request_build_max_workers: int = 1,
     request_build_max_pending: int | None = None,
     request_build_max_batch: int | None = None,
+    pass_probe_interval_ms: float | None = None,
 ):
     """Create the Qwen talker scheduler."""
     del speech_enabled
@@ -253,6 +254,7 @@ def create_talker_scheduler(
         request_build_max_pending=request_build_max_pending,
         request_build_max_batch=request_build_max_batch,
         batch_request_builder=batch_request_builder,
+        pass_probe_interval_ms=pass_probe_interval_ms,
         tp_worker=model_worker,
         tree_cache=tree_cache,
         req_to_token_pool=req_to_token_pool,

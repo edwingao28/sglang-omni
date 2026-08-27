@@ -142,6 +142,7 @@ class FactoryArgs(BaseModel):
     request_build_max_workers: int | None = Field(default=None, ge=1)
     request_build_max_pending: int | None = Field(default=None, ge=1)
     request_build_max_batch: int | None = Field(default=None, ge=1)
+    pass_probe_interval_ms: float | None = Field(default=None, ge=0)
     encoder_mem_reserve: float | None = Field(default=None, ge=0, lt=1)
     enable_partial_start: bool | None = None
     partial_start_min_chunks: int | None = Field(default=None, ge=1)

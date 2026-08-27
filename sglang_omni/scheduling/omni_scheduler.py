@@ -84,6 +84,58 @@ class _PendingStreamIngress:
         self.done = False
 
 
+class _PassProbe:
+    """Bounded per-pass occupancy accounting for the scheduler event loop.
+
+    Times EVERY activity in the loop body, so a pass is accounted for with no
+    unnamed remainder -- the offline event tree could only name ~15% of the
+    inter-pass gap, which is why this exists.
+
+    Emits an AGGREGATE over a time window rather than one event per pass: the
+    loop can iterate thousands of times a second and a per-pass event would
+    flood the tree and change what it measures.
+
+    Records WALL TIME per activity, not just counts. A change that merely
+    SHIFTS work between passes moves the counts while leaving total activity
+    wall flat; counts alone cannot tell shifting from removing, and that
+    distinction is the whole point of the measurement.
+    """
+
+    __slots__ = ("interval_s", "_secs", "_counts", "_passes", "_window_start")
+
+    def __init__(self, interval_ms: float) -> None:
+        self.interval_s = max(0.0, float(interval_ms)) / 1000.0
+        self._reset(time.perf_counter())
+
+    def _reset(self, now: float) -> None:
+        self._secs: dict[str, float] = {}
+        self._counts: dict[str, int] = {}
+        self._passes = 0
+        self._window_start = now
+
+    def add(self, key: str, seconds: float) -> None:
+        self._secs[key] = self._secs.get(key, 0.0) + seconds
+
+    def bump(self, key: str, n: int = 1) -> None:
+        if n:
+            self._counts[key] = self._counts.get(key, 0) + n
+
+    def end_pass(self, now: float, pass_seconds: float) -> dict | None:
+        """Close one pass; return a payload when the window is due, else None."""
+        self._passes += 1
+        self.add("pass", pass_seconds)
+        if self.interval_s <= 0.0 or now - self._window_start < self.interval_s:
+            return None
+        window_ms = (now - self._window_start) * 1000.0
+        payload: dict = {"window_ms": window_ms, "passes": self._passes}
+        for key, secs in self._secs.items():
+            payload[f"{key}_ms"] = secs * 1000.0
+        for key, count in self._counts.items():
+            payload[f"n_{key}"] = count
+        self._reset(now)
+        return payload
+
+
 def _detach_request_data(req: Any) -> None:
     """Break Req -> data; async snapshots retain the one-way data -> Req edge."""
     req._omni_data = None
@@ -197,6 +249,7 @@ class OmniScheduler:
         request_build_max_pending: int | None = None,
         request_build_max_batch: int | None = None,
         batch_request_builder: Callable | None = None,
+        pass_probe_interval_ms: float | None = None,
         shutdown_callback: Callable[[], None] | None = None,
     ):
         self.inbox: _queue_mod.Queue[IncomingMessage] = _queue_mod.Queue()
@@ -284,6 +337,17 @@ class OmniScheduler:
             "OmniScheduler request-build batching: max_batch=%d mode=%s",
             self.request_build_max_batch,
             "batched" if self.request_build_max_batch > 1 else "serial",
+        )
+        # Per-pass occupancy probe. Default OFF: it exists to decompose the
+        # inter-pass gap for one instrumented boot, not to ride along in a
+        # scoring round.
+        probe_ms = float(pass_probe_interval_ms or 0.0)
+        self._pass_probe = _PassProbe(probe_ms) if probe_ms > 0.0 else None
+        logger.info(
+            "OmniScheduler pass probe: interval_ms=%.1f mode=%s loop=%s",
+            probe_ms,
+            "armed" if self._pass_probe is not None else "off",
+            "async_decode" if enable_async_decode else "normal",
         )
         self._pending_request_builds: dict[str, tuple[Any, bool, Future]] = {}
         self._pending_request_admissions: dict[
@@ -991,6 +1055,34 @@ class OmniScheduler:
                 self._backlogged_request_build_payloads
             )
         return queued <= self.request_build_max_workers
+
+    def _probe_mark(self, key: str, t0: float) -> float:
+        """Charge the time since *t0* to *key*; return the new mark."""
+        probe = self._pass_probe
+        if probe is None:
+            return t0
+        now = time.perf_counter()
+        probe.add(key, now - t0)
+        return now
+
+    def _probe_bump(self, key: str, n: int = 1) -> None:
+        probe = self._pass_probe
+        if probe is not None:
+            probe.bump(key, n)
+
+    def _probe_end_pass(self, pass_start: float) -> None:
+        probe = self._pass_probe
+        if probe is None:
+            return
+        now = time.perf_counter()
+        payload = probe.end_pass(now, now - pass_start)
+        if payload is not None:
+            _emit_event(
+                request_id="scheduler-pass",
+                stage=_get_active_stage(),
+                event_name="scheduler_pass_summary",
+                metadata=payload,
+            )
 
     def _flush_staged_request_builds(self, staged: list) -> None:
         """Build every payload this pass already staged, then admit in order.
@@ -2442,28 +2534,47 @@ class OmniScheduler:
         # (which is mostly Python-side dispatch into many small CUDA kernels)
         # slows ~600x, dropping audio QPS from >10 to <0.5.
         while self._running:
+            pass_start = time.perf_counter()
+            t0 = pass_start
             self._process_admin_requests()
+            t0 = self._probe_mark("admin", t0)
             recv_reqs = self.recv_requests()
-            recv_reqs.extend(self._take_deferred_request_payloads())
+            # recv_requests drains the inbox AND runs _on_stream_chunk inline,
+            # so this mark is the thinker-chunk INGEST cost.
+            t0 = self._probe_mark("ingest", t0)
+            self._probe_bump("recv", len(recv_reqs))
+            deferred_payloads = self._take_deferred_request_payloads()
+            recv_reqs.extend(deferred_payloads)
+            t0 = self._probe_mark("deferred", t0)
+            self._probe_bump("deferred_taken", len(deferred_payloads))
             self.process_input_requests(recv_reqs)
+            t0 = self._probe_mark("input", t0)
             if self._engine_paused:
                 self._process_admin_requests()
                 time.sleep(0.001)
+                self._probe_end_pass(pass_start)
                 continue
 
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
+            t0 = self._probe_mark("schedule", t0)
 
             if batch:
+                is_decode = self._batch_is_decode(batch)
                 result = self.run_batch(batch)
+                t0 = self._probe_mark("decode" if is_decode else "prefill", t0)
+                self._probe_bump("decode_steps" if is_decode else "prefill_steps")
                 if result is not _FAILED_BATCH_RESULT:
                     self.process_batch_result(batch, result)
+                t0 = self._probe_mark("result", t0)
             else:
                 self._sched_idled = True
                 self.self_check_during_idle()
                 self._sleep_during_idle()
+                t0 = self._probe_mark("idle", t0)
 
             self.last_batch = batch
+            self._probe_end_pass(pass_start)
             if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
                 self.self_check_during_busy()
 

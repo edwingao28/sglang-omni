@@ -1145,6 +1145,7 @@ def create_talker_ar_executor_from_config(
     request_build_max_workers: int = 1,
     request_build_max_pending: int | None = None,
     request_build_max_batch: int | None = None,
+    pass_probe_interval_ms: float | None = None,
 ):
     """Returns OmniScheduler for talker."""
     from sglang_omni.models.qwen3_omni.bootstrap import create_talker_scheduler
@@ -1206,6 +1207,7 @@ def create_talker_ar_executor_from_config(
         request_build_max_workers=request_build_max_workers,
         request_build_max_pending=request_build_max_pending,
         request_build_max_batch=request_build_max_batch,
+        pass_probe_interval_ms=pass_probe_interval_ms,
     )
     post_load_process_mem = get_process_gpu_memory_bytes(gpu_id)
     logger.info(
