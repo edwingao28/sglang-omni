@@ -18,6 +18,7 @@ The load-bearing properties, each with its own test:
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 
@@ -28,6 +29,7 @@ from sglang_omni.models.qwen3_omni.components.code2wav_scheduler import (
     Code2WavScheduler,
     _LoopProbe,
 )
+from sglang_omni.profiler.event_recorder import get_recorder
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.scheduling.messages import IncomingMessage
 from tests.unit_test.fixtures.qwen_fakes import FakeCode2WavModel
@@ -278,6 +280,41 @@ def test_zero_interval_never_emits() -> None:
     hand with 0."""
     probe = _LoopProbe(0.0)
     assert probe.end_turn(time.perf_counter() + 10.0, 0.001) is None
+
+
+def test_window_reaches_the_event_tree(tmp_path) -> None:
+    """The whole point of the round is a table read off these events, so the
+    emit path is tested end to end. A silent null here would be
+    indistinguishable from a loop with nothing to report -- which is the exact
+    failure the arming gate exists to rule out."""
+    recorder = get_recorder()
+    recorder.start("probe-test", str(tmp_path), "code2wav")
+    try:
+        scheduler = _scheduler(
+            max_batch_wait_ms=0, batch_floor=2, loop_probe_interval_ms=1
+        )
+        for code in (1, 2, 3, 4):
+            scheduler.inbox.put(_chunk("req-a", code))
+            scheduler._next_message()
+            time.sleep(0.002)
+        scheduler.inbox.put(_chunk("req-a", 5))
+        scheduler._next_message()
+    finally:
+        recorder.stop()
+
+    lines = []
+    for path in tmp_path.glob("*.jsonl"):
+        lines.extend(path.read_text().splitlines())
+    events = [
+        json.loads(line)
+        for line in lines
+        if "code2wav_loop_summary" in line
+    ]
+    assert events, "loop probe emitted nothing into the event tree"
+    meta = events[0]["metadata"]
+    assert meta["turns"] >= 1
+    assert meta["window_ms"] > 0.0
+    assert "n_drained" in meta and "max_depth_at_drain" in meta
 
 
 def test_emitted_window_names_every_recorded_key() -> None:

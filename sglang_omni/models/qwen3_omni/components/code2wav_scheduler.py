@@ -302,6 +302,14 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         self._pending_step_failures: list[str] = []
         probe_ms = float(loop_probe_interval_ms or 0.0)
         self._loop_probe = _LoopProbe(probe_ms) if probe_ms > 0.0 else None
+        # Report the RESOLVED state, not the requested one: a knob that never
+        # reaches this constructor produces an empty event stream, which reads
+        # exactly like a loop with nothing to report.
+        logger.info(
+            "Code2Wav loop probe: interval_ms=%.1f mode=%s",
+            probe_ms,
+            "armed" if self._loop_probe is not None else "off",
+        )
         self._turn_start: float | None = None
         self._last_drain_end: float | None = None
         self._can_batch_stream_chunks = self._enable_batching
