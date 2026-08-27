@@ -374,13 +374,33 @@ class StreamingVocoderBase(
             metadata={"modality": "audio"},
         )
 
+    # Chained steps one pump may run before it must return to the loop.
+    # 0 keeps the historical unbounded behaviour and is the default, so every
+    # other vocoder on this base is untouched.
+    _max_pump_steps = 0
+    # Whether the last pump stopped because it hit that bound, for the probe.
+    _pump_hit_bound = False
+
     def _pump_streams(self) -> list[str]:
         """Coalesced decode loop: the hooks pick the participants of one shared
         step and run it; a failed step errors and aborts every participant; the
-        loop re-pumps until no participants remain, so capped-step backlogs
-        drain within one pump. Returns the request ids ``on_step_failure``
-        aborted, whose external abort cleanup the caller must run off
-        ``_state_lock``."""
+        loop re-pumps until no participants remain -- or, when
+        ``_max_pump_steps`` is set, until it has run that many steps, at which
+        point it returns so the caller can drain intake before the rest.
+
+        The bound exists because "drains within one pump" is a guarantee about
+        CORRECTNESS that is also a latency defect: one call would otherwise
+        service the entire system-wide backlog, holding ``_state_lock`` and the
+        single loop thread for as long as that takes (measured at 68 chained
+        steps and 2.4 s at C=64). Returning early loses no work -- the streams
+        stay due and the very next pump resumes them -- and adds NO decode
+        steps, only loop iterations whose drain costs ~2 us.
+
+        Returns the request ids ``on_step_failure`` aborted, whose external
+        abort cleanup the caller must run off ``_state_lock``."""
+        limit = self._max_pump_steps
+        steps = 0
+        self._pump_hit_bound = False
         while True:
             participants = self.select_step_participants()
             if not participants:
@@ -395,6 +415,10 @@ class StreamingVocoderBase(
                 if waveform is not None and not self._is_aborted(request_id):
                     self._mark_stream_emitted(request_id)
                     self.outbox.put(self._stream_chunk_message(request_id, waveform))
+            steps += 1
+            if limit and steps >= limit:
+                self._pump_hit_bound = True
+                return []
 
     @abstractmethod
     def create_stream_state(self, request_id: str) -> StreamStateT:
