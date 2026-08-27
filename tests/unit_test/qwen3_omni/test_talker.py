@@ -1297,6 +1297,8 @@ def _build_state_machine_scheduler(
     partial_start_min_chunks: int = MIN_PARTIAL_START_CHUNKS,
     talker_start_topology: bool = False,
     request_builder_stub: Any,
+    batch_request_builder_stub: Any = None,
+    request_build_max_batch: int = 1,
 ) -> QwenTalkerScheduler:
     """Construct a scheduler with just enough state for process_input_requests."""
     scheduler = object.__new__(QwenTalkerScheduler)
@@ -1307,11 +1309,15 @@ def _build_state_machine_scheduler(
     scheduler._pending_stream_ingress = {}
     scheduler._completed_request_ids = {}
     scheduler._deferred_request_payloads = {}
+    scheduler._request_build_ready_seen = set()
+    scheduler._staged_request_build_count = 0
     scheduler._dirty_deferred_request_ids = set()
     scheduler._aborted_request_ids = set()
     scheduler._aborted_request_id_order = deque()
     scheduler.waiting_queue = []
     scheduler._request_builder = request_builder_stub
+    scheduler._batch_request_builder = batch_request_builder_stub
+    scheduler.request_build_max_batch = request_build_max_batch
     scheduler._request_admission_lock = threading.RLock()
     scheduler._request_build_executor = None
     scheduler.request_build_max_pending = 0
@@ -2506,3 +2512,102 @@ def test_talker_prefill_forward_invalidates_next_decode_reuse() -> None:
     )
 
     assert float(fake._sampling_temperatures[0, 0]) == pytest.approx(0.8)
+
+
+# --- opportunistic request-build batching ----------------------------------
+
+
+def _batching_payload(index: int) -> Any:
+    return SimpleNamespace(
+        request_id=f"rid-batch-{index}",
+        prefetched_chunks=[
+            SimpleNamespace(data=torch.tensor([float(i)])) for i in range(5)
+        ],
+        prefetched_stream_done=False,
+    )
+
+
+def _batching_stub_builder(payload: Any) -> Any:
+    origin_input_ids: list[int] = []
+    return SGLangARRequestData(
+        req=SimpleNamespace(
+            rid=payload.request_id,
+            _omni_data=None,
+            origin_input_ids=origin_input_ids,
+            origin_input_ids_unpadded=origin_input_ids,
+            sampling_params=SimpleNamespace(max_new_tokens=0),
+            priority=None,
+        ),
+        thinker_chunks_done=bool(payload.prefetched_stream_done),
+        pending_text_queue=deque(),
+    )
+
+
+def _batching_scheduler(max_batch: int, batch_calls: list, *, failing: bool = False):
+    def batch_stub(payloads):
+        batch_calls.append([payload.request_id for payload in payloads])
+        if failing:
+            raise RuntimeError("pooled build blew up")
+        return [_batching_stub_builder(payload) for payload in payloads]
+
+    scheduler = _build_state_machine_scheduler(
+        enable_partial_start=True,
+        partial_start_min_chunks=5,
+        request_builder_stub=_batching_stub_builder,
+        batch_request_builder_stub=batch_stub,
+        request_build_max_batch=max_batch,
+    )
+    scheduler._append_stream_chunk = lambda req_data, chunk: None
+    scheduler._mark_stream_done = lambda req_data: None
+    return scheduler
+
+
+def test_process_input_requests_batches_the_whole_pass() -> None:
+    """Everything already pending in one pass is built in one pooled call."""
+    batch_calls: list = []
+    scheduler = _batching_scheduler(8, batch_calls)
+    payloads = [_batching_payload(i) for i in range(5)]
+
+    OmniScheduler.process_input_requests(scheduler, payloads)
+
+    assert len(batch_calls) == 1, f"expected one pooled call, got {batch_calls}"
+    assert batch_calls[0] == [p.request_id for p in payloads]
+    admitted = [req._omni_data.req.rid for req in scheduler.waiting_queue]
+    assert admitted == [p.request_id for p in payloads], "admission order changed"
+    assert scheduler._staged_request_build_count == 0
+
+
+def test_process_input_requests_honours_the_batch_cap() -> None:
+    batch_calls: list = []
+    scheduler = _batching_scheduler(2, batch_calls)
+    payloads = [_batching_payload(i) for i in range(5)]
+
+    OmniScheduler.process_input_requests(scheduler, payloads)
+
+    assert [len(call) for call in batch_calls] == [2, 2, 1]
+    admitted = [req._omni_data.req.rid for req in scheduler.waiting_queue]
+    assert admitted == [p.request_id for p in payloads]
+
+
+def test_batching_disabled_never_calls_the_pooled_builder() -> None:
+    batch_calls: list = []
+    scheduler = _batching_scheduler(1, batch_calls)
+    payloads = [_batching_payload(i) for i in range(3)]
+
+    OmniScheduler.process_input_requests(scheduler, payloads)
+
+    assert batch_calls == []
+    assert len(scheduler.waiting_queue) == 3
+
+
+def test_failed_batch_falls_back_to_serial_builds() -> None:
+    """A pooled failure must not cost the requests that were merely nearby."""
+    batch_calls: list = []
+    scheduler = _batching_scheduler(8, batch_calls, failing=True)
+    payloads = [_batching_payload(i) for i in range(4)]
+
+    OmniScheduler.process_input_requests(scheduler, payloads)
+
+    assert len(batch_calls) == 1
+    admitted = [req._omni_data.req.rid for req in scheduler.waiting_queue]
+    assert admitted == [p.request_id for p in payloads], "serial fallback lost requests"

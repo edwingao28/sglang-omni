@@ -14,7 +14,10 @@ from typing import Any
 import torch
 from safetensors import safe_open
 
-from sglang_omni.models.qwen3_omni.components.talker_input import build_prefill_input
+from sglang_omni.models.qwen3_omni.components.talker_input import (
+    build_prefill_input,
+    build_prefill_input_batch,
+)
 from sglang_omni.models.qwen3_omni.payload_types import Qwen3OmniPipelineState
 from sglang_omni.models.qwen3_omni.pending_text_queue import (
     PendingTextTensorQueue,
@@ -184,7 +187,13 @@ class TalkerPrefillBuilder:
 
         self._device = model.model.codec_embedding.weight.device
         self._dtype = model.activation_dtype
-        self._thinker_embed_cache: dict[int, torch.Tensor] = {}
+        # Dense table plus id -> slot, NOT a dict of one-row tensors. The
+        # gather used to stack N individual device tensors per call; against a
+        # table it is a single index_select, which is also the shape pooled
+        # builds want.
+        self._embed_slots: dict[int, int] = {}
+        self._embed_table: torch.Tensor | None = None
+        self._embed_table_used = 0
         self._tts_special_cache: (
             tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
         ) = None
@@ -252,6 +261,108 @@ class TalkerPrefillBuilder:
             "prompt_model_inputs": prompt_model_inputs,
         }
 
+    def build_prompt_prefill_batch(self, items: list[dict]) -> list[dict[str, Any]]:
+        """Pooled sibling of build_prompt_prefill.
+
+        Each item is {"payload", "thinker_chunks", "thinker_done"}. The token
+        gather, the modality mask and both projections each run once for the
+        whole batch; everything order-sensitive stays per request.
+        """
+        if not items:
+            return []
+        for item in items:
+            if not item["thinker_chunks"]:
+                raise ValueError("prompt prefill requires thinker chunks")
+
+        states = [
+            Qwen3OmniPipelineState.from_dict(item["payload"].data) for item in items
+        ]
+        prompt_ids_list = [self._prompt_ids_from_state(state) for state in states]
+        assistant_ids_list = [
+            self.extract_chunk_token_ids(item["thinker_chunks"]) for item in items
+        ]
+
+        # One gather for every prompt AND every assistant chunk in the batch.
+        gathered = self._load_prompt_token_embeddings_batch(
+            prompt_ids_list + assistant_ids_list
+        )
+        count = len(items)
+        prompt_embeds = gathered[:count]
+        assistant_embeds = gathered[count:]
+
+        thinker_ids_list: list[torch.Tensor] = []
+        thinker_embed_list: list[torch.Tensor] = []
+        thinker_hidden_list: list[torch.Tensor] = []
+        prompt_model_inputs_list: list[dict[str, Any]] = []
+
+        for index, (item, state) in enumerate(zip(items, states)):
+            prompt_ids = prompt_ids_list[index]
+            prompt_embed = prompt_embeds[index]
+            prompt_hidden = prompt_embed.clone()
+            prompt_model_inputs = self._prompt_model_inputs(state)
+            self._merge_prompt_modalities(
+                prompt_ids, prompt_embed, prompt_hidden, prompt_model_inputs
+            )
+            prompt_model_inputs_list.append(prompt_model_inputs)
+            assistant_embed = assistant_embeds[index]
+            thinker_ids_list.append(
+                torch.cat([prompt_ids, assistant_ids_list[index]], dim=0)
+            )
+            thinker_embed_list.append(torch.cat([prompt_embed, assistant_embed], dim=0))
+            thinker_hidden_list.append(
+                torch.cat([prompt_hidden, assistant_embed], dim=0)
+            )
+
+        masks = self.build_multimodal_mask_batch(thinker_ids_list)
+        tts_bos_embed, tts_eos_embed, tts_pad_embed = self.get_tts_special_embeds()
+
+        prefills = build_prefill_input_batch(
+            [
+                {
+                    "thinker_embed": thinker_embed_list[index],
+                    "thinker_hidden": thinker_hidden_list[index],
+                    "thinker_input_ids": thinker_ids_list[index],
+                    "multimodal_mask": masks[index],
+                    "tts_bos_embed": tts_bos_embed,
+                    "tts_eos_embed": tts_eos_embed,
+                    "tts_pad_embed": tts_pad_embed,
+                    "speaker_id": resolve_speaker_id(
+                        items[index]["payload"].request.params, self._speaker_map
+                    ),
+                    "include_assistant_eos": bool(items[index]["thinker_done"]),
+                }
+                for index in range(count)
+            ],
+            text_projection=self._model.text_projection,
+            hidden_projection=self._model.hidden_projection,
+            codec_embed_fn=self._model.get_input_embeddings(),
+            im_start_token_id=self._im_start_token_id,
+            system_token_id=self._system_token_id,
+            user_token_id=self._user_token_id,
+            assistant_token_id=self._assistant_token_id,
+            codec_nothink_id=self._codec_nothink_id,
+            codec_think_bos_id=self._codec_think_bos_id,
+            codec_think_eos_id=self._codec_think_eos_id,
+            codec_pad_id=self._codec_pad_id,
+            codec_bos_id=self._codec_bos_id,
+            tts_pad_token_id=self._tts_pad_token_id,
+            im_end_token_id=self._im_end_token_id,
+        )
+
+        return [
+            {
+                "input_embeds": prefill["input_embeds"],
+                "input_ids": prefill["input_ids"],
+                "pending_text_queue": self.tensor_rows_to_queue(
+                    prefill["future_text_rows"]
+                ),
+                "tts_pad_embed": tts_pad_embed[0].detach(),
+                "tts_eos_embed": tts_eos_embed[0].detach(),
+                "prompt_model_inputs": prompt_model_inputs_list[index],
+            }
+            for index, prefill in enumerate(prefills)
+        ]
+
     def append_text_chunk(self, req_data: Any, chunk: Any) -> None:
         if req_data.thinker_chunks_done:
             return
@@ -310,6 +421,18 @@ class TalkerPrefillBuilder:
                 mask |= token_ids == int(token_id)
         return mask
 
+    def build_multimodal_mask_batch(
+        self, token_id_tensors: list[torch.Tensor]
+    ) -> list[torch.Tensor]:
+        """One masking pass over every request's ids, split back in order."""
+        if not token_id_tensors:
+            return []
+        sizes = [int(tensor.shape[0]) for tensor in token_id_tensors]
+        combined = torch.cat(
+            [tensor.view(-1) for tensor in token_id_tensors], dim=0
+        )
+        return list(torch.split(self.build_multimodal_mask(combined), sizes, dim=0))
+
     def get_tts_special_embeds(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self._tts_special_cache is None:
             special_rows = load_thinker_embedding_rows(
@@ -331,19 +454,20 @@ class TalkerPrefillBuilder:
             return PendingTextTensorQueue()
         return PendingTextTensorQueue.from_tensor(tensor)
 
-    def _reconstruct_prompt_states(
-        self, state: Qwen3OmniPipelineState
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
+    def _prompt_ids_from_state(self, state: Qwen3OmniPipelineState) -> torch.Tensor:
         prompt = state.prompt or {}
         prompt_input_ids = prompt["input_ids"]
         if prompt_input_ids.dim() == 2:
             prompt_input_ids = prompt_input_ids[0]
-        prompt_ids = prompt_input_ids.to(dtype=torch.long).cpu()
+        return prompt_input_ids.to(dtype=torch.long).cpu()
 
-        prompt_embed = self._load_prompt_token_embeddings(prompt_ids)
-        prompt_hidden = prompt_embed.clone()
-        prompt_model_inputs = self._prompt_model_inputs(state)
-
+    def _merge_prompt_modalities(
+        self,
+        prompt_ids: torch.Tensor,
+        prompt_embed: torch.Tensor,
+        prompt_hidden: torch.Tensor,
+        prompt_model_inputs: dict[str, Any],
+    ) -> None:
         merge_prompt_modality(
             prompt_ids,
             prompt_embed,
@@ -366,33 +490,81 @@ class TalkerPrefillBuilder:
             features=prompt_model_inputs.get("video_embeds"),
         )
 
+    def _reconstruct_prompt_states(
+        self, state: Qwen3OmniPipelineState
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
+        prompt_ids = self._prompt_ids_from_state(state)
+        prompt_embed = self._load_prompt_token_embeddings(prompt_ids)
+        prompt_hidden = prompt_embed.clone()
+        prompt_model_inputs = self._prompt_model_inputs(state)
+        self._merge_prompt_modalities(
+            prompt_ids, prompt_embed, prompt_hidden, prompt_model_inputs
+        )
         return prompt_ids, prompt_embed, prompt_hidden, prompt_model_inputs
 
-    def _load_prompt_token_embeddings(self, token_ids: torch.Tensor) -> torch.Tensor:
-        token_ids = token_ids.to(dtype=torch.long).view(-1).cpu()
-        unique_ids, inverse = torch.unique(token_ids, sorted=False, return_inverse=True)
+    def _ensure_embed_rows(self, token_ids: list[int]) -> None:
         missing_ids = [
-            int(token_id)
-            for token_id in unique_ids.tolist()
-            if int(token_id) not in self._thinker_embed_cache
+            token_id for token_id in token_ids if token_id not in self._embed_slots
         ]
-        if missing_ids:
-            loaded_rows = load_thinker_embedding_rows(self._model_path, missing_ids).to(
+        if not missing_ids:
+            return
+        loaded_rows = load_thinker_embedding_rows(self._model_path, missing_ids).to(
+            device=self._device,
+            dtype=self._dtype,
+        )
+        needed = self._embed_table_used + len(missing_ids)
+        if self._embed_table is None:
+            self._embed_table = torch.empty(
+                (max(1024, needed), loaded_rows.shape[-1]),
                 device=self._device,
                 dtype=self._dtype,
             )
-            for token_id, row in zip(missing_ids, loaded_rows):
-                self._thinker_embed_cache[int(token_id)] = row.detach().clone()
+        elif needed > self._embed_table.shape[0]:
+            # Geometric growth: the vocabulary is far too large to preallocate,
+            # and a request-sized step would recopy the table on every miss.
+            grown = torch.empty(
+                (max(needed, self._embed_table.shape[0] * 2), self._embed_table.shape[-1]),
+                device=self._embed_table.device,
+                dtype=self._embed_table.dtype,
+            )
+            grown[: self._embed_table_used] = self._embed_table[: self._embed_table_used]
+            self._embed_table = grown
+        start = self._embed_table_used
+        self._embed_table[start : start + len(missing_ids)] = loaded_rows
+        for offset, token_id in enumerate(missing_ids):
+            self._embed_slots[int(token_id)] = start + offset
+        self._embed_table_used = start + len(missing_ids)
 
-        unique_rows = torch.stack(
-            [
-                self._thinker_embed_cache[int(token_id)]
-                for token_id in unique_ids.tolist()
-            ],
-            dim=0,
+    def _load_prompt_token_embeddings(self, token_ids: torch.Tensor) -> torch.Tensor:
+        return self._load_prompt_token_embeddings_batch([token_ids])[0]
+
+    def _load_prompt_token_embeddings_batch(
+        self, token_id_tensors: list[torch.Tensor]
+    ) -> list[torch.Tensor]:
+        """One unique + one index_select for every sequence in the batch."""
+        if not token_id_tensors:
+            return []
+        flattened = [
+            tensor.to(dtype=torch.long).view(-1).cpu() for tensor in token_id_tensors
+        ]
+        sizes = [int(tensor.shape[0]) for tensor in flattened]
+        combined = flattened[0] if len(flattened) == 1 else torch.cat(flattened, dim=0)
+        unique_ids, inverse = torch.unique(combined, sorted=False, return_inverse=True)
+        unique_list = [int(token_id) for token_id in unique_ids.tolist()]
+        self._ensure_embed_rows(unique_list)
+
+        slots = torch.tensor(
+            [self._embed_slots[token_id] for token_id in unique_list],
+            dtype=torch.long,
+        ).to(device=self._device)
+        gathered = self._embed_table.index_select(
+            0, slots[inverse.to(device=self._device)]
         )
-        gathered = unique_rows.index_select(0, inverse.to(device=unique_rows.device))
-        return gathered.view(token_ids.shape[0], unique_rows.shape[-1])
+        # index_select allocates, so the rows handed out are never views into
+        # the table -- callers mutate prompt embeds in place.
+        if len(flattened) == 1:
+            return [gathered]
+        return list(torch.split(gathered, sizes, dim=0))
 
     def _prompt_model_inputs(self, state: Qwen3OmniPipelineState) -> dict[str, Any]:
         thinker_inputs = state.thinker_inputs or {}
