@@ -245,6 +245,15 @@ class OmniScheduler:
             self.request_build_max_pending = 0
             self._request_build_backlog_limit = 0
             self._request_build_executor = None
+        # Liveness proof: report what the SCHEDULER resolved, not what the yaml
+        # asked for. A knob that never reaches the factory is the failure mode
+        # this line exists to make impossible to miss.
+        logger.info(
+            "OmniScheduler request-build pool: workers=%d max_pending=%d mode=%s",
+            self.request_build_max_workers,
+            self.request_build_max_pending,
+            "pool" if self._request_build_executor is not None else "inline",
+        )
         self._pending_request_builds: dict[str, tuple[Any, bool, Future]] = {}
         self._pending_request_admissions: dict[
             str, tuple[Any, bool, DeferredAdmission]
