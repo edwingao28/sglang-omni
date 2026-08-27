@@ -1142,6 +1142,8 @@ def create_talker_ar_executor_from_config(
     codec_coalesce_frames: int = 0,
     codec_coalesce_first_frames: int = 0,
     codec_coalesce_early_frames: int = 0,
+    request_build_max_workers: int = 1,
+    request_build_max_pending: int | None = None,
 ):
     """Returns OmniScheduler for talker."""
     from sglang_omni.models.qwen3_omni.bootstrap import create_talker_scheduler
@@ -1200,6 +1202,8 @@ def create_talker_ar_executor_from_config(
         codec_coalesce_frames=codec_coalesce_frames,
         codec_coalesce_first_frames=codec_coalesce_first_frames,
         codec_coalesce_early_frames=codec_coalesce_early_frames,
+        request_build_max_workers=request_build_max_workers,
+        request_build_max_pending=request_build_max_pending,
     )
     post_load_process_mem = get_process_gpu_memory_bytes(gpu_id)
     logger.info(
