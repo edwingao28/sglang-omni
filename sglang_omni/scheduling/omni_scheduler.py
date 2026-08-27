@@ -886,9 +886,12 @@ class OmniScheduler:
                 continue
             active_stage = _get_active_stage()
             if req_id not in self._request_build_ready_seen:
-                self._record_bounded_request_id(
-                    self._request_build_ready_seen, req_id
-                )
+                # Bounded in place: _record_bounded_request_id lives on Stage,
+                # not on this class. Cap and clear rather than grow unbounded
+                # across a long-lived server.
+                if len(self._request_build_ready_seen) >= 65536:
+                    self._request_build_ready_seen.clear()
+                self._request_build_ready_seen.add(req_id)
                 _emit_event(
                     request_id=req_id,
                     stage=active_stage,
