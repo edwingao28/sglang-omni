@@ -221,6 +221,9 @@ class OmniScheduler:
     # constructions share the production default; the resolved value is still
     # logged at boot, so a knob that never arrives is still caught there.
     inbox_drain_max: int = 0
+    # No probe unless one is configured. Declared on the class so the ingest hot
+    # path can test it without assuming a fully-built instance.
+    _pass_probe = None
 
     """Stage-facing scheduler for AR stages.
 
@@ -2014,6 +2017,8 @@ class OmniScheduler:
         self._pending_stream_ingress.setdefault(
             request_id, _PendingStreamIngress()
         ).chunks.append(chunk)
+        if self._pass_probe is not None:
+            self._probe_bump("chunk_ingest")
         dirty_set = False
         if (
             request_id in self._deferred_request_payloads
