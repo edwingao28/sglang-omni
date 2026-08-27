@@ -48,6 +48,71 @@ _STEADY_BATCH_MAX = 8
 _LARGE_BATCH_MAX_FRAMES = 20
 
 
+class _LoopProbe:
+    """Bounded per-turn accounting for the code2wav loop, aggregated per window.
+
+    Every existing code2wav event is emitted INSIDE the pump, so the whole
+    event set is blind to the intake side by construction: it can say what the
+    queue looked like at the instant a pump ran, never how long the queue went
+    unattended nor what arrived meanwhile. This samples the inbox BEFORE the
+    drain and times the interval between drains, which is the reading no pump
+    event can give.
+
+    Aggregates over a window instead of emitting per turn: the loop turns
+    thousands of times a second, and per-turn emission is itself a load.
+
+    Times NEST. ``pump`` runs inside ``batch``, so ingest is their difference;
+    ``lock_wait`` is disjoint from ``reap``; ``turn`` spans the whole turn, so
+    what the named keys leave over is the handling the loop body does after
+    ``_next_message`` returns.
+    """
+
+    __slots__ = ("interval_s", "_secs", "_counts", "_gauges", "_turns",
+                 "_window_start")
+
+    def __init__(self, interval_ms: float) -> None:
+        self.interval_s = max(0.0, float(interval_ms)) / 1000.0
+        self._reset(time.perf_counter())
+
+    def _reset(self, now: float) -> None:
+        self._secs: dict[str, float] = {}
+        self._counts: dict[str, int] = {}
+        self._gauges: dict[str, int] = {}
+        self._turns = 0
+        self._window_start = now
+
+    def add(self, key: str, seconds: float) -> None:
+        self._secs[key] = self._secs.get(key, 0.0) + seconds
+
+    def bump(self, key: str, n: int = 1) -> None:
+        if n:
+            self._counts[key] = self._counts.get(key, 0) + n
+
+    def gauge_max(self, key: str, value: int) -> None:
+        """Peak of a depth over the window -- a mean alone would hide bursts."""
+        if value > self._gauges.get(key, -1):
+            self._gauges[key] = value
+
+    def end_turn(self, now: float, turn_seconds: float) -> dict | None:
+        """Close one turn; return a payload when the window is due, else None."""
+        self._turns += 1
+        self.add("turn", turn_seconds)
+        if self.interval_s <= 0.0 or now - self._window_start < self.interval_s:
+            return None
+        payload: dict = {
+            "window_ms": (now - self._window_start) * 1000.0,
+            "turns": self._turns,
+        }
+        for key, secs in self._secs.items():
+            payload[f"{key}_ms"] = secs * 1000.0
+        for key, count in self._counts.items():
+            payload[f"n_{key}"] = count
+        for key, value in self._gauges.items():
+            payload[f"max_{key}"] = value
+        self._reset(now)
+        return payload
+
+
 def _serial_window_frames(
     stream_chunk_size: int,
     left_context_size: int,
@@ -186,6 +251,9 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
     # flight, since acquire happens before the previous window is flushed.
     _MAX_PINNED_SLOTS = 32
 
+    # Class default so the pump path is probe-safe before __init__ finishes.
+    _loop_probe = None
+
     def __init__(
         self,
         model: Any,
@@ -201,6 +269,7 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         batch_ceiling: int = 8,
         enable_output_overlap: bool = True,
         enable_cuda_graph: bool = False,
+        loop_probe_interval_ms: float | None = None,
         _cuda_graph_runner: Code2WavCudaGraphRunner | None = None,
     ):
         self._model = model
@@ -231,6 +300,10 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         self._last_oldest_wait_ms: float = 0.0
         self._last_due_bucket_count: int = 0
         self._pending_step_failures: list[str] = []
+        probe_ms = float(loop_probe_interval_ms or 0.0)
+        self._loop_probe = _LoopProbe(probe_ms) if probe_ms > 0.0 else None
+        self._turn_start: float | None = None
+        self._last_drain_end: float | None = None
         self._can_batch_stream_chunks = self._enable_batching
         if self._enable_batching:
             self._stream_chunk_batch_max = self._batch_ceiling
@@ -685,13 +758,43 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
             except queue.Empty:
                 return
 
+    def _emit_loop_window(self, now: float) -> None:
+        payload = self._loop_probe.end_turn(now, now - self._turn_start)
+        if payload is not None:
+            _emit_event(
+                request_id="code2wav-loop",
+                stage=None,
+                event_name="code2wav_loop_summary",
+                metadata=payload,
+            )
+
     def _next_message(self):
         # Note (wenyao): ``Event.query()`` is non-blocking, so reaping on this
         # loop cannot recreate the abort stall it replaces.
+        probe = self._loop_probe
+        if probe is not None:
+            t_lock = time.perf_counter()
+            if self._turn_start is not None:
+                self._emit_loop_window(t_lock)
+            self._turn_start = t_lock
         with self._state_lock:
+            if probe is not None:
+                t_held = time.perf_counter()
+                probe.add("lock_wait", t_held - t_lock)
             self._reap_retired_slots()
+        if probe is not None:
+            probe.add("reap", time.perf_counter() - t_held)
         if self._can_batch_stream_chunks:
             first_chunks: list = []
+            if probe is not None:
+                t_drain = time.perf_counter()
+                if self._last_drain_end is not None:
+                    probe.add("gap", t_drain - self._last_drain_end)
+                depth = self.inbox.qsize()
+                probe.gauge_max("depth_at_drain", depth)
+                probe.bump("depth_at_drain_sum", depth)
+                probe.bump("drains")
+                pending_before = len(self._pending_messages)
             for msg in self._drain_inbox():
                 if (
                     msg.type == "stream_chunk"
@@ -701,6 +804,15 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
                     first_chunks.append(msg)
                 else:
                     self._pending_messages.append(msg)
+            if probe is not None:
+                self._last_drain_end = time.perf_counter()
+                probe.add("drain", self._last_drain_end - t_drain)
+                probe.bump(
+                    "drained",
+                    len(first_chunks)
+                    + len(self._pending_messages)
+                    - pending_before,
+                )
             if first_chunks:
                 self._handle_stream_chunk_batch(first_chunks)
             if (
@@ -721,12 +833,30 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         timeout = 0.1
         if deadline is not None:
             timeout = min(timeout, max(deadline - time.monotonic(), 0.0))
+        if probe is not None:
+            t_idle = time.perf_counter()
         try:
-            return self.inbox.get(timeout=timeout)
+            msg = self.inbox.get(timeout=timeout)
         except queue.Empty:
-            if deadline is not None and time.monotonic() >= deadline:
-                self._pump_due_streams()
-            return None
+            msg = None
+        if probe is not None:
+            probe.add("idle", time.perf_counter() - t_idle)
+        if msg is not None:
+            return msg
+        if deadline is not None and time.monotonic() >= deadline:
+            self._pump_due_streams()
+        return None
+
+    def _handle_stream_chunk_batch(self, batch: list) -> None:
+        probe = self._loop_probe
+        if probe is None:
+            super()._handle_stream_chunk_batch(batch)
+            return
+        t0 = time.perf_counter()
+        super()._handle_stream_chunk_batch(batch)
+        probe.add("batch", time.perf_counter() - t0)
+        probe.bump("batches")
+        probe.bump("batch_items", len(batch))
 
     def _pump_due_streams(self) -> None:
         with self._state_lock:
@@ -738,7 +868,14 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         # Note (ruoyu): a step that fails partway aborts inside run_step instead
         # of raising, so its request ids surface here — the caller still owes
         # them the abort callback it runs off ``_state_lock``.
-        failed = super()._pump_streams()
+        probe = self._loop_probe
+        if probe is None:
+            failed = super()._pump_streams()
+        else:
+            t0 = time.perf_counter()
+            failed = super()._pump_streams()
+            probe.add("pump", time.perf_counter() - t0)
+            probe.bump("pumps")
         if self._pending_step_failures:
             failed = failed + self._pending_step_failures
             self._pending_step_failures = []
@@ -936,6 +1073,9 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         plan: list[int],
     ) -> dict[str, torch.Tensor]:
         decoded: dict[str, torch.Tensor] = {}
+        if self._loop_probe is not None:
+            self._loop_probe.bump("steps")
+            self._loop_probe.bump("step_participants", len(participants))
         profile_metadata: dict[str, Any] | None = None
         if _get_recorder().is_active():
             first_state = participants[0][1]
@@ -1082,6 +1222,7 @@ def create_code2wav_scheduler(
     batch_ceiling: int = 8,
     enable_output_overlap: bool = True,
     enable_cuda_graph: bool = False,
+    loop_probe_interval_ms: float | None = None,
     total_gpu_memory_fraction: float | None = None,
 ):
     """Factory: returns Code2WavScheduler."""
@@ -1152,5 +1293,6 @@ def create_code2wav_scheduler(
         batch_ceiling=batch_ceiling,
         enable_output_overlap=enable_output_overlap,
         enable_cuda_graph=enable_cuda_graph,
+        loop_probe_interval_ms=loop_probe_interval_ms,
         _cuda_graph_runner=cuda_graph_runner,
     )
