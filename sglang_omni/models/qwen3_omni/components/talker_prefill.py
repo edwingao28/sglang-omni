@@ -536,6 +536,27 @@ class TalkerPrefillBuilder:
         self._embed_table_used = start + len(missing_ids)
 
     def _load_prompt_token_embeddings(self, token_ids: torch.Tensor) -> torch.Tensor:
+        # SINGLE-TOKEN FAST PATH.
+        #
+        # The batched gather builds an index tensor on the CPU and ships it to
+        # the device TWICE. From non-pinned memory each `.to(device)` blocks
+        # until the copy lands, and with the GPU busy on decode those are sync
+        # points, not copies: py-spy attributes 86.4% of the talker's ingest
+        # wall to exactly those two lines. The per-chunk ingest path calls this
+        # with ONE token ~7.2k times a cell, so it pays two GPU syncs to fetch
+        # a single row.
+        #
+        # Indexing the table directly needs no index tensor and no transfer.
+        # The clone is NOT optional: a bare slice would be a VIEW into the
+        # embedding table, and callers mutate prompt embeds in place
+        # (merge_prompt_modality), which would corrupt the cache for every
+        # later request. A one-row device-to-device copy costs a launch and
+        # keeps the batched path's "never a view" contract.
+        if token_ids.numel() == 1:
+            token_id = int(token_ids.reshape(-1)[0])
+            self._ensure_embed_rows([token_id])
+            slot = self._embed_slots[token_id]
+            return self._embed_table[slot : slot + 1].clone()
         return self._load_prompt_token_embeddings_batch([token_ids])[0]
 
     def _load_prompt_token_embeddings_batch(
