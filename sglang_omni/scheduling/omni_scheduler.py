@@ -101,7 +101,8 @@ class _PassProbe:
     distinction is the whole point of the measurement.
     """
 
-    __slots__ = ("interval_s", "_secs", "_counts", "_passes", "_window_start")
+    __slots__ = ("interval_s", "_secs", "_counts", "_gauges", "_passes",
+                 "_window_start")
 
     def __init__(self, interval_ms: float) -> None:
         self.interval_s = max(0.0, float(interval_ms)) / 1000.0
@@ -110,6 +111,7 @@ class _PassProbe:
     def _reset(self, now: float) -> None:
         self._secs: dict[str, float] = {}
         self._counts: dict[str, int] = {}
+        self._gauges: dict[str, int] = {}
         self._passes = 0
         self._window_start = now
 
@@ -119,6 +121,11 @@ class _PassProbe:
     def bump(self, key: str, n: int = 1) -> None:
         if n:
             self._counts[key] = self._counts.get(key, 0) + n
+
+    def gauge_max(self, key: str, value: int) -> None:
+        """Peak of a depth over the window -- a mean would hide the bursts."""
+        if value > self._gauges.get(key, -1):
+            self._gauges[key] = value
 
     def end_pass(self, now: float, pass_seconds: float) -> dict | None:
         """Close one pass; return a payload when the window is due, else None."""
@@ -132,6 +139,8 @@ class _PassProbe:
             payload[f"{key}_ms"] = secs * 1000.0
         for key, count in self._counts.items():
             payload[f"n_{key}"] = count
+        for key, value in self._gauges.items():
+            payload[f"max_{key}"] = value
         self._reset(now)
         return payload
 
@@ -206,6 +215,11 @@ class _NoOpGrammarManager:
 
 
 class OmniScheduler:
+    # Unbounded inbox drain unless configured. Declared here so partial
+    # constructions share the production default; the resolved value is still
+    # logged at boot, so a knob that never arrives is still caught there.
+    inbox_drain_max: int = 0
+
     """Stage-facing scheduler for AR stages.
 
     Public contract (used by Stage):
@@ -250,6 +264,7 @@ class OmniScheduler:
         request_build_max_batch: int | None = None,
         batch_request_builder: Callable | None = None,
         pass_probe_interval_ms: float | None = None,
+        inbox_drain_max: int | None = None,
         shutdown_callback: Callable[[], None] | None = None,
     ):
         self.inbox: _queue_mod.Queue[IncomingMessage] = _queue_mod.Queue()
@@ -341,6 +356,19 @@ class OmniScheduler:
         # Per-pass occupancy probe. Default OFF: it exists to decompose the
         # inter-pass gap for one instrumented boot, not to ride along in a
         # scoring round.
+        # Bounded inbox drain. 0 = unbounded, which is the historical
+        # behaviour: recv_requests drains the WHOLE inbox and processes every
+        # message inline BEFORE process_input_requests runs once, so a burst
+        # makes one pass absorb the entire backlog and no request becomes
+        # ready until the last message is handled. Capping the drain does not
+        # remove that work, it interleaves it: readiness is re-evaluated every
+        # `inbox_drain_max` messages instead of once per backlog.
+        self.inbox_drain_max = max(0, int(inbox_drain_max or 0))
+        logger.info(
+            "OmniScheduler inbox drain: max_per_pass=%d mode=%s",
+            self.inbox_drain_max,
+            "bounded" if self.inbox_drain_max > 0 else "unbounded",
+        )
         probe_ms = float(pass_probe_interval_ms or 0.0)
         self._pass_probe = _PassProbe(probe_ms) if probe_ms > 0.0 else None
         logger.info(
@@ -606,6 +634,8 @@ class OmniScheduler:
         # queued so a batched pass makes the same queue-full decisions the
         # serial loop would have made as it admitted them one at a time.
         self._staged_request_build_count = 0
+        # Bounded id set: the chunk-ingest event fires once per request.
+        self._chunk_ingest_seen: set[str] = set()
         self._dirty_deferred_request_ids: set[str] = set()
         self._first_emit_done: set[str] = set()
         self._prefill_start_done: set[str] = set()
@@ -935,12 +965,22 @@ class OmniScheduler:
 
     def _drain_local_inbox(self) -> list[IncomingMessage]:
         recv_msgs: list[IncomingMessage] = []
-        while True:
+        limit = self.inbox_drain_max
+        while limit <= 0 or len(recv_msgs) < limit:
             try:
                 recv_msgs.append(self.inbox.get_nowait())
             except _queue_mod.Empty:
                 break
         return recv_msgs
+
+    def _inbox_has_pending(self) -> bool:
+        """True when a bounded drain left messages behind for the next pass."""
+        if self.inbox_drain_max <= 0:
+            return False
+        try:
+            return not self.inbox.empty()
+        except Exception:
+            return False
 
     def process_input_requests(self, recv_reqs):
         """Convert incoming payloads to SGLang Reqs and enqueue."""
@@ -1070,6 +1110,17 @@ class OmniScheduler:
         if probe is not None:
             probe.bump(key, n)
 
+    def _probe_gauge(self, key: str, value: int) -> None:
+        probe = self._pass_probe
+        if probe is not None:
+            probe.gauge_max(key, value)
+
+    def _inbox_qsize(self) -> int:
+        try:
+            return self.inbox.qsize()
+        except Exception:
+            return 0
+
     def _probe_end_pass(self, pass_start: float) -> None:
         probe = self._pass_probe
         if probe is None:
@@ -1188,6 +1239,12 @@ class OmniScheduler:
         return req_data
 
     def _sleep_during_idle(self) -> None:
+        # A bounded drain can leave messages queued. Sleeping the long idle
+        # interval on top of them would hand back the latency the bound was
+        # taken to remove, so a non-empty inbox is not an idle loop.
+        if self._inbox_has_pending():
+            time.sleep(0.0001)
+            return
         with self._request_admission_lock:
             request_admission_pending = bool(
                 self._pending_request_builds or self._pending_request_admissions
@@ -1951,11 +2008,34 @@ class OmniScheduler:
         self._pending_stream_ingress.setdefault(
             request_id, _PendingStreamIngress()
         ).chunks.append(chunk)
+        dirty_set = False
         if (
             request_id in self._deferred_request_payloads
             and self._should_recheck_deferred_request_on_stream_chunk(request_id, chunk)
         ):
             self._dirty_deferred_request_ids.add(request_id)
+            dirty_set = True
+        # First chunk only. This timestamps when the SCHEDULER saw the chunk,
+        # which the stage-side received event cannot: the gap between them is
+        # scheduler-side chunk lag, and `dirty_set` says whether the payload
+        # was even deferred yet when it landed.
+        seen = self.__dict__.get("_chunk_ingest_seen")
+        if seen is None:
+            seen = self.__dict__["_chunk_ingest_seen"] = set()
+        if request_id not in seen:
+            if len(seen) >= 65536:
+                seen.clear()
+            seen.add(request_id)
+            _emit_event(
+                request_id=request_id,
+                stage=_get_active_stage(),
+                event_name="scheduler_request_chunk_ingested",
+                metadata={
+                    "dirty_set": dirty_set,
+                    "deferred_depth": len(self._deferred_request_payloads),
+                    "dirty_depth": len(self._dirty_deferred_request_ids),
+                },
+            )
 
     def _on_stream_done(self, request_id: str) -> None:
         if request_id in self._completed_request_ids:
@@ -2538,11 +2618,19 @@ class OmniScheduler:
             t0 = pass_start
             self._process_admin_requests()
             t0 = self._probe_mark("admin", t0)
+            # Gauge reads are guarded, not passed as arguments: with the probe
+            # off they must cost nothing and touch nothing.
+            if self._pass_probe is not None:
+                self._probe_gauge("inbox_depth", self._inbox_qsize())
             recv_reqs = self.recv_requests()
             # recv_requests drains the inbox AND runs _on_stream_chunk inline,
             # so this mark is the thinker-chunk INGEST cost.
             t0 = self._probe_mark("ingest", t0)
             self._probe_bump("recv", len(recv_reqs))
+            if self._pass_probe is not None:
+                self._probe_gauge(
+                    "dirty_deferred", len(self._dirty_deferred_request_ids)
+                )
             deferred_payloads = self._take_deferred_request_payloads()
             recv_reqs.extend(deferred_payloads)
             t0 = self._probe_mark("deferred", t0)

@@ -1307,6 +1307,8 @@ def _build_state_machine_scheduler(
     scheduler._deferred_request_payloads = {}
     scheduler._request_build_ready_seen = set()
     scheduler._staged_request_build_count = 0
+    scheduler._chunk_ingest_seen = set()
+    scheduler.inbox_drain_max = 0
     scheduler._dirty_deferred_request_ids = set()
     scheduler._aborted_request_ids = set()
     scheduler._aborted_request_id_order = deque()
