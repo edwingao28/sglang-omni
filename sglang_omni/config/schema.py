@@ -144,6 +144,7 @@ class FactoryArgs(BaseModel):
     request_build_max_batch: int | None = Field(default=None, ge=1)
     pass_probe_interval_ms: float | None = Field(default=None, ge=0)
     loop_probe_interval_ms: float | None = Field(default=None, ge=0)
+    max_pump_steps: int | None = Field(default=None, ge=0)
     inbox_drain_max: int | None = Field(default=None, ge=0)
     encoder_mem_reserve: float | None = Field(default=None, ge=0, lt=1)
     enable_partial_start: bool | None = None

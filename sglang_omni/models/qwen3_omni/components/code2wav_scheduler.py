@@ -270,6 +270,7 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         enable_output_overlap: bool = True,
         enable_cuda_graph: bool = False,
         loop_probe_interval_ms: float | None = None,
+        max_pump_steps: int | None = None,
         _cuda_graph_runner: Code2WavCudaGraphRunner | None = None,
     ):
         self._model = model
@@ -300,6 +301,12 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         self._last_oldest_wait_ms: float = 0.0
         self._last_due_bucket_count: int = 0
         self._pending_step_failures: list[str] = []
+        self._max_pump_steps = max(0, int(max_pump_steps or 0))
+        logger.info(
+            "Code2Wav pump bound: max_pump_steps=%d mode=%s",
+            self._max_pump_steps,
+            "bounded" if self._max_pump_steps > 0 else "unbounded",
+        )
         probe_ms = float(loop_probe_interval_ms or 0.0)
         self._loop_probe = _LoopProbe(probe_ms) if probe_ms > 0.0 else None
         # Report the RESOLVED state, not the requested one: a knob that never
@@ -884,6 +891,8 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
             failed = super()._pump_streams()
             probe.add("pump", time.perf_counter() - t0)
             probe.bump("pumps")
+            if self._pump_hit_bound:
+                probe.bump("pumps_at_bound")
         if self._pending_step_failures:
             failed = failed + self._pending_step_failures
             self._pending_step_failures = []
@@ -1231,6 +1240,7 @@ def create_code2wav_scheduler(
     enable_output_overlap: bool = True,
     enable_cuda_graph: bool = False,
     loop_probe_interval_ms: float | None = None,
+    max_pump_steps: int | None = None,
     total_gpu_memory_fraction: float | None = None,
 ):
     """Factory: returns Code2WavScheduler."""
@@ -1302,5 +1312,6 @@ def create_code2wav_scheduler(
         enable_output_overlap=enable_output_overlap,
         enable_cuda_graph=enable_cuda_graph,
         loop_probe_interval_ms=loop_probe_interval_ms,
+        max_pump_steps=max_pump_steps,
         _cuda_graph_runner=cuda_graph_runner,
     )
