@@ -2603,3 +2603,40 @@ def test_failed_batch_falls_back_to_serial_builds() -> None:
     assert len(batch_calls) == 1
     admitted = [req._omni_data.req.rid for req in scheduler.waiting_queue]
     assert admitted == [p.request_id for p in payloads], "serial fallback lost requests"
+
+
+def test_saturation_admit_reject_sequence_is_identical_serial_vs_batched() -> None:
+    """Finding C, pinned: batching must not change WHO gets rejected.
+
+    The serial loop admits between builds, so the waiting queue grows as it
+    goes and a later payload can find the queue full. A batched pass builds
+    first and admits afterwards, so without carrying the staged count the queue
+    would look empty all pass and payloads that the serial path rejects would
+    be admitted instead. This drives both arms into saturation and asserts the
+    admitted AND rejected sequences match exactly.
+    """
+    def drive(max_batch: int):
+        batch_calls: list = []
+        scheduler = _batching_scheduler(max_batch, batch_calls)
+        scheduler.max_queued_requests = 4
+        rejected: list = []
+        scheduler._emit_request_error = lambda rid, exc: rejected.append(rid)
+        scheduler.abort = lambda rid: None
+        payloads = [_batching_payload(i) for i in range(10)]
+        OmniScheduler.process_input_requests(scheduler, payloads)
+        admitted = [req._omni_data.req.rid for req in scheduler.waiting_queue]
+        return admitted, rejected
+
+    serial_admitted, serial_rejected = drive(1)
+    batched_admitted, batched_rejected = drive(8)
+
+    # the scenario must actually saturate, or it proves nothing
+    assert serial_rejected, "scenario did not saturate: nothing was rejected"
+    assert len(serial_admitted) == 4, serial_admitted
+
+    assert batched_admitted == serial_admitted, (
+        f"batched admitted {batched_admitted} vs serial {serial_admitted}"
+    )
+    assert batched_rejected == serial_rejected, (
+        f"batched rejected {batched_rejected} vs serial {serial_rejected}"
+    )
