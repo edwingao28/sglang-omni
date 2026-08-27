@@ -441,3 +441,114 @@ def test_pooled_projection_is_bit_exact_on_device_in_bf16(batch_size):
             assert_same(g, w, f"cuda-bf16[{index}]")
     finally:
         IN_DIM, OUT_DIM = saved_in, saved_out
+
+
+# --- the PRODUCTION projection class, not a stand-in ------------------------
+#
+# c85a6ee3c's probe-hoist half was INERT on the real model for exactly this
+# reason: its 19 tests used nn.Linear and a lambda, and the talker's projection
+# is a ResizeMLP, which had no out_features for the getattr to find. A stand-in
+# that is shaped like the real class does not prove anything about the real
+# class, so these use ResizeMLP itself.
+
+
+def _resize_mlp(in_dim, inter_dim, out_dim, dtype=torch.float32, device="cpu", seed=0):
+    """A ResizeMLP with WEIGHTS, which the constructor alone does not give you.
+
+    ReplicatedLinear allocates with torch.empty and expects the checkpoint
+    loader to fill it, so a freshly constructed ResizeMLP produces inf/nan. A
+    bit-exactness assertion over uninitialised memory proves nothing, so seed
+    the weights explicitly.
+    """
+    from sglang_omni.models.qwen3_omni.components.talker import ResizeMLP
+
+    mlp = ResizeMLP(in_dim, inter_dim, out_dim)
+    generator = torch.Generator().manual_seed(seed)
+    with torch.no_grad():
+        for linear in (mlp.linear_fc1, mlp.linear_fc2):
+            linear.weight.copy_(
+                torch.randn(linear.weight.shape, generator=generator) * 0.02
+            )
+            if getattr(linear, "bias", None) is not None:
+                linear.bias.copy_(
+                    torch.randn(linear.bias.shape, generator=generator) * 0.02
+                )
+    return mlp.to(device=device, dtype=dtype)
+
+
+def test_production_resize_mlp_publishes_out_features():
+    """The regression guard for the inert-probe class of bug.
+
+    Without out_features the getattr falls through and build_user_part pays a
+    full one-row forward per user segment, silently, on the real model.
+    """
+    mlp = _resize_mlp(IN_DIM, 2 * IN_DIM, OUT_DIM)
+    assert getattr(mlp, "out_features", None) == OUT_DIM
+    # and the value must be the one build_user_part would otherwise probe for
+    probe = mlp(torch.zeros(1, IN_DIM)).shape[-1]
+    assert mlp.out_features == probe
+
+
+def test_production_resize_mlp_batch_matches_serial_on_cpu():
+    """Structure and ordering through the real class, CPU.
+
+    CPU GEMM kernel selection varies with M, so this asserts the SHAPES, ids and
+    future-row bookkeeping match and the embeds agree to a tolerance -- the
+    bit-exact claim is made on device in bf16 by the test below, which is where
+    production runs.
+    """
+    cases = [make_case(user_segments=1 + i % 3, mask_kind=["none", "mixed", "all"][i % 3],
+                       seed=i) for i in range(4)]
+    text = _resize_mlp(IN_DIM, 2 * IN_DIM, OUT_DIM, seed=1)
+    hidden = _resize_mlp(IN_DIM, 2 * IN_DIM, OUT_DIM, seed=2)
+    codec = CodecEmbed(OUT_DIM)
+    generator = torch.Generator().manual_seed(3)
+    specials = tuple(torch.randn(1, OUT_DIM, generator=generator) for _ in range(3))
+
+    want = [run_serial(c, text_projection=text, hidden_projection=hidden,
+                       codec_embed_fn=codec, specials=specials) for c in cases]
+    got = run_batch(cases, text_projection=text, hidden_projection=hidden,
+                    codec_embed_fn=codec, specials=specials)
+    for index, (g, w) in enumerate(zip(got, want)):
+        assert g["input_embeds"].shape == w["input_embeds"].shape, index
+        assert torch.equal(g["input_ids"], w["input_ids"]), index
+        assert torch.allclose(g["input_embeds"], w["input_embeds"], atol=1e-5), index
+        if w["future_text_rows"] is None:
+            assert g["future_text_rows"] is None
+        else:
+            assert torch.allclose(
+                g["future_text_rows"], w["future_text_rows"], atol=1e-5
+            ), index
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+@pytest.mark.parametrize("batch_size", [2, 8, 32])
+def test_production_resize_mlp_is_bit_exact_on_device_in_bf16(batch_size):
+    """The rider-1 gate through the REAL projection class at REAL dims."""
+    device, dtype = "cuda", torch.bfloat16
+    global IN_DIM, OUT_DIM
+    saved_in, saved_out = IN_DIM, OUT_DIM
+    IN_DIM, OUT_DIM = REAL_IN, REAL_OUT
+    try:
+        cases = [
+            make_case(user_segments=1 + index % 3, user_len=8 + index,
+                      mask_kind=["none", "mixed", "all"][index % 3],
+                      dtype=dtype, device=device, seed=index)
+            for index in range(batch_size)
+        ]
+        text = _resize_mlp(REAL_IN, REAL_INTER, REAL_OUT, dtype, device, seed=1)
+        hidden = _resize_mlp(REAL_IN, REAL_INTER, REAL_OUT, dtype, device, seed=2)
+        codec = CodecEmbed(REAL_OUT, dtype=dtype, device=device)
+        generator = torch.Generator().manual_seed(3)
+        specials = tuple(
+            torch.randn(1, REAL_OUT, generator=generator).to(dtype=dtype, device=device)
+            for _ in range(3)
+        )
+        want = [run_serial(c, text_projection=text, hidden_projection=hidden,
+                           codec_embed_fn=codec, specials=specials) for c in cases]
+        got = run_batch(cases, text_projection=text, hidden_projection=hidden,
+                        codec_embed_fn=codec, specials=specials)
+        for index, (g, w) in enumerate(zip(got, want)):
+            assert_same(g, w, f"ResizeMLP-cuda-bf16[{index}]")
+    finally:
+        IN_DIM, OUT_DIM = saved_in, saved_out
