@@ -2007,6 +2007,15 @@ class OmniScheduler:
             )
 
     def _on_stream_chunk(self, request_id: str, chunk: Any) -> None:
+        # Counted HERE, above every early return, and split by source stage.
+        # The previous placement sat below the admitted-request return, so it
+        # counted only pre-admission chunks and produced a denominator that did
+        # not match the ingest wall it was divided into. The source split
+        # settles whether code2wav feedback also lands on this path.
+        if self._pass_probe is not None:
+            self._probe_bump("chunk_ingest")
+            source = getattr(chunk, "from_stage", None)
+            self._probe_bump(f"chunk_from_{source or 'unknown'}")
         if request_id in self._completed_request_ids:
             return
         req_data = self._find_request_data(request_id)
@@ -2017,8 +2026,6 @@ class OmniScheduler:
         self._pending_stream_ingress.setdefault(
             request_id, _PendingStreamIngress()
         ).chunks.append(chunk)
-        if self._pass_probe is not None:
-            self._probe_bump("chunk_ingest")
         dirty_set = False
         if (
             request_id in self._deferred_request_payloads
