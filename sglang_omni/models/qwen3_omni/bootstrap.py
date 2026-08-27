@@ -140,6 +140,8 @@ def create_talker_scheduler(
     total_gpu_memory_fraction: float | None = None,
     enable_partial_start: bool = False,
     partial_start_min_chunks: int = 5,
+    request_build_max_workers: int = 1,
+    request_build_max_pending: int | None = None,
 ):
     """Create the Qwen talker scheduler."""
     del speech_enabled
@@ -242,6 +244,8 @@ def create_talker_scheduler(
     )
 
     scheduler = QwenTalkerScheduler(
+        request_build_max_workers=request_build_max_workers,
+        request_build_max_pending=request_build_max_pending,
         tp_worker=model_worker,
         tree_cache=tree_cache,
         req_to_token_pool=req_to_token_pool,
