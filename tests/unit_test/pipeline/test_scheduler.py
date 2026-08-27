@@ -48,6 +48,8 @@ def _init_sync_request_build_state(scheduler: OmniScheduler) -> None:
     scheduler.request_build_max_batch = 1
     scheduler._batch_request_builder = None
     scheduler._pass_probe = None
+    scheduler.inbox_drain_max = 0
+    scheduler._chunk_ingest_seen = set()
     scheduler._async_pending = None
     scheduler.enable_priority_scheduling = False
     scheduler.abort_on_priority_when_disabled = False
@@ -95,6 +97,7 @@ def test_normal_event_loop_uses_request_build_aware_idle_sleep(monkeypatch) -> N
     scheduler._running = True
     scheduler._engine_paused = False
     scheduler._pass_probe = None
+    scheduler.inbox_drain_max = 0
     scheduler._request_admission_lock = threading.RLock()
     scheduler._pending_request_builds = {"req": object()}
     scheduler._pending_request_admissions = {}
