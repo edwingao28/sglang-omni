@@ -51,17 +51,25 @@ def build_user_part(
     hidden_projection,
 ) -> torch.Tensor:
     """Build user segment: text_projection for text, hidden_projection for multimodal."""
-    out_size = text_projection(thinker_embed[:1]).shape[-1]
+    # The output width is a property of the projection, not of this call. Reading
+    # it off the module skips a full one-row forward pass per segment; the probe
+    # stays as the fallback for any projection that is not a plain Linear.
+    out_size = getattr(text_projection, "out_features", None)
+    if out_size is None:
+        out_size = text_projection(thinker_embed[:1]).shape[-1]
     result = torch.empty(
         (thinker_embed.shape[0], out_size),
         device=thinker_embed.device,
         dtype=thinker_embed.dtype,
     )
-    if multimodal_mask.any():
-        result[multimodal_mask] = hidden_projection(thinker_hidden[multimodal_mask])
+    # No `mask.any()` guards. The masks live on the accelerator, so each guard
+    # was a device-to-host SYNC -- together ~10% of build time, measured. An
+    # empty mask makes the gather, the projection and the scatter all no-ops on
+    # zero rows, so dropping the guards is exactly equivalent and trades a sync
+    # for a launch on the empty branch.
+    result[multimodal_mask] = hidden_projection(thinker_hidden[multimodal_mask])
     text_mask = ~multimodal_mask
-    if text_mask.any():
-        result[text_mask] = text_projection(thinker_embed[text_mask])
+    result[text_mask] = text_projection(thinker_embed[text_mask])
     return result
 
 
