@@ -224,6 +224,14 @@ class Qwen3OmniMoeThinkerTextAttention(nn.Module):
             rope_scaling=rope_scaling,
             dual_chunk_attention_config=dual_chunk_attention_config,
         )
+        # Note (wenyao): under --enable-torch-compile, _to_torch() rebinds every
+        # MultiPlatformOp to forward_native at compile entry, and native rotary
+        # hard-asserts fused_set_kv_buffer_arg is None -- we pass one, so the
+        # talker dies at startup. The rebind is a state mutation, not a tracing
+        # decision, so @torch.compiler.disable cannot prevent it. Neutralizing
+        # enter_torch_compile keeps forward_cuda and the fused KV write;
+        # leave_torch_compile stays a no-op since is_torch_compile stays False.
+        self.rotary_emb.enter_torch_compile = lambda num_tokens: None
         self.compatible_with_fused_kv_buffer = (
             False if isinstance(self.rotary_emb, MRotaryEmbedding) else True
         )
@@ -263,38 +271,6 @@ class Qwen3OmniMoeThinkerTextAttention(nn.Module):
 
         inner_state = q, k, v, forward_batch
         return None, forward_batch, inner_state
-
-    @torch.compiler.disable
-    def _rotary_emb_no_compile(self, positions, q, k, fused_set_kv_buffer_arg):
-        """Call the rotary embedding with Dynamo tracing switched off.
-
-        Under ``--enable-torch-compile`` SGLang's rotary dispatcher resolves to
-        the *native* implementation, because the custom CUDA op is not
-        traceable. ``forward_native`` then hard-asserts the fused KV path is
-        unused::
-
-            assert fused_set_kv_buffer_arg is None, \
-                "fused_set_kv_buffer_arg is not supported for native implementation"
-
-        but we pass a non-None arg whenever the fused path is eligible, so
-        enabling compile kills the boot outright (talker_ar exits during capture
-        warmup). Excluding just this call from Dynamo keeps the rotary op on its
-        CUDA path and preserves the fused KV write, instead of trading that
-        optimization away to buy compile.
-
-        Only the rotary call is excluded, so the rest of the attention prep
-        still compiles. Decorating a thin wrapper is the same shape M* uses for
-        its own non-traceable kernels.
-
-        Inert when compile is off: ``torch.compiler.disable`` only marks the
-        function, so nothing changes on the default path.
-        """
-        return self.rotary_emb(
-            positions,
-            q,
-            k,
-            fused_set_kv_buffer_arg=fused_set_kv_buffer_arg,
-        )
 
     def apply_qk_norm_rope(self, qkv, positions, forward_batch):
         # Note:(Chenchen Hong) the talker uses a base (non-MRoPE) RotaryEmbedding
@@ -347,7 +323,7 @@ class Qwen3OmniMoeThinkerTextAttention(nn.Module):
                 and enable_fused_set_kv_buffer(forward_batch)
                 and self.compatible_with_fused_kv_buffer
             )
-            q, k = self._rotary_emb_no_compile(
+            q, k = self.rotary_emb(
                 positions,
                 q,
                 k,
