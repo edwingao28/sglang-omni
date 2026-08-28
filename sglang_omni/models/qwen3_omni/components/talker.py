@@ -1027,6 +1027,7 @@ class Qwen3OmniTalker(nn.Module):
             tuple[int, torch.dtype], _PredictorDecodeGraph
         ] = {}
         self._predictor_decode_graph_disabled: set[tuple[int, torch.dtype]] = set()
+        self._predictor_decode_graph_logged_misses: set[tuple[str, int]] = set()
         _bind_default_weight_loaders(self)
         self._cached_params_dict = dict(self.named_parameters())
         self._sampler = None
@@ -1496,11 +1497,12 @@ class Qwen3OmniTalker(nn.Module):
                 "talker_hidden shape must align with layer0_codes: "
                 f"{tuple(talker_hidden.shape)} vs {tuple(layer0_codes.shape)}"
             )
-        if self._can_use_predictor_decode_graph(
+        skip_reason = self._predictor_decode_graph_skip_reason(
             layer0_codes=layer0_codes,
             talker_hidden=talker_hidden,
             seq_len=seq_len,
-        ):
+        )
+        if skip_reason is None:
             graph_result = self._code_predictor_forward_single_token_graph(
                 layer0_codes=layer0_codes,
                 talker_hidden=talker_hidden,
@@ -1509,30 +1511,59 @@ class Qwen3OmniTalker(nn.Module):
             )
             if graph_result is not None:
                 return graph_result
+        else:
+            self._log_predictor_graph_miss(skip_reason, batch_size)
 
         return self._code_predictor_forward_incremental_eager(
             layer0_codes=layer0_codes,
             talker_hidden=talker_hidden,
         )
 
-    def _can_use_predictor_decode_graph(
+    def _predictor_decode_graph_skip_reason(
         self,
         *,
         layer0_codes: torch.Tensor,
         talker_hidden: torch.Tensor,
         seq_len: int,
-    ) -> bool:
+    ) -> str | None:
+        """Why the standalone predictor graph cannot serve this call (None = it can).
+
+        ``"capturing"`` is not a miss: during the outer whole-Talker decode
+        capture this deliberately declines so the predictor body is recorded
+        into that graph instead of nesting a replay inside it.
+        """
         if seq_len != 1:
-            return False
-        if layer0_codes.dtype not in (torch.int, torch.long):
-            return False
+            return "multi_token"
         if not torch.cuda.is_available():
-            return False
-        if not layer0_codes.is_cuda or not talker_hidden.is_cuda:
-            return False
+            return "no_cuda"
         if torch.cuda.is_current_stream_capturing():
-            return False
-        return True
+            return "capturing"
+        if layer0_codes.dtype not in (torch.int, torch.long):
+            return "code_dtype"
+        if not layer0_codes.is_cuda or not talker_hidden.is_cuda:
+            return "non_cuda_tensor"
+        return None
+
+    # Note (wenyao): only these reasons mean the engine is quietly slower than
+    # intended; the remaining exits are by-design and must stay silent.
+    _PREDICTOR_GRAPH_ALARMING_MISSES = frozenset(
+        {"code_dtype", "non_cuda_tensor", "bucket_overflow"}
+    )
+
+    def _log_predictor_graph_miss(self, reason: str, batch_size: int) -> None:
+        if reason not in self._PREDICTOR_GRAPH_ALARMING_MISSES:
+            return
+        key = (reason, int(batch_size))
+        if key in self._predictor_decode_graph_logged_misses:
+            return
+        self._predictor_decode_graph_logged_misses.add(key)
+        logger.warning(
+            "[predictor-graph miss] reason=%s batch_size=%s captured_buckets=%s "
+            "-- the code predictor is running eager for this shape.",
+            reason,
+            batch_size,
+            list(self._predictor_decode_graph_batch_sizes),
+        )
 
     @staticmethod
     def _normalize_predictor_decode_graph_batch_sizes(
@@ -1575,6 +1606,7 @@ class Qwen3OmniTalker(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor] | None:
         bucket_size = self._predictor_decode_graph_bucket_size(batch_size)
         if bucket_size is None:
+            self._log_predictor_graph_miss("bucket_overflow", batch_size)
             return None
 
         key = (bucket_size, code_dtype)
