@@ -42,6 +42,15 @@ class _PrefillCudaGraphUsage:
     replay_buckets: Counter[int] = field(default_factory=Counter)
 
 
+@dataclass(slots=True)
+class _DecodeCudaGraphUsage:
+    replay_count: int = 0
+    eager_count: int = 0
+    replay_buckets: Counter[int] = field(default_factory=Counter)
+    attested: bool = False
+    warned_eager: bool = False
+
+
 _ARCH_CONFIG_MAP: dict[str, tuple[str, str | None]] = {
     "BailingMoeV2ForCausalLM": ("llm_config", None),
     "DotsTTSForConditionalGeneration": ("llm_config", None),
@@ -79,6 +88,7 @@ class ModelWorker:
         self._init_model_runner()
         self._init_dllm_algorithm()
         self._prefill_cuda_graph_usage = _PrefillCudaGraphUsage()
+        self._decode_cuda_graph_usage = _DecodeCudaGraphUsage()
 
         self.device = self.model_runner.device
         from sglang.srt.utils import broadcast_pyobj, set_random_seed
@@ -292,6 +302,10 @@ class ModelWorker:
             forward_batch,
             can_run_graph=bool(can_run_cuda_graph),
         )
+        self._record_decode_cuda_graph_usage(
+            forward_batch,
+            can_run_graph=bool(can_run_cuda_graph),
+        )
         batch_result = GenerationBatchResult(
             logits_output=logits_output,
             can_run_cuda_graph=can_run_cuda_graph,
@@ -324,6 +338,86 @@ class ModelWorker:
     def record_custom_prefill_eager(self) -> None:
         """Record a custom prefill forward that bypasses SGLang graph dispatch."""
         self._prefill_cuda_graph_usage.custom_eager_count += 1
+
+    def _record_decode_cuda_graph_usage(
+        self,
+        forward_batch: Any,
+        *,
+        can_run_graph: bool,
+    ) -> None:
+        """Census decode steps by graph-replay vs eager, and attest once.
+
+        A silent fall back to eager reshapes every latency number without
+        failing anything, so attestation must be positive replay evidence.
+        """
+        # Note (wenyao): ForwardMode.is_cuda_graph() is True for DECODE -- it
+        # means graph-ELIGIBLE, not replayed -- so gating on it would pin every
+        # count at zero. can_run_graph is the actual replay signal.
+        mode = forward_batch.forward_mode
+        if not mode.is_decode():
+            return
+
+        usage = self._decode_cuda_graph_usage
+        if not can_run_graph:
+            usage.eager_count += 1
+            if not usage.warned_eager:
+                usage.warned_eager = True
+                logger.warning(
+                    "[decode-graph miss] a decode step ran EAGER: "
+                    "arch=%s bs=%s attestation=%s -- latency numbers from this "
+                    "boot are not graph-replay numbers.",
+                    self.model_arch_override,
+                    len(forward_batch.input_ids),
+                    self._decode_cuda_graph_info(),
+                )
+            return
+
+        usage.replay_count += 1
+        runner = getattr(self.model_runner, "decode_cuda_graph_runner", None)
+        bucket = getattr(runner, "bs", None)
+        if bucket is not None:
+            usage.replay_buckets[int(bucket)] += 1
+        if not usage.attested:
+            usage.attested = True
+            logger.info(
+                "[decode-graph attestation] arch=%s %s",
+                self.model_arch_override,
+                self._decode_cuda_graph_info(),
+            )
+
+    def _decode_cuda_graph_info(self) -> dict[str, Any]:
+        """Machine-readable decode-graph attestation for model_info().
+
+        ``compile_mode`` is included because Inductor's ``reduce-overhead``
+        builds cudagraph trees that corrupt memory alongside the
+        always-resident decode graphs (#1046); a run must assert the mode it
+        actually used.
+        """
+        runner = getattr(self.model_runner, "decode_cuda_graph_runner", None)
+        usage = self._decode_cuda_graph_usage
+        capture_bs = getattr(runner, "capture_bs", None)
+        compile_bs = getattr(runner, "compile_bs", None)
+        env_mode = os.environ.get("SGLANG_TORCH_COMPILE_MODE")
+        return {
+            "runner": type(runner).__name__ if runner is not None else None,
+            "capture_bs": (
+                [int(bs) for bs in capture_bs] if capture_bs is not None else None
+            ),
+            "enable_torch_compile": bool(
+                getattr(runner, "enable_torch_compile", False)
+            ),
+            "compile_bs": (
+                [int(bs) for bs in compile_bs] if compile_bs is not None else None
+            ),
+            "compile_mode": env_mode or "max-autotune-no-cudagraphs",
+            "compile_mode_from_env": env_mode is not None,
+            "replay_count": int(usage.replay_count),
+            "eager_count": int(usage.eager_count),
+            "replay_buckets": {
+                str(bucket): int(count)
+                for bucket, count in sorted(usage.replay_buckets.items())
+            },
+        }
 
     def _prefill_cuda_graph_info(self) -> dict[str, Any]:
         from sglang.srt.model_executor.runner.prefill_cuda_graph_runner import (
@@ -367,6 +461,7 @@ class ModelWorker:
             ),
             "supports_weight_checker": True,
             "prefill_cuda_graph": self._prefill_cuda_graph_info(),
+            "decode_cuda_graph": self._decode_cuda_graph_info(),
         }
 
     def update_weights_from_disk(self, payload: dict[str, Any]) -> tuple[bool, str]:

@@ -10,7 +10,11 @@ from sglang.srt.model_executor.runner.prefill_cuda_graph_runner import (
     PrefillCudaGraphRunner,
 )
 
-from sglang_omni.model_runner.model_worker import ModelWorker, _PrefillCudaGraphUsage
+from sglang_omni.model_runner.model_worker import (
+    ModelWorker,
+    _DecodeCudaGraphUsage,
+    _PrefillCudaGraphUsage,
+)
 
 
 def _forward_batch(
@@ -81,11 +85,13 @@ def test_model_worker_reports_actual_prefill_graph_replays_by_bucket() -> None:
     runner = SimpleNamespace(
         forward=forward,
         prefill_cuda_graph_runner=prefill_runner,
+        decode_cuda_graph_runner=None,
     )
     worker = object.__new__(ModelWorker)
     worker.dllm_algorithm = None
     worker.model_runner = runner
     worker._prefill_cuda_graph_usage = _PrefillCudaGraphUsage()
+    worker._decode_cuda_graph_usage = _DecodeCudaGraphUsage()
     worker.server_args = SimpleNamespace(
         model_path="model",
         load_format="auto",
