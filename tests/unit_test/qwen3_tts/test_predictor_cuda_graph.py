@@ -164,6 +164,7 @@ def _build_talker(device: torch.device) -> Qwen3TTSTalker:
 
     talker._predictor_graphs = {}
     talker._predictor_graph_disabled = set()
+    talker._predictor_graph_logged_misses = set()
     talker._predictor_graph_batch_sizes = BUCKETS
     talker._predictor_graph_enabled = True
     talker._predictor_graph_failure_count = 0

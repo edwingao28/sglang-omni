@@ -513,6 +513,7 @@ class Qwen3TTSTalker(nn.Module):
         )
         self._predictor_graphs: dict[tuple, _PredictorDecodeGraph] = {}
         self._predictor_graph_disabled: set[tuple] = set()
+        self._predictor_graph_logged_misses: set[tuple[str, int]] = set()
         # Note: (Jiaxin Deng) None = resolved at decode time; bootstrap forces
         # disable_cuda_graph on during init (deferred capture), so not here.
         self._predictor_graph_enabled: bool | None = None
@@ -1271,6 +1272,38 @@ class Qwen3TTSTalker(nn.Module):
         # graphed chain is only validated single-rank, so TP stays eager.
         return int(server_args.tp_size) == 1
 
+    # Note (wenyao): only these reasons mean the chain is quietly running
+    # eager; the remaining exits are by-design and must stay silent.
+    _PREDICTOR_GRAPH_ALARMING_MISSES = frozenset(
+        {
+            "code_dtype",
+            "non_cuda_tensor",
+            "batch_size_mismatch",
+            "signature_mixed",
+            "bucket_overflow",
+            "key_table_full",
+        }
+    )
+
+    def _log_predictor_graph_miss(self, reason: str, batch_size: int) -> None:
+        """Always returns None so the dispatch can ``return`` it directly."""
+        if reason not in self._PREDICTOR_GRAPH_ALARMING_MISSES:
+            return None
+        key = (reason, int(batch_size))
+        if key in self._predictor_graph_logged_misses:
+            return None
+        self._predictor_graph_logged_misses.add(key)
+        logger.warning(
+            "[predictor-graph miss] model=qwen3-tts reason=%s batch_size=%s "
+            "captured_keys=%d/%d -- the code-predictor chain is running eager "
+            "for this shape.",
+            reason,
+            batch_size,
+            len(self._predictor_graphs),
+            _PREDICTOR_GRAPH_MAX_KEYS,
+        )
+        return None
+
     def _predictor_forward_graphed(
         self,
         layer0_codes: torch.Tensor,
@@ -1285,26 +1318,26 @@ class Qwen3TTSTalker(nn.Module):
         if seq_len != 1 or batch_size == 0:
             return None
         if layer0_codes.dtype not in (torch.int, torch.long):
-            return None
+            return self._log_predictor_graph_miss("code_dtype", batch_size)
         if not layer0_codes.is_cuda or not talker_hidden.is_cuda:
-            return None
+            return self._log_predictor_graph_miss("non_cuda_tensor", batch_size)
         if batch_size != self._sub_batch_size:
-            return None
+            return self._log_predictor_graph_miss("batch_size_mismatch", batch_size)
         if torch.cuda.is_current_stream_capturing():
             return None
         signature = self._predictor_graph_signature(batch_size, semantic_positions)
         if signature is None:
-            return None
+            return self._log_predictor_graph_miss("signature_mixed", batch_size)
         bucket_size = self._predictor_graph_bucket_size(batch_size)
         if bucket_size is None:
-            return None
+            return self._log_predictor_graph_miss("bucket_overflow", batch_size)
         key = (bucket_size, *signature)
         if key in self._predictor_graph_disabled:
             return None
         graph = self._predictor_graphs.get(key)
         if graph is None:
             if len(self._predictor_graphs) >= _PREDICTOR_GRAPH_MAX_KEYS:
-                return None
+                return self._log_predictor_graph_miss("key_table_full", batch_size)
             try:
                 graph = _PredictorDecodeGraph(
                     self,
