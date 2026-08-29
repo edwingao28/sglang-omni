@@ -19,6 +19,10 @@ _MISSING = object()
 # multiple of the real token count.
 _PREFILL_PADDING_FACTOR = 2
 
+# Prefill backends that capture graphs and consume the shared input-embeds
+# sidecar; both use aggregate-token buckets.
+PREFILL_GRAPH_BACKENDS = (CudaGraphBackend.BREAKABLE, CudaGraphBackend.FULL)
+
 
 def get_decode_cuda_graph_max_bs(server_args: Any) -> Any:
     """Read the resolved SGLang decode CUDA Graph batch cap."""
@@ -183,7 +187,7 @@ def build_generation_batch_overrides(
     if (
         prefill_bs is None
         and prefill_max_bs is not None
-        and overrides.get("cuda_graph_backend_prefill") == CudaGraphBackend.BREAKABLE
+        and overrides.get("cuda_graph_backend_prefill") in PREFILL_GRAPH_BACKENDS
     ):
         prefill_max_bs = clamp_prefill_cuda_graph_max_bs(overrides)
         prefill_bs = build_default_prefill_cuda_graph_bs(prefill_max_bs)
@@ -287,8 +291,8 @@ def _validate_prefill_graph_policy(
     cuda_graph_enabled: bool,
     errors: list[str],
 ) -> None:
-    """Validate the declared prefill CUDA graph policy: breakable backend
-    only, with explicitly declared buckets."""
+    """Validate the declared prefill CUDA graph policy: breakable or full
+    backend, with explicitly declared buckets."""
     backend = get_prefill_cuda_graph_backend(server_args)
     if backend == CudaGraphBackend.DISABLED:
         return
@@ -299,10 +303,10 @@ def _validate_prefill_graph_policy(
             f"(backend={backend!r} with disable_cuda_graph)"
         )
         return
-    if backend != CudaGraphBackend.BREAKABLE:
+    if backend not in PREFILL_GRAPH_BACKENDS:
         errors.append(
-            "prefill CUDA graph backend must be 'breakable' or 'disabled', "
-            f"got {backend!r}"
+            "prefill CUDA graph backend must be 'breakable', 'full' or "
+            f"'disabled', got {backend!r}"
         )
         return
 
@@ -315,13 +319,13 @@ def _validate_prefill_graph_policy(
     for feature, is_active in incompatibilities:
         if is_active:
             errors.append(
-                f"breakable prefill CUDA graphs are incompatible with {feature}; "
+                f"prefill CUDA graphs are incompatible with {feature}; "
                 "set cuda_graph_backend_prefill='disabled'"
             )
 
     if ("prefill", "bs") not in server_args._cuda_graph_config_locked:
         errors.append(
-            "breakable prefill CUDA graphs require explicit "
+            "prefill CUDA graphs require explicit "
             "cuda_graph_bs_prefill buckets (sglang's generated ladder is "
             "not an accepted shape policy)"
         )

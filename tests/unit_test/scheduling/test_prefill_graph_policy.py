@@ -63,16 +63,17 @@ def _validate(server_args: SimpleNamespace) -> None:
     )
 
 
-def test_prefill_policy_accepts_disabled_and_declared_breakable() -> None:
+def test_prefill_policy_accepts_disabled_and_declared_backends() -> None:
     _validate(_server_args())
-    _validate(
-        _server_args(
-            prefill_backend="breakable",
-            prefill_bs=(128, 256, 512),
-            prefill_max_bs=512,
-            locked=_PREFILL_BS_LOCKED,
+    for backend in ("breakable", "full"):
+        _validate(
+            _server_args(
+                prefill_backend=backend,
+                prefill_bs=(128, 256, 512),
+                prefill_max_bs=512,
+                locked=_PREFILL_BS_LOCKED,
+            )
         )
-    )
 
 
 def test_breakable_requires_cuda_graphs_enabled() -> None:
@@ -87,16 +88,15 @@ def test_breakable_requires_cuda_graphs_enabled() -> None:
         )
 
 
-def test_non_breakable_prefill_backend_is_rejected() -> None:
-    for backend in ("full", "tc_piecewise"):
-        with pytest.raises(ValueError, match="must be 'breakable'"):
-            _validate(
-                _server_args(
-                    prefill_backend=backend,
-                    prefill_bs=(128,),
-                    locked=_PREFILL_BS_LOCKED,
-                )
+def test_uncapturable_prefill_backend_is_rejected() -> None:
+    with pytest.raises(ValueError, match="must be 'breakable', 'full'"):
+        _validate(
+            _server_args(
+                prefill_backend="tc_piecewise",
+                prefill_bs=(128,),
+                locked=_PREFILL_BS_LOCKED,
             )
+        )
 
 
 def test_breakable_requires_explicit_buckets() -> None:
@@ -225,6 +225,20 @@ def test_breakable_prefill_cap_builds_the_shared_default_ladder() -> None:
         max_running_requests=4,
         server_args_overrides={
             "cuda_graph_backend_prefill": "breakable",
+            "cuda_graph_max_bs_prefill": 512,
+        },
+    )
+
+    assert overrides["cuda_graph_bs_prefill"] == (
+        build_default_prefill_cuda_graph_bs(512)
+    )
+
+
+def test_full_prefill_cap_builds_the_shared_default_ladder() -> None:
+    overrides = build_generation_batch_overrides(
+        max_running_requests=4,
+        server_args_overrides={
+            "cuda_graph_backend_prefill": "full",
             "cuda_graph_max_bs_prefill": 512,
         },
     )
@@ -569,7 +583,7 @@ def test_builder_rejects_breakable_without_model_opt_in(monkeypatch) -> None:
             del model
             return object(), object()
 
-    with pytest.raises(RuntimeError, match="has not adopted the breakable prefill"):
+    with pytest.raises(RuntimeError, match="has not adopted the prefill"):
         NonAdoptingBuilder().build(
             "model",
             server_args_overrides={

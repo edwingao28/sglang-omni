@@ -990,10 +990,12 @@ def test_qwen_thinker_cuda_graph_capture_lifecycle(
     assert scheduler.server_args is server_args
 
 
+@pytest.mark.parametrize("prefill_backend", ["breakable", "full"])
 @pytest.mark.parametrize("speech_enabled", [False, True])
-def test_qwen_thinker_enables_and_attests_breakable_prefill_graphs(
+def test_qwen_thinker_enables_and_attests_prefill_graphs(
     monkeypatch: pytest.MonkeyPatch,
     speech_enabled: bool,
+    prefill_backend: str,
 ) -> None:
     from sglang.srt.utils import hf_transformers_utils
 
@@ -1003,14 +1005,13 @@ def test_qwen_thinker_enables_and_attests_breakable_prefill_graphs(
     )
     from sglang_omni.scheduling import bootstrap as scheduling_bootstrap
     from sglang_omni.scheduling import omni_scheduler, sglang_backend
-    from sglang_omni.scheduling.generation_batch_policy import CudaGraphBackend
     from sglang_omni.utils import cuda_graph_batch_validator
 
     server_args = SimpleNamespace(
         disable_cuda_graph=False,
         enable_return_hidden_states=False,
         cuda_graph_config=SimpleNamespace(
-            prefill=SimpleNamespace(backend=CudaGraphBackend.BREAKABLE)
+            prefill=SimpleNamespace(backend=prefill_backend)
         ),
     )
     captured: dict[str, object] = {}

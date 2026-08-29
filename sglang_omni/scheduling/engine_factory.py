@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from sglang_omni.scheduling.generation_batch_policy import (
+    PREFILL_GRAPH_BACKENDS,
     CudaGraphBackend,
     build_generation_batch_overrides,
     get_prefill_cuda_graph_backend,
@@ -113,13 +114,15 @@ class SGLangGenerationEngineBuilder(ABC):
             # resolution; a model-qualified stage default must stay eligible
             # for it.
             server_args._cuda_graph_config_locked.discard(("prefill", "backend"))
-        if prefill_graph_backend == CudaGraphBackend.BREAKABLE:
+        if prefill_graph_backend in PREFILL_GRAPH_BACKENDS:
+            # Note (wenyao): breakable and full share the input-embeds sidecar
+            # contract, so one adoption flag covers both.
             if not self.supports_breakable_prefill_cuda_graph:
                 raise RuntimeError(
-                    f"{self.model_name} has not adopted the breakable prefill "
-                    "CUDA graph contract "
+                    f"{self.model_name} has not adopted the prefill "
+                    "CUDA graph input-embeds contract "
                     "(supports_breakable_prefill_cuda_graph=False); refusing "
-                    "cuda_graph_backend_prefill='breakable'"
+                    f"cuda_graph_backend_prefill={prefill_graph_backend!r}"
                 )
             infra_kwargs.setdefault("enable_prefill_input_embeds", True)
         want_cuda_graph, (
