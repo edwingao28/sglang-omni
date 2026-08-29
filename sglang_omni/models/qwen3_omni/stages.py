@@ -930,11 +930,7 @@ def create_audio_encoder_executor(
         dtype=dtype,
         enable_layer_cuda_graph=enable_layer_cuda_graph,
     )
-    cache = StageOutputCache(
-        max_size=QWEN3_ENCODER_CACHE_MAX_ENTRIES,
-        max_bytes=QWEN3_ENCODER_CACHE_MAX_BYTES,
-        cache_device="cpu",
-    )
+    cache = None
 
     def _encode(payload: StagePayload) -> StagePayload:
         _emit_event(
