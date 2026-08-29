@@ -37,6 +37,12 @@ class Qwen3OmniThinkerForCausalLM(nn.Module):
         self.root_config = config
         self.thinker_config = getattr(config, "thinker_config", config)
         self.config = getattr(self.thinker_config, "text_config", self.thinker_config)
+        # Note (wenyao): BCG prefill capture selects mrope positions off this
+        # attr; without it the graph bakes the 1-D rope path while eager runs
+        # the fused 2-D mrope kernel.
+        self.is_mrope_enabled = "mrope_section" in (
+            getattr(self.config, "rope_scaling", None) or {}
+        )
 
         self.model = Qwen3MoeLLMModel(
             config=self.config,
