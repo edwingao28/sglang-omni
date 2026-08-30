@@ -8,6 +8,57 @@ from typing import Any, Sequence
 
 logger = logging.getLogger(__name__)
 
+_HYBRID_PREFILL_BACKEND = "hybrid"
+_HYBRID_FULL_BS_KEY = "cuda_graph_bs_prefill_full"
+
+
+def extract_hybrid_prefill_overrides(
+    server_args_overrides: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, list[int] | None]:
+    """Rewrite prefill ``backend: hybrid`` into the BREAKABLE config SGLang sees.
+
+    ``hybrid`` is an omni-level policy: ServerArgs gets a plain BREAKABLE
+    prefill config (the production small-batch path), and the FULL big-bucket
+    ladder (``cuda_graph_bs_prefill_full``) is returned for a second capture
+    after attestation. Returns ``(overrides, None)`` untouched when hybrid is
+    not selected.
+    """
+    from sglang_omni.scheduling.generation_batch_policy import (
+        CudaGraphBackend,
+        nested_prefill_overrides,
+    )
+
+    if (
+        server_args_overrides
+        and server_args_overrides.get("cuda_graph_backend_prefill")
+        == _HYBRID_PREFILL_BACKEND
+    ):
+        raise ValueError(
+            "backend 'hybrid' must be set via cuda_graph_config prefill, "
+            "not cuda_graph_backend_prefill"
+        )
+    nested = nested_prefill_overrides(server_args_overrides or {})
+    if nested.get("backend") != _HYBRID_PREFILL_BACKEND:
+        if server_args_overrides and _HYBRID_FULL_BS_KEY in server_args_overrides:
+            raise ValueError(
+                f"{_HYBRID_FULL_BS_KEY} requires cuda_graph_config prefill "
+                f"backend {_HYBRID_PREFILL_BACKEND!r}"
+            )
+        return server_args_overrides, None
+    overrides = dict(server_args_overrides)
+    full_bs = overrides.pop(_HYBRID_FULL_BS_KEY, None)
+    if not full_bs:
+        raise ValueError(
+            f"cuda_graph_config prefill backend {_HYBRID_PREFILL_BACKEND!r} "
+            f"requires {_HYBRID_FULL_BS_KEY} buckets"
+        )
+    config = dict(overrides["cuda_graph_config"])
+    prefill = dict(config["prefill"])
+    prefill["backend"] = CudaGraphBackend.BREAKABLE
+    config["prefill"] = prefill
+    overrides["cuda_graph_config"] = config
+    return overrides, [int(b) for b in full_bs]
+
 
 class HybridPrefillGraphRouter:
     """Route prefill graph replay by batch shape across two runners.
