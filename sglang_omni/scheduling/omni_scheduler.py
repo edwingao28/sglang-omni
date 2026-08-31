@@ -21,6 +21,7 @@ import types
 from array import array
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import nullcontext
 from itertools import islice
 from typing import Any, Callable
 
@@ -49,6 +50,7 @@ from sglang_omni.profiler.event_recorder import (
     emit_model_path_start as _emit_model_path_start,
 )
 from sglang_omni.profiler.event_recorder import get_active_stage as _get_active_stage
+from sglang_omni.profiler.event_recorder import set_active_stage as _set_active_stage
 from sglang_omni.proto.admin import (
     ADMIN_CONTINUE_GENERATION,
     ADMIN_DESTROY_WEIGHTS_UPDATE_GROUP,
@@ -195,6 +197,7 @@ class OmniScheduler:
         prefill_coalesce_after_builds_during_decode: bool = False,
         request_build_max_workers: int = 1,
         request_build_max_pending: int | None = None,
+        request_ingest_thread: bool = False,
         shutdown_callback: Callable[[], None] | None = None,
     ):
         self.inbox: _queue_mod.Queue[IncomingMessage] = _queue_mod.Queue()
@@ -245,6 +248,25 @@ class OmniScheduler:
             self.request_build_max_pending = 0
             self._request_build_backlog_limit = 0
             self._request_build_executor = None
+        self.request_ingest_thread = bool(request_ingest_thread)
+        if self.request_ingest_thread and int(server_args.tp_size) > 1:
+            logger.warning(
+                "OmniScheduler request-ingest thread is disabled for "
+                f"tp_size={server_args.tp_size}: the drained inbox is "
+                "broadcast to TP followers, which requires loop-thread drain "
+                "ordering"
+            )
+            self.request_ingest_thread = False
+        self._ingest_thread: threading.Thread | None = None
+        self._ingest_handoff: deque[IncomingMessage] = deque()
+        # Note (wenyao): with the ingest thread on, stream-ingress state is
+        # written from two threads; the admission lock covers it. Off keeps
+        # today's lock-free single-thread path.
+        self._stream_ingress_lock = (
+            self._request_admission_lock
+            if self.request_ingest_thread
+            else nullcontext()
+        )
         self._pending_request_builds: dict[str, tuple[Any, bool, Future]] = {}
         self._pending_request_admissions: dict[
             str, tuple[Any, bool, DeferredAdmission]
@@ -802,7 +824,11 @@ class OmniScheduler:
 
             if msg.type == "new_request":
                 self._completed_request_ids.pop(msg.request_id, None)
-                new_reqs.append(msg.data)
+                # Note (wenyao): with the ingest thread on, the payload was
+                # already handled there; the handed-off message only carries
+                # the tombstone pop in arrival order vs stream messages.
+                if not self.request_ingest_thread:
+                    new_reqs.append(msg.data)
             elif msg.type == "stream_chunk":
                 self._on_stream_chunk(msg.request_id, msg.data)
             elif msg.type == "stream_done":
@@ -824,6 +850,11 @@ class OmniScheduler:
 
     def _drain_local_inbox(self) -> list[IncomingMessage]:
         recv_msgs: list[IncomingMessage] = []
+        if self.request_ingest_thread:
+            handoff = self._ingest_handoff
+            while handoff:
+                recv_msgs.append(handoff.popleft())
+            return recv_msgs
         while True:
             try:
                 recv_msgs.append(self.inbox.get_nowait())
@@ -850,27 +881,15 @@ class OmniScheduler:
             if self._waiting_queue_is_full():
                 self._reject_queue_full(payload)
                 continue
-            ingress = self._pending_stream_ingress.get(req_id)
-            buffered_chunks: list[Any] = []
-            if ingress is not None and ingress.chunks:
-                # Move chunks onto the payload; the entry (and its done flag)
-                # stays until the built request consumes it, so a deferred
-                # recheck re-derives prefetched_stream_done from the same spot.
-                buffered_chunks = ingress.chunks
-                ingress.chunks = []
-            existing_chunks = list(payload.prefetched_chunks)
-            if existing_chunks:
-                existing_chunks.extend(buffered_chunks)
-                payload.prefetched_chunks = existing_chunks
-            else:
-                payload.prefetched_chunks = buffered_chunks
-            pending_stream_done = ingress.done if ingress is not None else False
-            payload.prefetched_stream_done = pending_stream_done
-            if not self._is_request_build_ready(
-                payload,
-                pending_stream_done=pending_stream_done,
-            ):
-                self._deferred_request_payloads[req_id] = payload
+            with self._stream_ingress_lock:
+                pending_stream_done = self._attach_pending_stream_ingress(payload)
+                deferred = not self._is_request_build_ready(
+                    payload,
+                    pending_stream_done=pending_stream_done,
+                )
+                if deferred:
+                    self._deferred_request_payloads[req_id] = payload
+            if deferred:
                 continue
             active_stage = _get_active_stage()
             request_build_executor = self._request_build_executor
@@ -934,6 +953,111 @@ class OmniScheduler:
             event_name="scheduler_request_build_end",
         )
         return req_data
+
+    def _attach_pending_stream_ingress(self, payload: Any) -> bool:
+        ingress = self._pending_stream_ingress.get(payload.request_id)
+        buffered_chunks: list[Any] = []
+        if ingress is not None and ingress.chunks:
+            # Move chunks onto the payload; the entry (and its done flag)
+            # stays until the built request consumes it, so a deferred
+            # recheck re-derives prefetched_stream_done from the same spot.
+            buffered_chunks = ingress.chunks
+            ingress.chunks = []
+        existing_chunks = list(payload.prefetched_chunks)
+        if existing_chunks:
+            existing_chunks.extend(buffered_chunks)
+            payload.prefetched_chunks = existing_chunks
+        else:
+            payload.prefetched_chunks = buffered_chunks
+        pending_stream_done = ingress.done if ingress is not None else False
+        payload.prefetched_stream_done = pending_stream_done
+        return pending_stream_done
+
+    def _start_request_ingest_thread(self) -> None:
+        if not self.request_ingest_thread:
+            return
+        active_stage = _get_active_stage()
+
+        def _run() -> None:
+            _set_active_stage(active_stage)
+            self._request_ingest_loop()
+
+        self._ingest_thread = threading.Thread(
+            target=_run,
+            name="omni-request-ingest",
+            daemon=True,
+        )
+        self._ingest_thread.start()
+
+    def _stop_request_ingest_thread(self) -> None:
+        thread = self._ingest_thread
+        if thread is None:
+            return
+        thread.join(timeout=2.0)
+        self._ingest_thread = None
+
+    def _request_ingest_loop(self) -> None:
+        while self._running:
+            try:
+                msg = self.inbox.get(timeout=0.05)
+            except _queue_mod.Empty:
+                continue
+            try:
+                self._ingest_incoming_message(msg)
+            except Exception:
+                logger.exception(
+                    "OmniScheduler: request ingest failed for %s", msg.request_id
+                )
+
+    def _ingest_incoming_message(self, msg: IncomingMessage) -> None:
+        if msg.type != "new_request":
+            self._ingest_handoff.append(msg)
+            return
+        payload = msg.data
+        req_id = msg.request_id
+        future: Future | None = None
+        reject = False
+        with self._request_admission_lock:
+            if (
+                req_id in self._aborted_request_ids
+                or req_id in self._pending_request_builds
+                or req_id in self._pending_request_admissions
+            ):
+                return
+            # Note (wenyao): handed off so the loop pops the completed-request
+            # tombstone in arrival order relative to stream messages.
+            self._ingest_handoff.append(msg)
+            if self._waiting_queue_is_full():
+                reject = True
+            else:
+                pending_stream_done = self._attach_pending_stream_ingress(payload)
+                if not self._is_request_build_ready(
+                    payload,
+                    pending_stream_done=pending_stream_done,
+                ):
+                    self._deferred_request_payloads[req_id] = payload
+                    return
+                future = Future()
+                self._pending_request_builds[req_id] = (
+                    payload,
+                    pending_stream_done,
+                    future,
+                )
+                self._request_build_max_pending_observed = max(
+                    self._request_build_max_pending_observed,
+                    len(self._pending_request_builds),
+                )
+        if reject:
+            self._reject_queue_full(payload)
+            return
+        if not future.set_running_or_notify_cancel():
+            return
+        try:
+            req_data = self._run_request_builder(payload, _get_active_stage())
+        except Exception as exc:
+            future.set_exception(exc)
+            return
+        future.set_result(req_data)
 
     def _sleep_during_idle(self) -> None:
         with self._request_admission_lock:
@@ -1250,13 +1374,14 @@ class OmniScheduler:
     def _take_deferred_request_payloads(self) -> list[Any]:
         if not self._dirty_deferred_request_ids:
             return []
-        deferred: list[Any] = []
-        for req_id in list(self._dirty_deferred_request_ids):
-            payload = self._deferred_request_payloads.pop(req_id, None)
-            if payload is not None:
-                deferred.append(payload)
-        self._dirty_deferred_request_ids.clear()
-        return deferred
+        with self._stream_ingress_lock:
+            deferred: list[Any] = []
+            for req_id in list(self._dirty_deferred_request_ids):
+                payload = self._deferred_request_payloads.pop(req_id, None)
+                if payload is not None:
+                    deferred.append(payload)
+            self._dirty_deferred_request_ids.clear()
+            return deferred
 
     def _should_recheck_deferred_request_on_stream_chunk(
         self, request_id: str, chunk: Any
@@ -1694,15 +1819,18 @@ class OmniScheduler:
         if req_data is not None:
             self._append_stream_chunk(req_data, chunk)
             return
-        self._reserve_pending_stream_request(request_id)
-        self._pending_stream_ingress.setdefault(
-            request_id, _PendingStreamIngress()
-        ).chunks.append(chunk)
-        if (
-            request_id in self._deferred_request_payloads
-            and self._should_recheck_deferred_request_on_stream_chunk(request_id, chunk)
-        ):
-            self._dirty_deferred_request_ids.add(request_id)
+        with self._stream_ingress_lock:
+            self._reserve_pending_stream_request(request_id)
+            self._pending_stream_ingress.setdefault(
+                request_id, _PendingStreamIngress()
+            ).chunks.append(chunk)
+            if (
+                request_id in self._deferred_request_payloads
+                and self._should_recheck_deferred_request_on_stream_chunk(
+                    request_id, chunk
+                )
+            ):
+                self._dirty_deferred_request_ids.add(request_id)
 
     def _on_stream_done(self, request_id: str) -> None:
         if request_id in self._completed_request_ids:
@@ -1711,16 +1839,18 @@ class OmniScheduler:
         if req_data is not None:
             self._mark_stream_done(req_data)
             return
-        self._reserve_pending_stream_request(request_id)
-        self._pending_stream_ingress.setdefault(
-            request_id, _PendingStreamIngress()
-        ).done = True
-        if request_id in self._deferred_request_payloads:
-            self._dirty_deferred_request_ids.add(request_id)
+        with self._stream_ingress_lock:
+            self._reserve_pending_stream_request(request_id)
+            self._pending_stream_ingress.setdefault(
+                request_id, _PendingStreamIngress()
+            ).done = True
+            if request_id in self._deferred_request_payloads:
+                self._dirty_deferred_request_ids.add(request_id)
 
     def start(self) -> None:
         self._scheduler_thread_id = threading.get_ident()
         self._running = True
+        self._start_request_ingest_thread()
         model_path_status = "error"
         try:
             if self.enable_async_decode:
@@ -1734,6 +1864,7 @@ class OmniScheduler:
             self._emit_remaining_model_path_ends(status=model_path_status)
             self._scheduler_thread_id = None
             try:
+                self._stop_request_ingest_thread()
                 self._shutdown_request_build_executor()
             finally:
                 self._discard_pending_request_admissions()
@@ -2575,6 +2706,11 @@ class OmniScheduler:
                 self.self_check_during_busy()
 
     def _drain_inbox_for_request(self, request_id: str) -> None:
+        if self.request_ingest_thread:
+            # Note (wenyao): the ingest thread owns inbox consumption; racing
+            # a drain here can reorder a live request's stream chunks. Stale
+            # messages are dropped by the _aborted_request_ids checks instead.
+            return
         retained: list[IncomingMessage] = []
         while True:
             try:

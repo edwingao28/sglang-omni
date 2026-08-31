@@ -5,9 +5,11 @@ from __future__ import annotations
 import collections
 import gc
 import threading
+import time
 import weakref
 from array import array
 from collections import deque
+from contextlib import nullcontext
 from queue import Queue
 from types import SimpleNamespace
 
@@ -46,6 +48,9 @@ def _ingress(
 
 def _init_sync_request_build_state(scheduler: OmniScheduler) -> None:
     scheduler._request_admission_lock = threading.RLock()
+    scheduler.request_ingest_thread = False
+    scheduler._stream_ingress_lock = nullcontext()
+    scheduler._ingest_handoff = deque()
     scheduler._request_build_executor = None
     scheduler.request_build_max_pending = 0
     scheduler._pending_request_builds = {}
@@ -241,6 +246,7 @@ def test_take_deferred_request_payloads_is_event_driven() -> None:
     scheduler.waiting_queue = []
     scheduler._completed_request_ids = {}
     scheduler._pending_stream_ingress = {}
+    scheduler._stream_ingress_lock = nullcontext()
     payload = object()
     scheduler._deferred_request_payloads = {"req-deferred": payload}
     scheduler._dirty_deferred_request_ids = set()
@@ -1673,6 +1679,7 @@ def test_completed_request_id_is_cleared_on_explicit_readmission() -> None:
     scheduler._aborted_request_ids = set()
     scheduler._completed_request_ids = {"req-complete": None}
     scheduler._pending_stream_ingress = {}
+    scheduler.request_ingest_thread = False
     scheduler.inbox = Queue()
     scheduler.inbox.put(
         IncomingMessage(
@@ -1702,6 +1709,7 @@ def test_pending_stream_requests_are_bounded(monkeypatch, caplog) -> None:
     scheduler._pending_stream_ingress = {}
     scheduler._deferred_request_payloads = {}
     scheduler._dirty_deferred_request_ids = set()
+    scheduler._stream_ingress_lock = nullcontext()
 
     for index in range(4):
         scheduler._on_stream_chunk(f"req-{index}", index)
@@ -1863,6 +1871,7 @@ def _construct_omni_scheduler(
     *,
     return_runtime_context: bool = False,
     server_max_queued_requests: int | None = 7,
+    server_tp_size: int = 1,
     **kwargs,
 ) -> OmniScheduler | tuple[OmniScheduler, object]:
     """Build an OmniScheduler over the minimum stub surface __init__ touches."""
@@ -1931,7 +1940,7 @@ def _construct_omni_scheduler(
         device=torch.device("cpu"),
     )
     server_args = SimpleNamespace(
-        tp_size=1,
+        tp_size=server_tp_size,
         pp_size=1,
         dp_size=1,
         moe_dp_size=1,
@@ -2044,6 +2053,112 @@ def test_request_build_backlog_honors_configured_queue_limit(monkeypatch) -> Non
     assert len(selected) == 16
     assert len(scheduler._backlogged_request_build_payloads) == 0
     assert len(rejected) == 24
+
+
+def test_request_ingest_thread_forced_off_for_tp(monkeypatch) -> None:
+    scheduler = _construct_omni_scheduler(
+        monkeypatch,
+        server_tp_size=2,
+        request_ingest_thread=True,
+    )
+    assert scheduler.request_ingest_thread is False
+    assert isinstance(scheduler._stream_ingress_lock, nullcontext)
+
+
+def test_request_ingest_thread_builds_and_admits_end_to_end(monkeypatch) -> None:
+    events: list[dict] = []
+    monkeypatch.setattr(
+        "sglang_omni.scheduling.omni_scheduler._emit_event",
+        lambda **kwargs: events.append(kwargs),
+    )
+    scheduler = _construct_omni_scheduler(
+        monkeypatch,
+        request_ingest_thread=True,
+    )
+    assert scheduler.request_ingest_thread is True
+    req = SimpleNamespace(
+        rid="req-ingest",
+        origin_input_ids=[1, 2, 3],
+        origin_input_ids_unpadded=[1, 2, 3],
+        sampling_params=SimpleNamespace(max_new_tokens=1, min_new_tokens=0),
+        output_ids=[],
+        priority=None,
+    )
+    built_on: list[str] = []
+
+    def _builder(payload):
+        built_on.append(threading.current_thread().name)
+        return SimpleNamespace(req=req, enforce_request_limits=False, max_new_tokens=1)
+
+    scheduler._request_builder = _builder
+
+    scheduler.inbox.put(
+        IncomingMessage(request_id="req-ingest", type="new_request", data=_new_stage_payload("req-ingest"))
+    )
+    scheduler._completed_request_ids["req-ingest"] = None
+    scheduler._running = True
+    scheduler._start_request_ingest_thread()
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            with scheduler._request_admission_lock:
+                pending = scheduler._pending_request_builds.get("req-ingest")
+            if pending is not None and pending[2].done():
+                break
+            time.sleep(0.005)
+        assert pending is not None and pending[2].done()
+    finally:
+        scheduler._running = False
+        scheduler._stop_request_ingest_thread()
+    assert scheduler._ingest_thread is None
+    assert built_on == ["omni-request-ingest"]
+
+    new_reqs = scheduler.recv_requests()
+    assert new_reqs == []
+    assert "req-ingest" not in scheduler._completed_request_ids
+
+    scheduler.process_input_requests(new_reqs)
+    assert scheduler.waiting_queue == [req]
+    names = [event["event_name"] for event in events]
+    assert names.index("scheduler_request_build_end") < names.index(
+        "scheduler_queue_enter"
+    )
+
+
+def test_request_ingest_routes_non_build_messages_in_order(monkeypatch) -> None:
+    scheduler = _construct_omni_scheduler(
+        monkeypatch,
+        request_ingest_thread=True,
+    )
+    chunk_msg = IncomingMessage(request_id="req-a", type="stream_chunk", data="chunk-0")
+    scheduler._ingest_incoming_message(chunk_msg)
+    assert list(scheduler._ingest_handoff) == [chunk_msg]
+
+    payload = _new_stage_payload("req-b")
+    build_msg = IncomingMessage(request_id="req-b", type="new_request", data=payload)
+    scheduler._request_builder = lambda _payload: SimpleNamespace(
+        req=SimpleNamespace(
+            rid="req-b",
+            origin_input_ids=[1],
+            origin_input_ids_unpadded=[1],
+            sampling_params=SimpleNamespace(max_new_tokens=1, min_new_tokens=0),
+            output_ids=[],
+            priority=None,
+        ),
+        enforce_request_limits=False,
+        max_new_tokens=1,
+    )
+    scheduler._ingest_incoming_message(build_msg)
+    assert list(scheduler._ingest_handoff) == [chunk_msg, build_msg]
+    assert scheduler._pending_request_builds["req-b"][2].done()
+
+    aborted_msg = IncomingMessage(
+        request_id="req-c", type="new_request", data=_new_stage_payload("req-c")
+    )
+    scheduler._aborted_request_ids.add("req-c")
+    scheduler._ingest_incoming_message(aborted_msg)
+    assert list(scheduler._ingest_handoff) == [chunk_msg, build_msg]
+    assert "req-c" not in scheduler._pending_request_builds
 
 
 @pytest.mark.parametrize(
@@ -2332,6 +2447,8 @@ def test_omni_scheduler_start_closes_active_model_paths(
     scheduler._pending_request_admissions = {}
     scheduler._shutdown_lock = threading.Lock()
     scheduler._shutdown_callback = None
+    scheduler.request_ingest_thread = False
+    scheduler._ingest_thread = None
 
     def run_loop() -> None:
         if loop_error is not None:

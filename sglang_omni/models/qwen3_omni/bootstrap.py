@@ -19,6 +19,7 @@ def create_thinker_scheduler(
     prefill_coalesce_requests: int = 0,
     prefill_coalesce_wait_ms: float = 60.0,
     prefill_coalesce_when_idle: bool = False,
+    request_ingest_thread: bool = False,
     hybrid_full_bs: list[int] | None = None,
 ):
     """Create the Qwen thinker scheduler."""
@@ -137,6 +138,7 @@ def create_thinker_scheduler(
         prefill_coalesce_requests=prefill_coalesce_requests,
         prefill_coalesce_wait_ms=prefill_coalesce_wait_ms,
         prefill_coalesce_when_idle=prefill_coalesce_when_idle,
+        request_ingest_thread=request_ingest_thread,
     )
 
 
