@@ -225,6 +225,22 @@ class OmniScheduler:
                 "admission order on every TP rank"
             )
             self.request_build_max_workers = 1
+        self.request_ingest_thread = bool(request_ingest_thread)
+        if self.request_ingest_thread and int(server_args.tp_size) > 1:
+            logger.warning(
+                "OmniScheduler request-ingest thread is disabled for "
+                f"tp_size={server_args.tp_size}: the drained inbox is "
+                "broadcast to TP followers, which requires loop-thread drain "
+                "ordering"
+            )
+            self.request_ingest_thread = False
+        if self.request_build_max_workers > 1 and self.request_ingest_thread:
+            logger.warning(
+                "OmniScheduler request-build workers are disabled with "
+                "request_ingest_thread=True: the ingest thread builds "
+                "requests inline and bypasses the build executor"
+            )
+            self.request_build_max_workers = 1
         if self.request_build_max_workers > 1:
             max_pending = (
                 self.request_build_max_workers
@@ -248,15 +264,6 @@ class OmniScheduler:
             self.request_build_max_pending = 0
             self._request_build_backlog_limit = 0
             self._request_build_executor = None
-        self.request_ingest_thread = bool(request_ingest_thread)
-        if self.request_ingest_thread and int(server_args.tp_size) > 1:
-            logger.warning(
-                "OmniScheduler request-ingest thread is disabled for "
-                f"tp_size={server_args.tp_size}: the drained inbox is "
-                "broadcast to TP followers, which requires loop-thread drain "
-                "ordering"
-            )
-            self.request_ingest_thread = False
         self._ingest_thread: threading.Thread | None = None
         self._ingest_handoff: deque[IncomingMessage] = deque()
         # Note (wenyao): with the ingest thread on, stream-ingress state is
@@ -993,6 +1000,9 @@ class OmniScheduler:
         thread = self._ingest_thread
         if thread is None:
             return
+        # Note (wenyao): the loop may exit by exception with _running still
+        # True; clear it here so the ingest thread always stops.
+        self._running = False
         thread.join(timeout=2.0)
         self._ingest_thread = None
 
@@ -1004,10 +1014,13 @@ class OmniScheduler:
                 continue
             try:
                 self._ingest_incoming_message(msg)
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "OmniScheduler: request ingest failed for %s", msg.request_id
                 )
+                if msg.type == "new_request":
+                    self._emit_request_error(msg.request_id, exc)
+                    self.abort(msg.request_id)
 
     def _ingest_incoming_message(self, msg: IncomingMessage) -> None:
         if msg.type != "new_request":
@@ -1018,9 +1031,13 @@ class OmniScheduler:
         future: Future | None = None
         reject = False
         with self._request_admission_lock:
+            if req_id in self._aborted_request_ids:
+                # No handoff message will pop the tombstone; safe to pop here
+                # since :822 keeps dropping this rid's stream messages.
+                self._completed_request_ids.pop(req_id, None)
+                return
             if (
-                req_id in self._aborted_request_ids
-                or req_id in self._pending_request_builds
+                req_id in self._pending_request_builds
                 or req_id in self._pending_request_admissions
             ):
                 return
@@ -1030,6 +1047,11 @@ class OmniScheduler:
             if self._waiting_queue_is_full():
                 reject = True
             else:
+                # Note (wenyao): stream messages still queued in
+                # _ingest_handoff are invisible here. Thinker-safe (its
+                # builder ignores prefetched_chunks; they converge at
+                # _enqueue_built_request); a builder that consumes
+                # prefetched_chunks (talker) must not use this path.
                 pending_stream_done = self._attach_pending_stream_ingress(payload)
                 if not self._is_request_build_ready(
                     payload,
@@ -1049,6 +1071,9 @@ class OmniScheduler:
                 )
         if reject:
             self._reject_queue_full(payload)
+            # The abort makes the loop skip this rid's handoff message, so
+            # its tombstone pop never runs; pop here instead.
+            self._completed_request_ids.pop(req_id, None)
             return
         if not future.set_running_or_notify_cancel():
             return
@@ -1295,7 +1320,8 @@ class OmniScheduler:
             self.abort(req_id)
             return
         self._initialize_request_stream_state(req_data, payload)
-        ingress = self._pending_stream_ingress.pop(req_id, None)
+        with self._stream_ingress_lock:
+            ingress = self._pending_stream_ingress.pop(req_id, None)
         if ingress is not None:
             for chunk in ingress.chunks:
                 self._append_stream_chunk(req_data, chunk)
@@ -1936,9 +1962,10 @@ class OmniScheduler:
             self.waiting_queue = waiting_queue
         if not running_abort:
             self._run_abort_callback(request_id)
-        self._pending_stream_ingress.pop(request_id, None)
-        self._deferred_request_payloads.pop(request_id, None)
-        self._dirty_deferred_request_ids.discard(request_id)
+        with self._stream_ingress_lock:
+            self._pending_stream_ingress.pop(request_id, None)
+            self._deferred_request_payloads.pop(request_id, None)
+            self._dirty_deferred_request_ids.discard(request_id)
         self._first_emit_done.discard(request_id)
         # Note: (Jiaxin Deng) emit before discarding, and discard whether or
         # not the request is still in a running batch. A running abort that

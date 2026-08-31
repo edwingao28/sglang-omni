@@ -443,6 +443,7 @@ def _enqueue_limit_scheduler(monkeypatch):
     scheduler._deferred_request_payloads = {}
     scheduler._pending_stream_ingress = {}
     scheduler._request_admission_lock = threading.RLock()
+    scheduler._stream_ingress_lock = nullcontext()
     scheduler._abort_callback = None
     aborts: list[str] = []
     scheduler.abort = lambda rid, *, defer_running_cleanup=True: aborts.append(rid)
@@ -2864,6 +2865,7 @@ def test_omni_scheduler_running_abort_does_not_leak_prefill_dedup_state(
     scheduler = object.__new__(OmniScheduler)
     scheduler._mark_running_request_aborted = lambda _rid: True
     scheduler._request_admission_lock = threading.Lock()
+    scheduler._stream_ingress_lock = nullcontext()
     scheduler._aborted_request_ids = set()
     scheduler._aborted_request_id_order = collections.deque()
     scheduler._pending_request_builds = {}
