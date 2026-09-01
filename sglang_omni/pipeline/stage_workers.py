@@ -172,6 +172,20 @@ def _patched_spawn_env(spec: StageWorkerProcessSpec):
                 env_default_updates[key] = value
 
     worker_process_env = _get_worker_process_env(spec)
+    # Note (wenyao): per-stage MPS SM cap via OMNI_MPS_PCT_<STAGE>; must override
+    # (not default) so a launcher-wide CUDA_MPS_ACTIVE_THREAD_PERCENTAGE loses.
+    mps_env: dict[str, str] = {}
+    for stage_spec in spec.stage_specs:
+        pct = os.environ.get(f"OMNI_MPS_PCT_{stage_spec.stage_name.upper()}")
+        if pct is None:
+            continue
+        existing = mps_env.get("CUDA_MPS_ACTIVE_THREAD_PERCENTAGE")
+        if existing is not None and existing != pct:
+            raise AssertionError(
+                f"Process {spec.process_name!r} has conflicting OMNI_MPS_PCT_* "
+                f"values: {existing!r} != {pct!r}"
+            )
+        mps_env["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] = pct
     compat_env_defaults = get_gpu_compat_env_defaults(
         {
             **os.environ,
@@ -183,6 +197,7 @@ def _patched_spawn_env(spec: StageWorkerProcessSpec):
         **env_default_updates,
         **compat_env_defaults,
         **worker_process_env,
+        **mps_env,
         "SGLANG_OMNI_PLATFORM_SPEC": get_platform_spec(current_platform),
     }
     backup = {key: os.environ.get(key) for key in updates}
