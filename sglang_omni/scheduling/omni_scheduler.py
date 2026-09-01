@@ -14,6 +14,7 @@ inheriting from ``SGLangScheduler``.
 from __future__ import annotations
 
 import logging
+import os
 import queue as _queue_mod
 import threading
 import time
@@ -1377,6 +1378,42 @@ class OmniScheduler:
         for req in batch.reqs:
             if req.output_ids and getattr(req, "_omni_prompt_only_radix", False):
                 req.skip_radix_cache_insert = True
+        if os.environ.get("OMNI_DEBUG_STOP") == "1":
+            self._debug_stop_trace(batch)
+
+    def _debug_stop_trace(self, batch) -> None:
+        # Note (wenyao): temp probe for MPS-cap no-EOS bug; logs terminator ids.
+        if not getattr(self, "_dbg_smc_logged", False):
+            self._dbg_smc_logged = True
+            try:
+                import torch as _t
+
+                logger.info(
+                    "[stoptrace] multi_processor_count=%s",
+                    _t.cuda.get_device_properties(0).multi_processor_count,
+                )
+            except Exception:
+                pass
+        for req in batch.reqs:
+            n = len(req.output_ids)
+            if req.finished():
+                logger.info(
+                    "[stoptrace] rid=%s FINISHED reason=%s n=%d tail=%s eos_set=%s stop_ids=%s tok_eos=%s",
+                    req.rid[-12:],
+                    req.finished_reason,
+                    n,
+                    req.output_ids[-8:],
+                    req.eos_token_ids,
+                    req.sampling_params.stop_token_ids,
+                    getattr(req.tokenizer, "eos_token_id", None),
+                )
+            elif n in (14, 16, 32, 64, 256):
+                logger.info(
+                    "[stoptrace] rid=%s n=%d tail=%s",
+                    req.rid[-12:],
+                    n,
+                    req.output_ids[-10:],
+                )
 
     def _stamp_batch_launch(self, batch) -> None:
         """Mirror upstream per-forward bookkeeping for custom runner paths."""
