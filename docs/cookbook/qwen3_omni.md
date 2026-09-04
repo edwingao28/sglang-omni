@@ -78,6 +78,10 @@ All input modality combinations work with both text-only and speech servers.
 
 Standard sampling parameters apply to the thinker stage. When `modalities` includes `"audio"`, the additional talker-specific parameters below control the speech generation independently.
 
+`talker_min_new_tokens` defaults to zero. Set it to a nonnegative value no larger
+than `talker_max_new_tokens` to suppress codec EOS until that many audio tokens
+have been generated. It counts codec tokens, not text tokens or audio samples.
+
 | Parameter | Type | Default | Applies to |
 |---|---|---|---|
 | `temperature` | float | `1.0` | Thinker |
@@ -103,6 +107,31 @@ Standard sampling parameters apply to the thinker stage. When `modalities` inclu
 | `video_min_pixels` | int | `null` | Minimum pixels per video frame |
 | `video_max_pixels` | int | `null` | Maximum pixels per video frame |
 | `video_total_pixels` | int | `null` | Total pixel budget across all video frames |
+
+### Pipeline warmup and preprocessing
+
+Speech deployments can run a synthetic voice-reference burst before the HTTP
+server accepts requests. Add the following to a speech pipeline YAML:
+
+```yaml
+boot_warmup_requests: 32
+stages:
+  preprocessing:
+    factory:
+      max_concurrency: 4
+```
+
+Warmup is disabled by default (`boot_warmup_requests: 0`). Enabling it adds startup
+work to exercise encoder, Thinker, Talker, and vocoder paths before real traffic.
+The requests use distinct reference tones and prompts to avoid cache hits.
+Failures are logged; a 180-second timeout cancels outstanding warmup requests and
+allows serving to proceed. Shutdown cancellation propagates after the streams
+and temporary reference files are released.
+
+Preprocessing defaults to four concurrent requests. Set `max_concurrency: 1`
+to restore serial admission when host resources are constrained. Warmup and
+concurrency should be evaluated with the deployment's own workload; warmup
+does not guarantee that every graph bucket or future input shape is exercised.
 
 ### Known Limitations
 

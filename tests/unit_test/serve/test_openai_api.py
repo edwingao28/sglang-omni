@@ -1212,6 +1212,30 @@ def test_chat_request_omits_explicit_params_when_sampling_omitted() -> None:
     assert EXPLICIT_GENERATION_PARAMS_KEY not in gen_req.metadata
 
 
+@pytest.mark.parametrize("minimum", [None, 0, 32])
+def test_chat_request_preserves_talker_minimum(minimum: int | None) -> None:
+    req = ChatCompletionRequest(
+        model="qwen3-omni",
+        messages=[{"role": "user", "content": "hello"}],
+        talker_min_new_tokens=minimum,
+        talker_max_new_tokens=32,
+    )
+    params = _build_chat_generate_request(req).extra_params
+    assert params["talker_max_new_tokens"] == 32
+    if minimum is None:
+        assert "talker_min_new_tokens" not in params
+    else:
+        assert params["talker_min_new_tokens"] == minimum
+
+
+def test_chat_request_rejects_negative_talker_minimum() -> None:
+    with pytest.raises(ValueError, match="talker_min_new_tokens"):
+        ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hello"}],
+            talker_min_new_tokens=-1,
+        )
+
+
 def test_chat_request_preserves_explicit_default_sampling_values() -> None:
     req = ChatCompletionRequest(
         model="OpenMOSS-Team/MOSS-Transcribe-Diarize",

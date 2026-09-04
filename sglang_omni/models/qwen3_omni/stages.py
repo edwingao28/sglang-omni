@@ -802,6 +802,7 @@ def create_preprocessing_executor(
     model_path: str,
     *,
     max_seq_len: int | None = None,
+    max_concurrency: int = 4,
     video_fps: float | None = None,
     video_max_frames: int | None = None,
     video_min_pixels: int | None = None,
@@ -823,7 +824,10 @@ def create_preprocessing_executor(
     async def _preprocess(payload: StagePayload) -> StagePayload:
         return await preprocessor(payload)
 
-    return SimpleScheduler(_preprocess)
+    # Tokenization and audio feature extraction are CPU-bound and per-request
+    # stateless; serial dispatch makes preprocessing the head-of-line blocker
+    # for TTFT under concurrent load.
+    return SimpleScheduler(_preprocess, max_concurrency=max_concurrency)
 
 
 def create_aggregate_executor():
@@ -926,11 +930,7 @@ def create_audio_encoder_executor(
         dtype=dtype,
         enable_layer_cuda_graph=enable_layer_cuda_graph,
     )
-    cache = StageOutputCache(
-        max_size=QWEN3_ENCODER_CACHE_MAX_ENTRIES,
-        max_bytes=QWEN3_ENCODER_CACHE_MAX_BYTES,
-        cache_device="cpu",
-    )
+    cache = None
 
     def _encode(payload: StagePayload) -> StagePayload:
         _emit_event(

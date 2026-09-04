@@ -2123,20 +2123,25 @@ def _talker_seed_self(
     fake = SimpleNamespace(
         _repetition_mask=torch.zeros(max_bs, vocab, dtype=torch.bool, device=device),
         _suppress_mask=torch.zeros(max_bs, vocab, dtype=torch.bool, device=device),
+        _min_new_token_stop_mask=torch.zeros(
+            max_bs, vocab, dtype=torch.bool, device=device
+        ),
         _repetition_penalties=torch.ones(max_bs, 1, device=device),
         _sampling_temperatures=torch.ones(max_bs, 1, device=device),
         _sampling_top_ps=torch.ones(max_bs, device=device),
         _sampling_top_ks=torch.ones(max_bs, dtype=torch.long, device=device),
         _sampling_min_ps=torch.zeros(max_bs, device=device),
         _sampling_seeds=torch.zeros(max_bs, dtype=torch.long, device=device),
+        _sampling_min_new_tokens=torch.zeros(max_bs, dtype=torch.long, device=device),
+        _sampling_output_lens=torch.zeros(max_bs, dtype=torch.long, device=device),
         _sampling_staging_cpu=torch.zeros(
-            6,
+            8,
             max_bs,
             dtype=torch.int64,
             device="cpu",
             pin_memory=device.type == "cuda",
         ),
-        _sampling_staging_gpu=torch.zeros(6, max_bs, dtype=torch.int64, device=device),
+        _sampling_staging_gpu=torch.zeros(8, max_bs, dtype=torch.int64, device=device),
         _sampling_staging_event=(torch.cuda.Event() if device.type == "cuda" else None),
         _sampled_token_ids=torch.zeros(max_bs, dtype=torch.long, device=device),
         _decode_prep_rids=None,
@@ -2158,6 +2163,9 @@ def _talker_seed_req(seed: int | None, rid: str) -> SimpleNamespace:
         top_k=20,
         min_p=0.0,
         sampling_seed=seed,
+        min_new_tokens=0,
+        ignore_eos=False,
+        stop_token_ids=set(),
     )
     req = SimpleNamespace(
         sampling_params=sp, output_ids=[], _codec_suppress_tokens=None, rid=rid
@@ -2206,6 +2214,8 @@ def _talker_prep_req(
     seed: int = 7,
     output_ids: list[int] | None = None,
     suppress: list[int] | None = None,
+    min_new_tokens: int = 0,
+    ignore_eos: bool = False,
 ) -> SimpleNamespace:
     sp = SimpleNamespace(
         repetition_penalty=penalty,
@@ -2214,12 +2224,16 @@ def _talker_prep_req(
         top_k=top_k,
         min_p=min_p,
         sampling_seed=seed,
+        min_new_tokens=min_new_tokens,
+        ignore_eos=ignore_eos,
+        stop_token_ids={6},
     )
     req = SimpleNamespace(
         sampling_params=sp,
         output_ids=list(output_ids or []),
         _codec_suppress_tokens=None,
         rid=rid,
+        eos_token_ids={7},
     )
     return SimpleNamespace(
         data=SimpleNamespace(req=req, suppress_tokens=list(suppress or []) or None)
@@ -2259,6 +2273,111 @@ def test_talker_prepare_decode_buffers_steady_state_reuse() -> None:
     Qwen3OmniTalker.prepare_decode_buffers(fresh, requests)
     assert torch.equal(fake._repetition_mask, fresh._repetition_mask)
     assert torch.equal(fake._suppress_mask, fresh._suppress_mask)
+
+
+@pytest.mark.parametrize(
+    "device_name",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=[
+                pytest.mark.accelerator,
+                pytest.mark.skipif(
+                    not torch.cuda.is_available(), reason="requires CUDA"
+                ),
+            ],
+        ),
+    ],
+)
+def test_talker_minimum_masks_stop_tokens_until_boundary_and_resets_rows(
+    device_name: str,
+) -> None:
+    fake = _talker_seed_self(device=torch.device(device_name))
+    fake._sampler = None
+    requests = [
+        _talker_prep_req("minimum", min_new_tokens=2),
+        _talker_prep_req("no-minimum"),
+        _talker_prep_req("ignore-eos", min_new_tokens=10, ignore_eos=True),
+    ]
+    requests[0].data.req.sampling_params.stop_token_ids = {-1, 6, 99}
+    logits = torch.arange(8, dtype=torch.float32, device=device_name).repeat(3, 1)
+    for expected in ([5, 7, 7], [5, 7, 7], [7, 7, 7]):
+        Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
+        sampled = Qwen3OmniTalker._sample_decode_tokens(fake, logits, None)
+        assert sampled.tolist() == expected
+        fake._sampled_token_ids[:3].copy_(sampled)
+        for request, token in zip(requests, expected):
+            request.data.req.output_ids.append(token)
+
+    requests[0].data.req.output_ids.clear()
+    requests = [requests[1], requests[0]]
+    Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
+    assert Qwen3OmniTalker._sample_decode_tokens(fake, logits[:2], None).tolist() == [
+        7,
+        5,
+    ]
+    assert fake._sampling_output_lens[:2].tolist() == [3, 0]
+    assert not fake._min_new_token_stop_mask[0].any()
+
+
+@pytest.mark.accelerator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA graphs")
+def test_talker_minimum_boundary_advances_during_cuda_graph_replay() -> None:
+    fake = _talker_seed_self(device=torch.device("cuda"))
+    fake._sampler = None
+    requests = [_talker_prep_req("minimum", min_new_tokens=1)]
+    Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
+    logits = torch.arange(8, dtype=torch.float32, device="cuda").unsqueeze(0)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            Qwen3OmniTalker._sample_decode_tokens(fake, logits, None)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        sampled = Qwen3OmniTalker._sample_decode_tokens(fake, logits, None)
+    graph.replay()
+    assert sampled.tolist() == [5]
+    fake._sampled_token_ids[0] = 5
+    requests[0].data.req.output_ids.append(5)
+    Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
+    graph.replay()
+    assert sampled.tolist() == [7]
+
+
+@pytest.mark.parametrize("minimum", [0, 1, 4])
+def test_talker_request_validates_codec_eos_and_minimum(minimum: int) -> None:
+    tokenizer = FakeQwenTokenizer(eos_token_id=100, vocab_size=128)
+    req = build_sglang_talker_request(
+        torch.zeros(2, 4),
+        tokenizer=tokenizer,
+        codec_vocab_size=8,
+        codec_bos_id=1,
+        codec_eos_id=7,
+        max_new_tokens=4,
+        min_new_tokens=minimum,
+    )
+    assert req.req.sampling_params.min_new_tokens == minimum
+    assert req.req.eos_token_ids == {7}
+    assert req.req.tokenizer.eos_token_id == 7
+    assert tokenizer.eos_token_id == 100
+    assert req.req.tokenizer.decode([2]) == tokenizer.decode([2])
+
+
+@pytest.mark.parametrize("minimum", [-1, 5])
+def test_talker_request_rejects_invalid_minimum(minimum: int) -> None:
+    with pytest.raises(ValueError, match="min_new_tokens"):
+        build_sglang_talker_request(
+            torch.zeros(2, 4),
+            tokenizer=FakeQwenTokenizer(),
+            codec_vocab_size=8,
+            codec_bos_id=1,
+            codec_eos_id=7,
+            max_new_tokens=4,
+            min_new_tokens=minimum,
+        )
 
 
 @pytest.mark.accelerator
@@ -2338,12 +2457,19 @@ def test_talker_prepare_decode_buffers_cuda_matches_fresh_rebuild() -> None:
         "_sampling_top_ks",
         "_sampling_min_ps",
         "_sampling_seeds",
-        "_sampling_staging_cpu",
-        "_sampling_staging_gpu",
+        "_sampling_min_new_tokens",
+        "_sampling_output_lens",
         "_repetition_mask",
         "_suppress_mask",
+        "_min_new_token_stop_mask",
     ):
         torch.testing.assert_close(getattr(fake, name), getattr(fresh, name))
+
+    # note(wenyao): Reuse advances the live device length without refreshing scratch.
+    for name in ("_sampling_staging_cpu", "_sampling_staging_gpu"):
+        reused, rebuilt = getattr(fake, name), getattr(fresh, name)
+        torch.testing.assert_close(reused[:7], rebuilt[:7])
+        torch.testing.assert_close(reused[7, :2] + 1, rebuilt[7, :2])
 
 
 def test_talker_prepare_decode_buffers_rebuild_triggers() -> None:
