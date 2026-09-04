@@ -1161,6 +1161,13 @@ def create_talker_ar_executor_from_config(
     codec_coalesce_frames: int = 0,
     codec_coalesce_first_frames: int = 0,
     codec_coalesce_early_frames: int = 0,
+    enable_async_decode: bool = False,
+    async_decode_min_batch_size: int = 2,
+    code_predictor_skip_scratch_writes: bool = False,
+    assistant_projection_cache_size: int = 0,
+    prefill_coalesce_requests: int = 0,
+    prefill_coalesce_wait_ms: float = 40.0,
+    prefill_coalesce_when_idle: bool = False,
 ):
     """Returns OmniScheduler for talker."""
     from sglang_omni.models.qwen3_omni.bootstrap import create_talker_scheduler
@@ -1225,6 +1232,13 @@ def create_talker_ar_executor_from_config(
         codec_coalesce_frames=codec_coalesce_frames,
         codec_coalesce_first_frames=codec_coalesce_first_frames,
         codec_coalesce_early_frames=codec_coalesce_early_frames,
+        enable_async_decode=enable_async_decode,
+        async_decode_min_batch_size=async_decode_min_batch_size,
+        code_predictor_skip_scratch_writes=code_predictor_skip_scratch_writes,
+        assistant_projection_cache_size=assistant_projection_cache_size,
+        prefill_coalesce_requests=prefill_coalesce_requests,
+        prefill_coalesce_wait_ms=prefill_coalesce_wait_ms,
+        prefill_coalesce_when_idle=prefill_coalesce_when_idle,
     )
     post_load_process_mem = get_process_gpu_memory_bytes(gpu_id)
     logger.info(

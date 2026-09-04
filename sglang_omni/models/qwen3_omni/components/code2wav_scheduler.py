@@ -177,6 +177,7 @@ class Code2WavStreamState:
     due_since: float | None = None
     checked: int = 0
     pending: _PendingWindow | None = None
+    _critical_ingest_profile: dict[str, Any] | None = None
 
 
 class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
@@ -204,6 +205,7 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         _cuda_graph_runner: Code2WavCudaGraphRunner | None = None,
     ):
         self._model = model
+        self._snake_beta_guard = getattr(model, "_omni_snake_beta_guard", None)
         self._device = torch.device(device)
         self._stream_chunk_size = max(int(stream_chunk_size), 1)
         self._left_context_size = max(int(left_context_size), 0)
@@ -296,22 +298,113 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
     def ingest(
         self, request_id: str, state: Code2WavStreamState, codes: torch.Tensor
     ) -> None:
-        del request_id
+        profile = None
+        if _get_event_recorder().is_active():
+            profile = self._start_ingest_profile(state)
         if codes.ndim == 2:
             # The talker strips the EOS row before a coalesced flush. Mark the
             # rows checked so #1237's lazy serial-path scan does not add one
             # D2H sync per frame after this sync-free ingest.
             state.chunks.extend(codes.unbind(0))
             state.checked = len(state.chunks)
-            return
-        if self._eos_lazy_scan:
+        elif self._eos_lazy_scan:
             # Note (edwardzh): one frame per message, so checking here
             # costs one sync per frame; should_decode batches them per window.
             state.chunks.append(codes)
+        elif codes.ndim >= 1:
+            if profile is None:
+                is_eos = codes[0].item() == self._codec_eos_token_id
+            else:
+                eos_start_ns = time.perf_counter_ns()
+                is_eos = codes[0].item() == self._codec_eos_token_id
+                profile[0]["eos_check_host_ns"] += time.perf_counter_ns() - eos_start_ns
+                profile[0]["eos_checks"] += 1
+            if not is_eos:
+                state.chunks.append(codes)
+        else:
+            state.chunks.append(codes)
+        if profile is not None:
+            self._finish_ingest_profile(request_id, state, profile)
+
+    def _start_ingest_profile(
+        self, state: Code2WavStreamState
+    ) -> tuple[dict[str, Any], int, int, int] | None:
+        """Called only with event recording active; stop timing after first readiness."""
+        if state.emitted > 0:
+            return None
+        run_id = _get_event_recorder().active_run_id()
+        profile = state._critical_ingest_profile
+        if profile is None or profile["run_id"] != run_id:
+            profile = {
+                "run_id": run_id,
+                "messages": 0,
+                "accepted_frames": 0,
+                "ingest_host_ns": 0,
+                "eos_check_host_ns": 0,
+                "eos_checks": 0,
+                "started_with_frames": len(state.chunks),
+                "ready_emitted": False,
+            }
+            state._critical_ingest_profile = profile
+        if profile["ready_emitted"]:
+            return None
+        return profile, time.time_ns(), time.perf_counter_ns(), len(state.chunks)
+
+    def _finish_ingest_profile(
+        self,
+        request_id: str,
+        state: Code2WavStreamState,
+        context: tuple[dict[str, Any], int, int, int],
+    ) -> None:
+        """Record host wall time around existing ingestion, never add a GPU fence."""
+        profile, start_wall_ns, start_ns, before_frames = context
+        profile["messages"] += 1
+        profile["accepted_frames"] += len(state.chunks) - before_frames
+        profile["ingest_host_ns"] += time.perf_counter_ns() - start_ns
+        threshold = (
+            (self._initial_codec_chunk_frames or self._stream_chunk_size)
+            if self._enable_batching
+            else self._stream_chunk_size
+        )
+        first_ingest = profile["messages"] == 1
+        ready = self._ready(state) >= threshold
+        if not (first_ingest or ready):
             return
-        if codes.ndim >= 1 and codes[0].item() == self._codec_eos_token_id:
-            return
-        state.chunks.append(codes)
+        metadata = {
+            key: profile[key]
+            for key in (
+                "messages",
+                "accepted_frames",
+                "ingest_host_ns",
+                "eos_check_host_ns",
+                "eos_checks",
+                "started_with_frames",
+            )
+        }
+        metadata.update(
+            ready_frames=self._ready(state),
+            threshold_frames=threshold,
+            eos_scan_deferred=self._eos_lazy_scan,
+            inbox_depth=self.inbox.qsize(),
+            pending_message_depth=len(self._pending_messages),
+            active_request_count=len(self._stream_states),
+        )
+        if first_ingest:
+            _emit_event(
+                request_id=request_id,
+                stage=None,
+                event_name="code2wav_first_ingest",
+                timestamp_ns=start_wall_ns,
+                metadata=metadata,
+            )
+        if ready:
+            profile["ready_emitted"] = True
+            _emit_event(
+                request_id=request_id,
+                stage=None,
+                event_name="code2wav_first_window_ready",
+                metadata=metadata,
+            )
 
     def should_decode(self, state: Code2WavStreamState, *, is_final: bool) -> bool:
         del is_final
@@ -638,6 +731,9 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         graph_eligible: bool = False,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         with torch.no_grad():
+            # Graph replay skips Python forwards and their state guards.
+            if self._snake_beta_guard is not None:
+                self._snake_beta_guard()
             if self._device.type != "cpu":
                 torch.get_device_module(self._device).set_device(self._device)
             if self._cuda_graph_runner is None:
@@ -938,9 +1034,15 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         decoded: dict[str, torch.Tensor] = {}
         profile_metadata: dict[str, Any] | None = None
         if _get_recorder().is_active():
+            self._critical_batch_id = getattr(self, "_critical_batch_id", 0) + 1
             first_state = participants[0][1]
             bucket = self._bucket(first_state)
             profile_metadata = {
+                "batch_id": self._critical_batch_id,
+                "participant_request_ids": [rid for rid, _ in participants],
+                "first_audio_request_ids": [
+                    rid for rid, state in participants if not state.audio_parts
+                ],
                 "batch_size": len(participants),
                 "bucket": list(bucket),
                 "new_frames": self._step_frames(first_state),
@@ -1083,8 +1185,17 @@ def create_code2wav_scheduler(
     enable_output_overlap: bool = True,
     enable_cuda_graph: bool = False,
     total_gpu_memory_fraction: float | None = None,
+    snake_beta_implementation: str = "eager",
 ):
     """Factory: returns Code2WavScheduler."""
+    if type(snake_beta_implementation) is not str or snake_beta_implementation not in (
+        "eager",
+        "hoist",
+        "fused",
+    ):
+        raise ValueError(
+            "snake_beta_implementation must be 'eager', 'hoist', or 'fused'"
+        )
     if enable_cuda_graph and total_gpu_memory_fraction is None:
         raise ValueError(
             "Code2Wav CUDA graph requires "
@@ -1099,6 +1210,10 @@ def create_code2wav_scheduler(
     stream_chunk_size = max(int(stream_chunk_size), 1)
     left_context_size = max(int(left_context_size), 0)
     model = load_code2wav_model(model_path, device=device, dtype=dtype)
+    if snake_beta_implementation != "eager":
+        from .snake_beta import install_code2wav_snake_beta
+
+        install_code2wav_snake_beta(model, snake_beta_implementation)
     cuda_graph_runner = None
     if enable_cuda_graph:
         if enable_batching:

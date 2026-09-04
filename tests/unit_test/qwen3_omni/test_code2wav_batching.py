@@ -588,6 +588,10 @@ def test_batch_events_emitted(monkeypatch) -> None:
     ]
     start_meta = batch_events[0][1]
     end_meta = batch_events[1][1]
+    assert start_meta["batch_id"] == end_meta["batch_id"]
+    assert start_meta["participant_request_ids"] == ["req-a", "req-b"]
+    assert end_meta["participant_request_ids"] == ["req-a", "req-b"]
+    assert start_meta["first_audio_request_ids"] == []
     assert start_meta["fire_reason"] == "floor"
     assert start_meta["batch_size"] == 2
     assert start_meta["subbatch_decomposition"] == [2]
@@ -603,6 +607,83 @@ def test_batch_events_emitted(monkeypatch) -> None:
             "fallback_reason": None,
         }
     ]
+
+
+def test_first_window_ingest_events_are_bounded_and_exclude_eos(monkeypatch) -> None:
+    import sglang_omni.models.qwen3_omni.components.code2wav_scheduler as mod
+
+    events = []
+    recorder = SimpleNamespace(is_active=lambda: True, active_run_id=lambda: "run-a")
+    monkeypatch.setattr(mod, "_get_event_recorder", lambda: recorder)
+    monkeypatch.setattr(mod, "_emit_event", lambda **kw: events.append(kw))
+    scheduler = _make_batching_scheduler(initial_codec_chunk_frames=2)
+    state = Code2WavStreamState()
+    for code in (2150, 1, 2, 3, 4):
+        scheduler.ingest("req-a", state, torch.tensor([code, code * 10]))
+
+    assert [event["event_name"] for event in events] == [
+        "code2wav_first_ingest",
+        "code2wav_first_window_ready",
+    ]
+    first, ready = events
+    assert first["request_id"] == ready["request_id"] == "req-a"
+    assert first["timestamp_ns"] > 0
+    assert first["metadata"]["accepted_frames"] == 0
+    assert ready["metadata"]["messages"] == 3
+    assert ready["metadata"]["accepted_frames"] == 2
+    assert ready["metadata"]["ready_frames"] == 2
+    assert ready["metadata"]["threshold_frames"] == 2
+    assert ready["metadata"]["eos_checks"] == 3
+    assert ready["metadata"]["eos_check_host_ns"] >= 0
+    assert ready["metadata"]["ingest_host_ns"] >= ready["metadata"]["eos_check_host_ns"]
+    assert [row[0].item() for row in state.chunks] == [1, 2, 3, 4]
+
+
+def test_coalesced_first_window_profile_resets_on_new_run(monkeypatch) -> None:
+    import sglang_omni.models.qwen3_omni.components.code2wav_scheduler as mod
+
+    events = []
+    current = SimpleNamespace(run_id="run-a")
+    recorder = SimpleNamespace(
+        is_active=lambda: True, active_run_id=lambda: current.run_id
+    )
+    monkeypatch.setattr(mod, "_get_event_recorder", lambda: recorder)
+    monkeypatch.setattr(mod, "_emit_event", lambda **kw: events.append(kw))
+    scheduler = _make_batching_scheduler(initial_codec_chunk_frames=2)
+    state = Code2WavStreamState()
+    scheduler.ingest("req-a", state, torch.tensor([[1, 10], [2, 20]]))
+    assert events[-1]["metadata"]["messages"] == 1
+    assert events[-1]["metadata"]["accepted_frames"] == 2
+    assert events[-1]["metadata"]["eos_checks"] == 0
+
+    current.run_id = "run-b"
+    scheduler.ingest("req-a", state, torch.tensor([[3, 30]]))
+    assert len(events) == 4
+    assert events[-1]["metadata"]["started_with_frames"] == 2
+    assert events[-1]["metadata"]["messages"] == 1
+    assert state.checked == 3
+
+
+def test_ingest_without_recorder_does_not_read_profile_clocks(monkeypatch) -> None:
+    import sglang_omni.models.qwen3_omni.components.code2wav_scheduler as mod
+
+    def unexpected():
+        raise AssertionError("inactive profiling must not read a profile clock")
+
+    monkeypatch.setattr(
+        mod, "_get_event_recorder", lambda: SimpleNamespace(is_active=lambda: False)
+    )
+    scheduler = _make_batching_scheduler()
+    monkeypatch.setattr(
+        mod,
+        "time",
+        SimpleNamespace(time_ns=unexpected, perf_counter_ns=unexpected),
+    )
+    state = Code2WavStreamState()
+    scheduler.ingest("req-a", state, torch.tensor([1, 10]))
+    scheduler.ingest("req-a", state, torch.tensor([2150, 0]))
+    assert len(state.chunks) == 1
+    assert state._critical_ingest_profile is None
 
 
 def test_batching_and_cuda_graph_coexist() -> None:

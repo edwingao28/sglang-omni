@@ -1106,6 +1106,98 @@ def test_chunk_gate_ignores_prefill_batches() -> None:
     assert scheduler._chunk_wait_steps == 0
 
 
+def test_chunk_gate_profiles_one_block_and_release_not_each_spin(monkeypatch) -> None:
+    import sglang_omni.models.qwen3_omni.talker_scheduler as mod
+
+    events = []
+    recorder = SimpleNamespace(is_active=lambda: True, active_run_id=lambda: "run-a")
+    monkeypatch.setattr(mod, "_get_event_recorder", lambda: recorder)
+    monkeypatch.setattr(mod, "_emit_event", lambda **kw: events.append(kw))
+    clock = iter((100, 900))
+    monkeypatch.setattr(
+        mod,
+        "time",
+        SimpleNamespace(perf_counter_ns=lambda: next(clock), monotonic=time.monotonic),
+    )
+    scheduler = _chunk_gate_scheduler(decode_ready=False)
+    batch = _decode_batch(rows=3)
+    for req, rid, has_feedback, has_text in zip(
+        batch.reqs,
+        ("ready", "needs-text", "needs-feedback"),
+        (True, True, False),
+        (True, False, True),
+    ):
+        req.rid = rid
+        req._omni_data = SimpleNamespace(
+            pending_feedback_queue=deque([object()] if has_feedback else []),
+            pending_text_queue=deque([object()] if has_text else []),
+            thinker_chunks_done=False,
+            tts_pad_embed=None,
+        )
+    for _ in range(20):
+        assert not scheduler._is_batch_ready_to_run(batch)
+    assert len(events) == 1
+    scheduler._model_runner.is_decode_batch_ready = lambda batch: True
+    assert scheduler._is_batch_ready_to_run(batch)
+    assert scheduler._is_batch_ready_to_run(batch)
+    assert [event["event_name"] for event in events] == [
+        "talker_decode_gate_blocked",
+        "talker_decode_gate_released",
+    ]
+    blocked, released = (event["metadata"] for event in events)
+    assert blocked["gate_id"] == released["gate_id"]
+    assert blocked["missing_text_request_ids"] == ["needs-text"]
+    assert blocked["missing_feedback_request_ids"] == ["needs-feedback"]
+    assert blocked["ready_count"] == 1
+    assert released["elapsed_wall_ns"] == 800
+    assert released["deferred_steps"] == 20
+    assert released["releasing_request_ids"] == blocked["participant_request_ids"]
+
+
+def test_chunk_gate_profile_does_not_join_different_runs(monkeypatch) -> None:
+    import sglang_omni.models.qwen3_omni.talker_scheduler as mod
+
+    events = []
+    current = SimpleNamespace(run_id="run-a")
+    recorder = SimpleNamespace(
+        is_active=lambda: True, active_run_id=lambda: current.run_id
+    )
+    monkeypatch.setattr(mod, "_get_event_recorder", lambda: recorder)
+    monkeypatch.setattr(mod, "_emit_event", lambda **kw: events.append(kw))
+    scheduler = _chunk_gate_scheduler(decode_ready=False)
+    batch = _decode_batch()
+    assert not scheduler._is_batch_ready_to_run(batch)
+    current.run_id = "run-b"
+    assert not scheduler._is_batch_ready_to_run(batch)
+    scheduler._model_runner.is_decode_batch_ready = lambda batch: True
+    assert scheduler._is_batch_ready_to_run(batch)
+    assert [event["event_name"] for event in events] == [
+        "talker_decode_gate_blocked",
+        "talker_decode_gate_blocked",
+        "talker_decode_gate_released",
+    ]
+    assert events[-1]["metadata"]["deferred_steps"] == 1
+
+
+def test_chunk_gate_without_recorder_does_not_read_profile_clock(monkeypatch) -> None:
+    import sglang_omni.models.qwen3_omni.talker_scheduler as mod
+
+    def unexpected():
+        raise AssertionError("inactive profiling must not read a profile clock")
+
+    monkeypatch.setattr(
+        mod, "_get_event_recorder", lambda: SimpleNamespace(is_active=lambda: False)
+    )
+    monkeypatch.setattr(
+        mod,
+        "time",
+        SimpleNamespace(perf_counter_ns=unexpected, monotonic=time.monotonic),
+    )
+    scheduler = _chunk_gate_scheduler(decode_ready=False)
+    assert not scheduler._is_batch_ready_to_run(_decode_batch())
+    assert scheduler._critical_gate_episode is None
+
+
 def test_no_op_initialize_request_stream_state_prevents_replay() -> None:
     """Talker's _initialize_request_stream_state must not replay prefetched chunks.
 
@@ -2278,20 +2370,26 @@ def _talker_seed_self(
     fake = SimpleNamespace(
         _repetition_mask=torch.zeros(max_bs, vocab, dtype=torch.bool, device=device),
         _suppress_mask=torch.zeros(max_bs, vocab, dtype=torch.bool, device=device),
+        _min_new_token_stop_mask=torch.zeros(
+            max_bs, vocab, dtype=torch.bool, device=device
+        ),
         _repetition_penalties=torch.ones(max_bs, 1, device=device),
         _sampling_temperatures=torch.ones(max_bs, 1, device=device),
         _sampling_top_ps=torch.ones(max_bs, device=device),
         _sampling_top_ks=torch.ones(max_bs, dtype=torch.long, device=device),
         _sampling_min_ps=torch.zeros(max_bs, device=device),
         _sampling_seeds=torch.zeros(max_bs, dtype=torch.long, device=device),
+        _sampling_min_new_tokens=torch.zeros(max_bs, dtype=torch.long, device=device),
+        _sampling_output_lens=torch.zeros(max_bs, dtype=torch.long, device=device),
+        _sampler=None,
         _sampling_staging_cpu=torch.zeros(
-            6,
+            8,
             max_bs,
             dtype=torch.int64,
             device="cpu",
             pin_memory=device.type == "cuda",
         ),
-        _sampling_staging_gpu=torch.zeros(6, max_bs, dtype=torch.int64, device=device),
+        _sampling_staging_gpu=torch.zeros(8, max_bs, dtype=torch.int64, device=device),
         _sampling_staging_event=(torch.cuda.Event() if device.type == "cuda" else None),
         _sampled_token_ids=torch.zeros(max_bs, dtype=torch.long, device=device),
         _decode_prep_rids=None,
@@ -2313,9 +2411,16 @@ def _talker_seed_req(seed: int | None, rid: str) -> SimpleNamespace:
         top_k=20,
         min_p=0.0,
         sampling_seed=seed,
+        min_new_tokens=0,
+        ignore_eos=False,
+        stop_token_ids=set(),
     )
     req = SimpleNamespace(
-        sampling_params=sp, output_ids=[], _codec_suppress_tokens=None, rid=rid
+        sampling_params=sp,
+        output_ids=[],
+        _codec_suppress_tokens=None,
+        rid=rid,
+        eos_token_ids=set(),
     )
     return SimpleNamespace(data=SimpleNamespace(req=req, suppress_tokens=None))
 
@@ -2361,6 +2466,10 @@ def _talker_prep_req(
     seed: int = 7,
     output_ids: list[int] | None = None,
     suppress: list[int] | None = None,
+    min_new_tokens: int = 0,
+    stop_token_ids: set[int] | None = None,
+    eos_token_ids: set[int] | None = None,
+    ignore_eos: bool = False,
 ) -> SimpleNamespace:
     sp = SimpleNamespace(
         repetition_penalty=penalty,
@@ -2369,10 +2478,14 @@ def _talker_prep_req(
         top_k=top_k,
         min_p=min_p,
         sampling_seed=seed,
+        min_new_tokens=min_new_tokens,
+        stop_token_ids=stop_token_ids or set(),
+        ignore_eos=ignore_eos,
     )
     req = SimpleNamespace(
         sampling_params=sp,
         output_ids=list(output_ids or []),
+        eos_token_ids=eos_token_ids or set(),
         _codec_suppress_tokens=None,
         rid=rid,
     )
@@ -2493,17 +2606,23 @@ def test_talker_prepare_decode_buffers_cuda_matches_fresh_rebuild() -> None:
         "_sampling_top_ks",
         "_sampling_min_ps",
         "_sampling_seeds",
-        "_sampling_staging_cpu",
-        "_sampling_staging_gpu",
+        "_sampling_min_new_tokens",
+        "_sampling_output_lens",
+        "_min_new_token_stop_mask",
         "_repetition_mask",
         "_suppress_mask",
     ):
         torch.testing.assert_close(getattr(fake, name), getattr(fresh, name))
+    # Note (wenyao): reuse advances device lengths without another host staging copy.
+    for name in ("_sampling_staging_cpu", "_sampling_staging_gpu"):
+        torch.testing.assert_close(getattr(fake, name)[:7], getattr(fresh, name)[:7])
 
 
-def test_talker_prepare_decode_buffers_rebuild_triggers() -> None:
+@pytest.mark.parametrize("is_lookahead", [False, True])
+def test_talker_prepare_decode_buffers_rebuild_triggers(is_lookahead) -> None:
     def _prepared() -> tuple[SimpleNamespace, list[SimpleNamespace]]:
         fake = _talker_seed_self()
+        fake._lookahead_prep = is_lookahead
         requests = [
             _talker_prep_req("a", penalty=1.5, output_ids=[2]),
             _talker_prep_req("b", penalty=1.5, output_ids=[4]),
@@ -2585,3 +2704,229 @@ def test_talker_prefill_forward_invalidates_next_decode_reuse() -> None:
     )
 
     assert float(fake._sampling_temperatures[0, 0]) == pytest.approx(0.8)
+
+
+def test_talker_lookahead_advances_seeded_history_and_minimum_with_host_lag() -> None:
+    fake = _talker_seed_self()
+    requests = [
+        _talker_prep_req(
+            "a",
+            penalty=1.5,
+            seed=17,
+            output_ids=[1],
+            min_new_tokens=3,
+            stop_token_ids={5},
+            eos_token_ids={7},
+        ),
+        _talker_prep_req(
+            "b",
+            penalty=1.0,
+            seed=29,
+            output_ids=[2],
+            min_new_tokens=3,
+            stop_token_ids={5},
+            eos_token_ids={7},
+        ),
+    ]
+    Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
+    fake._lookahead_prep = True
+    staged_before = fake._sampling_staging_cpu.clone()
+    logical_history = [[1], [2]]
+    previous_tokens = None
+    logits = torch.zeros(2, 8)
+    logits[:, 6], logits[:, 5], logits[:, 7] = 3.0, 4.0, 5.0
+
+    for tokens in ([3, 4], [4, 6]):
+        if previous_tokens is not None:
+            for request, token in zip(requests, previous_tokens):
+                request.data.req.output_ids.append(token)
+        fake._sampled_token_ids[:2] = torch.tensor(tokens)
+        for history, token in zip(logical_history, tokens):
+            history.append(token)
+
+        Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
+
+        fresh = _talker_seed_self()
+        fresh_requests = [
+            _talker_prep_req(
+                request.data.req.rid,
+                penalty=request.data.req.sampling_params.repetition_penalty,
+                seed=request.data.req.sampling_params.sampling_seed,
+                output_ids=history,
+                min_new_tokens=3,
+                stop_token_ids={5},
+                eos_token_ids={7},
+            )
+            for request, history in zip(requests, logical_history)
+        ]
+        Qwen3OmniTalker.prepare_decode_buffers(fresh, fresh_requests)
+        for name in (
+            "_repetition_mask",
+            "_sampling_output_lens",
+            "_sampling_seeds",
+            "_sampling_min_new_tokens",
+            "_min_new_token_stop_mask",
+        ):
+            assert torch.equal(getattr(fake, name), getattr(fresh, name)), name
+        assert fake._decode_prep_out_lens == [
+            len(history) for history in logical_history
+        ]
+        assert fake._sampling_seeds[:2].tolist() == [17, 29]
+        assert torch.equal(fake._sampling_staging_cpu, staged_before)
+        assert all(
+            len(request.data.req.output_ids) == len(history) - 1
+            for request, history in zip(requests, logical_history)
+        )
+        sampled = Qwen3OmniTalker._sample_decode_tokens(fake, logits, None)
+        assert sampled.tolist() == ([6, 6] if len(logical_history[0]) < 3 else [7, 7])
+        previous_tokens = tokens
+
+
+def test_talker_decode_reuse_allows_one_step_lag_only_during_lookahead() -> None:
+    fake = _talker_seed_self()
+    requests = [_talker_prep_req("a", output_ids=[2])]
+    Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
+    fake._sampled_token_ids[0] = 3
+
+    fake._lookahead_prep = False
+    assert fake._reuse_decode_buffers(requests) is False
+    fake._lookahead_prep = True
+    assert fake._reuse_decode_buffers(requests) is True
+    assert fake._sampling_output_lens[0].item() == 2
+    assert fake._reuse_decode_buffers(requests) is False
+
+
+@pytest.mark.parametrize("skip_scratch", [False, True])
+@pytest.mark.parametrize("noncontiguous", [False, True])
+def test_qwen_predictor_scratch_option_ignores_poisoned_unused_rows(
+    noncontiguous: bool, skip_scratch: bool,
+) -> None:
+    """Changed rows/positions must use only the two freshly written prefix slots."""
+    talker = _build_fake_predictor_graph_talker(torch.device("cpu"))
+    talker.configure_predictor_scratch_writes(skip_unused=skip_scratch)
+    original_step = talker._predictor_forward_one_token
+    calls = []
+
+    def record_step(*, token_embeds, batch_size, cache_len):
+        calls.append((batch_size, cache_len, token_embeds.detach().clone()))
+        return original_step(
+            token_embeds=token_embeds, batch_size=batch_size, cache_len=cache_len
+        )
+
+    talker._predictor_forward_one_token = record_step
+    num_groups = talker.config.num_code_groups
+    with torch.no_grad():
+        for iteration, (batch_size, seq_len) in enumerate(
+            [(4, 3), (1, 1), (3, 2), (2, 1), (4, 1)]
+        ):
+            codes_storage = (
+                torch.arange(batch_size * seq_len * 2) + iteration
+            ).remainder(16).reshape(batch_size, seq_len * 2)
+            hidden_storage = (
+                torch.arange(batch_size * seq_len * 16, dtype=torch.float32) / 29
+                + iteration
+            ).reshape(batch_size, seq_len, 16)
+            layer0_codes = codes_storage[:, ::2]
+            talker_hidden = hidden_storage[..., ::2]
+            if not noncontiguous:
+                layer0_codes = layer0_codes.contiguous()
+                talker_hidden = talker_hidden.contiguous()
+
+            # Note (wenyao): Independent toy recurrence, without predictor scratch.
+            expected_codes = torch.empty(
+                batch_size, num_groups, seq_len, dtype=torch.long
+            )
+            expected_embeds = torch.zeros(batch_size, seq_len, 8)
+            expected_calls = []
+            for pos in range(seq_len):
+                embed = talker.get_input_embeddings()(layer0_codes[:, pos : pos + 1])
+                expected_codes[:, 0, pos] = layer0_codes[:, pos]
+                expected_embeds[:, pos].add_(embed[:, 0])
+                expected_calls.append((batch_size, 0, talker_hidden[:, pos : pos + 1]))
+                expected_calls.append((batch_size, 1, embed))
+                for group in range(num_groups - 1):
+                    logits, _ = talker.code_predictor.lm_head[group](
+                        embed + float(group + 2)
+                    )
+                    codes = logits.argmax(dim=-1)
+                    expected_codes[:, group + 1, pos] = codes[:, 0]
+                    embed = talker.code_predictor.model.codec_embedding[group](codes)
+                    expected_embeds[:, pos].add_(embed[:, 0])
+                    if group < num_groups - 2:
+                        expected_calls.append((batch_size, group + 2, embed))
+
+            talker._predictor_input_buffer.fill_(float("nan"))
+            talker._output_codes.fill_(-1)
+            talker._output_embeds.fill_(float("nan"))
+            calls.clear()
+            actual_codes, actual_embeds = (
+                talker._code_predictor_forward_incremental_eager(
+                    layer0_codes, talker_hidden
+                )
+            )
+
+            torch.testing.assert_close(actual_codes, expected_codes, rtol=0, atol=0)
+            torch.testing.assert_close(actual_embeds, expected_embeds, rtol=0, atol=0)
+            assert len(calls) == seq_len * num_groups
+            for actual, expected in zip(calls, expected_calls, strict=True):
+                assert actual[:2] == expected[:2]
+                torch.testing.assert_close(actual[2], expected[2], rtol=0, atol=0)
+            if skip_scratch:
+                assert torch.isnan(talker._predictor_input_buffer[:, 2:]).all()
+            else:
+                assert torch.isfinite(talker._predictor_input_buffer[:batch_size, 2:]).all()
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true"])
+def test_qwen_predictor_scratch_option_rejects_non_boolean(value):
+    talker = _build_fake_predictor_graph_talker(torch.device("cpu"))
+    with pytest.raises(TypeError, match="must be a bool"):
+        talker.configure_predictor_scratch_writes(skip_unused=value)
+
+
+def test_qwen_predictor_scratch_option_is_default_off_and_immutable():
+    talker = _build_fake_predictor_graph_talker(torch.device("cpu"))
+    assert talker._code_predictor_skip_scratch_writes is False
+    talker.configure_predictor_scratch_writes()
+    assert talker._code_predictor_skip_scratch_writes is False
+    with pytest.raises(RuntimeError, match="before capture"):
+        talker.configure_predictor_scratch_writes(skip_unused=True)
+
+
+def test_qwen_predictor_scratch_option_rejects_existing_graph_owner():
+    talker = _build_fake_predictor_graph_talker(torch.device("cpu"))
+    talker._predictor_decode_graphs[(1, torch.int32)] = object()
+    with pytest.raises(RuntimeError, match="before capture"):
+        talker.configure_predictor_scratch_writes(skip_unused=True)
+    assert talker._code_predictor_skip_scratch_writes is False
+
+
+@pytest.mark.parametrize("noncontiguous", [False, True])
+def test_qwen_predictor_scratch_option_off_on_outputs_match_exactly(noncontiguous):
+    baseline = _build_fake_predictor_graph_talker(torch.device("cpu"))
+    candidate = _build_fake_predictor_graph_talker(torch.device("cpu"))
+    baseline.configure_predictor_scratch_writes(skip_unused=False)
+    candidate.configure_predictor_scratch_writes(skip_unused=True)
+    shapes = [(4, 3), (1, 1), (3, 2), (2, 1), (4, 1)]
+    for iteration, (batch, length) in enumerate(shapes):
+        codes = (
+            (torch.arange(batch * length * 2) + iteration)
+            .remainder(16)
+            .reshape(batch, length * 2)[:, ::2]
+        )
+        hidden = (
+            torch.arange(batch * length * 16, dtype=torch.float32)
+            .reshape(batch, length, 16)[..., ::2] / 29 + iteration
+        )
+        if not noncontiguous:
+            codes, hidden = codes.contiguous(), hidden.contiguous()
+        outputs = []
+        for model in (baseline, candidate):
+            model._predictor_input_buffer.fill_(float("nan"))
+            model._output_codes.fill_(-1)
+            model._output_embeds.fill_(float("nan"))
+            with torch.no_grad():
+                result = model._code_predictor_forward_incremental_eager(codes, hidden)
+                outputs.append(tuple(value.clone() for value in result))
+        for expected, actual in zip(*outputs):
+            assert torch.equal(expected, actual)
