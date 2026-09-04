@@ -8,6 +8,7 @@ import time
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -22,16 +23,16 @@ from sglang_omni.models.qwen3_omni.components.talker import (
 )
 from sglang_omni.models.qwen3_omni.components.talker_input import build_assistant_part
 from sglang_omni.models.qwen3_omni.components.talker_prefill import TalkerPrefillBuilder
+from sglang_omni.models.qwen3_omni.config import (
+    ENABLE_TALKER_START_TOPOLOGY,
+    TALKER_START_MIN_CHUNKS,
+)
 from sglang_omni.models.qwen3_omni.pending_text_queue import (
     PendingTextTensorQueue,
     coerce_pending_text_queue,
 )
 from sglang_omni.models.qwen3_omni.request_builders import build_sglang_talker_request
 from sglang_omni.models.qwen3_omni.talker_model_runner import QwenTalkerModelRunner
-from sglang_omni.models.qwen3_omni.config import (
-    ENABLE_TALKER_START_TOPOLOGY,
-    TALKER_START_MIN_CHUNKS,
-)
 from sglang_omni.models.qwen3_omni.talker_scheduler import (
     MIN_PARTIAL_START_CHUNKS,
     QwenTalkerScheduler,

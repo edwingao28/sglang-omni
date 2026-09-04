@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import collections
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sglang_omni.scheduling.types import ARRequestData
+
+if TYPE_CHECKING:
+    import torch
 
 
 @dataclass

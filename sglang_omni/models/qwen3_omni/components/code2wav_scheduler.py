@@ -177,6 +177,7 @@ class Code2WavStreamState:
     due_since: float | None = None
     checked: int = 0
     pending: _PendingWindow | None = None
+    _critical_ingest_profile: dict[str, Any] | None = None
 
 
 class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
@@ -296,22 +297,113 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
     def ingest(
         self, request_id: str, state: Code2WavStreamState, codes: torch.Tensor
     ) -> None:
-        del request_id
+        profile = None
+        if _get_event_recorder().is_active():
+            profile = self._start_ingest_profile(state)
         if codes.ndim == 2:
             # The talker strips the EOS row before a coalesced flush. Mark the
             # rows checked so #1237's lazy serial-path scan does not add one
             # D2H sync per frame after this sync-free ingest.
             state.chunks.extend(codes.unbind(0))
             state.checked = len(state.chunks)
-            return
-        if self._eos_lazy_scan:
+        elif self._eos_lazy_scan:
             # Note (edwardzh): one frame per message, so checking here
             # costs one sync per frame; should_decode batches them per window.
             state.chunks.append(codes)
+        elif codes.ndim >= 1:
+            if profile is None:
+                is_eos = codes[0].item() == self._codec_eos_token_id
+            else:
+                eos_start_ns = time.perf_counter_ns()
+                is_eos = codes[0].item() == self._codec_eos_token_id
+                profile[0]["eos_check_host_ns"] += time.perf_counter_ns() - eos_start_ns
+                profile[0]["eos_checks"] += 1
+            if not is_eos:
+                state.chunks.append(codes)
+        else:
+            state.chunks.append(codes)
+        if profile is not None:
+            self._finish_ingest_profile(request_id, state, profile)
+
+    def _start_ingest_profile(
+        self, state: Code2WavStreamState
+    ) -> tuple[dict[str, Any], int, int, int] | None:
+        """Called only with event recording active; stop timing after first readiness."""
+        if state.emitted > 0:
+            return None
+        run_id = _get_event_recorder().active_run_id()
+        profile = state._critical_ingest_profile
+        if profile is None or profile["run_id"] != run_id:
+            profile = {
+                "run_id": run_id,
+                "messages": 0,
+                "accepted_frames": 0,
+                "ingest_host_ns": 0,
+                "eos_check_host_ns": 0,
+                "eos_checks": 0,
+                "started_with_frames": len(state.chunks),
+                "ready_emitted": False,
+            }
+            state._critical_ingest_profile = profile
+        if profile["ready_emitted"]:
+            return None
+        return profile, time.time_ns(), time.perf_counter_ns(), len(state.chunks)
+
+    def _finish_ingest_profile(
+        self,
+        request_id: str,
+        state: Code2WavStreamState,
+        context: tuple[dict[str, Any], int, int, int],
+    ) -> None:
+        """Record host wall time around existing ingestion, never add a GPU fence."""
+        profile, start_wall_ns, start_ns, before_frames = context
+        profile["messages"] += 1
+        profile["accepted_frames"] += len(state.chunks) - before_frames
+        profile["ingest_host_ns"] += time.perf_counter_ns() - start_ns
+        threshold = (
+            (self._initial_codec_chunk_frames or self._stream_chunk_size)
+            if self._enable_batching
+            else self._stream_chunk_size
+        )
+        first_ingest = profile["messages"] == 1
+        ready = self._ready(state) >= threshold
+        if not (first_ingest or ready):
             return
-        if codes.ndim >= 1 and codes[0].item() == self._codec_eos_token_id:
-            return
-        state.chunks.append(codes)
+        metadata = {
+            key: profile[key]
+            for key in (
+                "messages",
+                "accepted_frames",
+                "ingest_host_ns",
+                "eos_check_host_ns",
+                "eos_checks",
+                "started_with_frames",
+            )
+        }
+        metadata.update(
+            ready_frames=self._ready(state),
+            threshold_frames=threshold,
+            eos_scan_deferred=self._eos_lazy_scan,
+            inbox_depth=self.inbox.qsize(),
+            pending_message_depth=len(self._pending_messages),
+            active_request_count=len(self._stream_states),
+        )
+        if first_ingest:
+            _emit_event(
+                request_id=request_id,
+                stage=None,
+                event_name="code2wav_first_ingest",
+                timestamp_ns=start_wall_ns,
+                metadata=metadata,
+            )
+        if ready:
+            profile["ready_emitted"] = True
+            _emit_event(
+                request_id=request_id,
+                stage=None,
+                event_name="code2wav_first_window_ready",
+                metadata=metadata,
+            )
 
     def should_decode(self, state: Code2WavStreamState, *, is_final: bool) -> bool:
         del is_final
@@ -778,7 +870,9 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         return min(self._batch_ceiling, max(largest_graph, _STEADY_BATCH_MAX))
 
     @staticmethod
-    def _decompose_batch(n: int, sizes: tuple[int, ...] = _DECOMPOSE_SIZES) -> list[int]:
+    def _decompose_batch(
+        n: int, sizes: tuple[int, ...] = _DECOMPOSE_SIZES
+    ) -> list[int]:
         plan: list[int] = []
         for size in sizes:
             while n >= size:
@@ -938,9 +1032,15 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         decoded: dict[str, torch.Tensor] = {}
         profile_metadata: dict[str, Any] | None = None
         if _get_recorder().is_active():
+            self._critical_batch_id = getattr(self, "_critical_batch_id", 0) + 1
             first_state = participants[0][1]
             bucket = self._bucket(first_state)
             profile_metadata = {
+                "batch_id": self._critical_batch_id,
+                "participant_request_ids": [rid for rid, _ in participants],
+                "first_audio_request_ids": [
+                    rid for rid, state in participants if not state.audio_parts
+                ],
                 "batch_size": len(participants),
                 "bucket": list(bucket),
                 "new_frames": self._step_frames(first_state),

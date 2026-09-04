@@ -150,9 +150,7 @@ class QwenTalkerScheduler(OmniScheduler):
         that separates "waiting one thinker step" from a wedged batch.
         """
         self._chunk_wait_steps += 1
-        logger.debug(
-            "Deferring decode batch until talker feedback/text input is ready"
-        )
+        logger.debug("Deferring decode batch until talker feedback/text input is ready")
         now = time.monotonic()
         if now - self._chunk_wait_last_log_s < _CHUNK_WAIT_LOG_INTERVAL_S:
             return

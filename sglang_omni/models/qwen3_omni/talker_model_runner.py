@@ -35,9 +35,7 @@ class QwenTalkerModelRunner(ModelRunner):
         self._feedback_enabled = bool(feedback_enabled)
         self._codec_coalesce_frames = max(int(codec_coalesce_frames), 0)
         self._codec_coalesce_first_frames = max(int(codec_coalesce_first_frames), 0)
-        self._codec_coalesce_early_frames = max(
-            int(codec_coalesce_early_frames), 0
-        )
+        self._codec_coalesce_early_frames = max(int(codec_coalesce_early_frames), 0)
 
     def execute(self, scheduler_output: Any):
         return super().execute(scheduler_output)
@@ -166,9 +164,8 @@ class QwenTalkerModelRunner(ModelRunner):
                     # terminal EOS row.
                     if self._codec_coalesce_early_frames > 0:
                         flush_ready = (
-                            (data.codec_frames_seen - 1) % coalesce == 0
-                            and bool(pending)
-                        )
+                            data.codec_frames_seen - 1
+                        ) % coalesce == 0 and bool(pending)
                     else:
                         flush_ready = len(pending) >= self._coalesce_threshold(data)
                     if flush_ready:
