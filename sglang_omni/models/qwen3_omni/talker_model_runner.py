@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -13,6 +16,22 @@ from sglang_omni.model_runner.prefill_inputs import (
     attach_omni_prefill_inputs,
 )
 from sglang_omni.scheduling.messages import OutgoingMessage
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _TalkerLookaheadRow:
+    request_id: str
+    request: Any
+    data: Any
+    feedback: torch.Tensor
+
+
+@dataclass(frozen=True)
+class _TalkerLookaheadSnapshot:
+    codes: torch.Tensor
+    rows: tuple[_TalkerLookaheadRow, ...]
 
 
 class QwenTalkerModelRunner(ModelRunner):
@@ -28,6 +47,7 @@ class QwenTalkerModelRunner(ModelRunner):
         codec_coalesce_frames: int = 0,
         codec_coalesce_first_frames: int = 0,
         codec_coalesce_early_frames: int = 0,
+        request_is_aborted: Callable[[str], bool] | None = None,
     ) -> None:
         super().__init__(tp_worker, output_processor)
         self._outbox = outbox
@@ -36,6 +56,10 @@ class QwenTalkerModelRunner(ModelRunner):
         self._codec_coalesce_frames = max(int(codec_coalesce_frames), 0)
         self._codec_coalesce_first_frames = max(int(codec_coalesce_first_frames), 0)
         self._codec_coalesce_early_frames = max(int(codec_coalesce_early_frames), 0)
+        self._lookahead_launch_count = 0
+        self._lookahead_resolve_count = 0
+        self._request_is_aborted = request_is_aborted
+        self._decode_prepared_rows: tuple[tuple[Any, Any], ...] | None = None
 
     def execute(self, scheduler_output: Any):
         return super().execute(scheduler_output)
@@ -67,9 +91,9 @@ class QwenTalkerModelRunner(ModelRunner):
         *,
         is_lookahead: bool = False,
     ) -> None:
-        del is_lookahead
         del forward_batch
         del schedule_batch
+        self.model._lookahead_prep = bool(is_lookahead)
         if not self._feedback_enabled:
             return
 
@@ -78,7 +102,14 @@ class QwenTalkerModelRunner(ModelRunner):
                 "Talker decode reached model runner without ready feedback/text input"
             )
 
+        rows = None
+        if self._request_is_aborted is not None:
+            rows = tuple((sched_req.data.req, sched_req.data) for sched_req in requests)
+            previous = self._decode_prepared_rows
+            if previous is not None and not self._same_prepared_rows(previous, rows):
+                self.model.invalidate_decode_buffers()
         self.model.prepare_decode_buffers(requests)
+        self._decode_prepared_rows = rows
         self._write_feedback_buffers(requests)
 
     def post_prefill(
@@ -133,55 +164,202 @@ class QwenTalkerModelRunner(ModelRunner):
         requests: list,
     ) -> None:
         bs = len(requests)
-        # Note (wenyao): one batched clone per buffer, not one per row: the
-        # snapshot must be a fresh allocation so its rows survive the next
-        # in-graph write to the fixed-address _output_codes/_output_embeds.
+        # Note (wenyao): snapshots must outlive the next graph's fixed-buffer writes.
         codes_snap = self.model._output_codes[:bs].detach().clone()
         embeds_snap = self.model._output_embeds[:bs].detach().clone()
-        coalesce = self._codec_coalesce_frames
+        guarded = self._request_is_aborted is not None
         for idx, sched_req in enumerate(requests):
             req = schedule_batch.reqs[idx]
-            code_chunk = codes_snap[idx]
-            feedback_row = embeds_snap[idx]
-            if coalesce > 1:
-                data = sched_req.data
-                pending = data.pending_codec_rows
-                data.codec_frames_seen += 1
-                if data.codec_frames_seen <= self._codec_coalesce_early_frames:
-                    self._outbox.put(
-                        OutgoingMessage(
-                            request_id=req.rid,
-                            type="stream",
-                            data=code_chunk,
-                            target=self._code2wav_target,
-                            metadata={"stream": self._is_streaming(data)},
-                        )
-                    )
-                else:
-                    # Flush before appending. The newest row is the only one
-                    # that can be EOS, so threshold flushes remain EOS-free
-                    # without a sender-side sync. The finish hook drops a
-                    # terminal EOS row.
-                    if self._codec_coalesce_early_frames > 0:
-                        flush_ready = (
-                            data.codec_frames_seen - 1
-                        ) % coalesce == 0 and bool(pending)
-                    else:
-                        flush_ready = len(pending) >= self._coalesce_threshold(data)
-                    if flush_ready:
-                        self._flush_codec_rows(req.rid, data)
-                    pending.append(code_chunk)
-            else:
+            data = sched_req.data
+            if not guarded:
+                self._emit_codec_row(req.rid, data, codes_snap[idx])
+                data.pending_feedback_queue.append(embeds_snap[idx])
+                continue
+            if not self._request_row_is_live(req, data):
+                continue
+            feedback = embeds_snap[idx]
+            data.pending_feedback_queue.append(feedback)
+            if guarded and not self._request_row_is_live(req, data):
+                self._discard_launch_feedback(
+                    _TalkerLookaheadRow(req.rid, req, data, feedback)
+                )
+                continue
+            self._emit_codec_row(req.rid, data, codes_snap[idx])
+
+    def _emit_codec_row(
+        self, request_id: str, data: Any, code_chunk: torch.Tensor
+    ) -> None:
+        coalesce = self._codec_coalesce_frames
+        if coalesce > 1:
+            pending = data.pending_codec_rows
+            data.codec_frames_seen += 1
+            if data.codec_frames_seen <= self._codec_coalesce_early_frames:
                 self._outbox.put(
                     OutgoingMessage(
-                        request_id=req.rid,
+                        request_id=request_id,
                         type="stream",
                         data=code_chunk,
                         target=self._code2wav_target,
-                        metadata={"stream": self._is_streaming(sched_req.data)},
+                        metadata={"stream": self._is_streaming(data)},
                     )
                 )
-            sched_req.data.pending_feedback_queue.append(feedback_row)
+            else:
+                # Note (wenyao): keep the newest possible EOS row for the finish hook.
+                if self._codec_coalesce_early_frames > 0:
+                    flush_ready = (data.codec_frames_seen - 1) % coalesce == 0 and bool(
+                        pending
+                    )
+                else:
+                    flush_ready = len(pending) >= self._coalesce_threshold(data)
+                if flush_ready:
+                    self._flush_codec_rows(request_id, data)
+                pending.append(code_chunk)
+        else:
+            self._outbox.put(
+                OutgoingMessage(
+                    request_id=request_id,
+                    type="stream",
+                    data=code_chunk,
+                    target=self._code2wav_target,
+                    metadata={"stream": self._is_streaming(data)},
+                )
+            )
+
+    @staticmethod
+    def _same_prepared_rows(
+        left: tuple[tuple[Any, Any], ...], right: tuple[tuple[Any, Any], ...]
+    ) -> bool:
+        return len(left) == len(right) and all(
+            left_req is right_req and left_data is right_data
+            for (left_req, left_data), (right_req, right_data) in zip(left, right)
+        )
+
+    def _request_row_is_live(self, req: Any, data: Any) -> bool:
+        # Note (wenyao): the abort set is published before Req.to_finish is updated.
+        is_aborted = self._request_is_aborted
+        return (
+            is_aborted is not None
+            and req is not None
+            and data is not None
+            and not is_aborted(req.rid)
+            and req._omni_data is data
+            and data.req is req
+            and not req.finished()
+            and not self._req_is_retracted(req)
+            and req.to_finish is None
+            and not req._omni_terminal_claimed
+        )
+
+    @staticmethod
+    def _discard_launch_feedback(row: _TalkerLookaheadRow) -> None:
+        queue = row.data.pending_feedback_queue
+        for index, candidate in enumerate(queue):
+            if candidate is row.feedback:
+                del queue[index]
+                break
+        # Note (wenyao): consumed inputs remain in history for re-prefill replay.
+
+    def post_decode_launch(
+        self, result: Any, forward_batch: Any, requests: list
+    ) -> Any:
+        if not self._feedback_enabled:
+            return super().post_decode_launch(result, forward_batch, requests)
+        if self._request_is_aborted is None:
+            raise RuntimeError(
+                "Talker lookahead requires the scheduler abort predicate"
+            )
+        bs = len(requests)
+        result.next_token_ids = self.model._sampled_token_ids[:bs].clone()
+        self._stage_token_ids(result, result.next_token_ids)
+        codes_snap = self.model._output_codes[:bs].detach().clone()
+        embeds_snap = self.model._output_embeds[:bs].detach().clone()
+        rows = []
+        for idx, sched_req in enumerate(requests):
+            data = sched_req.data
+            req = data.req
+            feedback = embeds_snap[idx]
+            row = _TalkerLookaheadRow(req.rid, req, data, feedback)
+            # Note (wenyao): the next launch consumes feedback before this one resolves.
+            if self._request_row_is_live(req, data):
+                data.pending_feedback_queue.append(feedback)
+            rows.append(row)
+        self._lookahead_launch_count += 1
+        return _TalkerLookaheadSnapshot(codes_snap, tuple(rows))
+
+    def post_decode_resolve(
+        self,
+        launch_buf: Any,
+        result: Any,
+        forward_batch: Any,
+        schedule_batch: Any,
+        requests: list,
+    ) -> None:
+        if not self._feedback_enabled:
+            return super().post_decode_resolve(
+                launch_buf, result, forward_batch, schedule_batch, requests
+            )
+        if launch_buf is None:
+            return
+        if not isinstance(launch_buf, _TalkerLookaheadSnapshot):
+            raise TypeError("Talker lookahead requires its launch-owned snapshot")
+        if len(requests) != len(launch_buf.rows) or len(schedule_batch.reqs) != len(
+            launch_buf.rows
+        ):
+            for row in launch_buf.rows:
+                self._discard_launch_feedback(row)
+            raise RuntimeError(
+                "Talker lookahead resolve changed the captured row count"
+            )
+        for idx, row in enumerate(launch_buf.rows):
+            current = requests[idx]
+            if (
+                current.data is not row.data
+                or schedule_batch.reqs[idx] is not row.request
+                or row.request.rid != row.request_id
+                or not self._request_row_is_live(row.request, row.data)
+            ):
+                self._discard_launch_feedback(row)
+                continue
+            self._emit_codec_row(row.request_id, row.data, launch_buf.codes[idx])
+        self._lookahead_resolve_count += 1
+        if self._lookahead_resolve_count % 256 == 0:
+            logger.info(
+                "talker lookahead launches=%d resolves=%d query_hit=%d query_miss=%d",
+                self._lookahead_launch_count,
+                self._lookahead_resolve_count,
+                self._async_query_hit,
+                self._async_query_miss,
+            )
+
+    def lookahead_eligible(self, batch: Any) -> bool:
+        if not self._feedback_enabled or self._request_is_aborted is None:
+            return False
+        prev_rids = self.model._decode_prep_rids
+        prepared = self._decode_prepared_rows
+        if (
+            prev_rids is None
+            or prepared is None
+            or len(prev_rids) != len(batch.reqs)
+            or len(prepared) != len(batch.reqs)
+        ):
+            return False
+        for req, previous_rid, (prepared_req, data) in zip(
+            batch.reqs, prev_rids, prepared
+        ):
+            if (
+                req.rid != previous_rid
+                or req is not prepared_req
+                or not self._request_row_is_live(req, data)
+            ):
+                return False
+            sp = req.sampling_params
+            if sp.frequency_penalty != 0.0 or sp.presence_penalty != 0.0:
+                return False
+            if req.custom_logit_processor is not None or req.return_logprob:
+                return False
+            if sp.min_new_tokens not in (0, sp.max_new_tokens):
+                return False
+        return True
 
     @staticmethod
     def _is_streaming(data: Any) -> bool:

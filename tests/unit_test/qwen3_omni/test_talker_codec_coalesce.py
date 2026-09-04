@@ -36,8 +36,10 @@ def _runner(
     runner = object.__new__(QwenTalkerModelRunner)
     runner.model = model
     runner._feedback_enabled = True
+    runner._request_is_aborted = None
     runner._code2wav_target = "code2wav"
     runner._codec_coalesce_frames = coalesce
+    runner._codec_coalesce_early_frames = 0
     runner._codec_coalesce_first_frames = first_frames
     runner._outbox = SimpleNamespace(sent=[])
     runner._outbox.put = runner._outbox.sent.append
@@ -49,6 +51,7 @@ def _data() -> SimpleNamespace:
         pending_feedback_queue=deque(),
         pending_codec_rows=[],
         codec_first_flush_done=False,
+        codec_frames_seen=0,
         stage_payload=None,
         finish_reason=None,
     )
