@@ -618,7 +618,8 @@ class MultiProcessPipelineRunner:
                 total_procs,
             )
 
-        except Exception as startup_error:
+        except BaseException as startup_error:
+            # note(wenyao): Cancellation owns the same children and IPC as a startup error.
             process_start_attempts: set[str] | None = None
             if self._mps is not None:
                 process_start_attempts = self._process_start_attempts()
@@ -626,19 +627,6 @@ class MultiProcessPipelineRunner:
                 await self._cleanup_on_failure()
             finally:
                 if self._mps is not None:
-                    try:
-                        await self._close_mps(
-                            process_start_attempts=process_start_attempts
-                        )
-                    except BaseException as cleanup_error:
-                        raise startup_error from cleanup_error
-            raise
-        except BaseException as startup_error:
-            if self._mps is not None:
-                process_start_attempts = self._process_start_attempts()
-                try:
-                    await self._cleanup_on_failure()
-                finally:
                     try:
                         await self._close_mps(
                             process_start_attempts=process_start_attempts
