@@ -38,6 +38,14 @@ def _write(event, *, scheduler=None, **data):
         output.write(json.dumps(record) + "\n")
 
 
+def _wait_for_resume(root):
+    deadline = time.monotonic() + 30
+    while not (root / "resume_request").exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("DFlash smoke cancellation barrier timed out")
+        time.sleep(0.01)
+
+
 def _patch_cache(module):
     original = module.release_kv_cache
 
@@ -61,6 +69,7 @@ def _patch_scheduler(module):
     original_stream = cls.stream_output
     original_put = cls._put_stream_messages
     original_forward = cls._run_speculative_batch
+    original_prefill = cls.get_new_batch_prefill
     original_abort = cls.abort
 
     @functools.wraps(original_stream)
@@ -129,14 +138,47 @@ def _patch_scheduler(module):
                 # result, making disconnect timing deterministic without changing kernels.
                 self._dflash_test_paused = True
                 _write("verify_paused", scheduler=self, request_id=request_id)
-                deadline = time.monotonic() + 30
-                while not (root / "resume_request").exists():
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError(
-                            "DFlash smoke cancellation barrier timed out"
-                        )
-                    time.sleep(0.01)
+                _wait_for_resume(root)
         return result
+
+    @functools.wraps(original_prefill)
+    def prefill(self, running_batch):
+        root = Path(os.environ["OMNI_DFLASH_TEST_TRACE_DIR"])
+        pause = root / "pause_chunked_request"
+        req = self.chunked_req
+        if (
+            req is not None
+            and req.req_pool_idx is not None
+            and not getattr(self, "_dflash_test_chunked_paused", False)
+            and pause.exists()
+            and req.rid == pause.read_text().strip()
+        ):
+            batches = {
+                "running_argument": running_batch,
+                "running": self.running_batch,
+                "cur": self.cur_batch,
+                "last": self.last_batch,
+                "async_pending": self._async_pending_batch(),
+            }
+            aliases = [
+                name
+                for name, batch in batches.items()
+                if batch is not None and any(item is req for item in batch.reqs)
+            ]
+            if not aliases:
+                # note(wenyao): Upstream has filtered the completed chunk from
+                # its batches; hold the parked request before building its next chunk.
+                self._dflash_test_chunked_paused = True
+                _write(
+                    "chunked_paused",
+                    scheduler=self,
+                    request_id=req.rid,
+                    req_pool_idx=req.req_pool_idx,
+                    prefix_tokens=len(req.prefix_indices),
+                    batch_aliases=aliases,
+                )
+                _wait_for_resume(root)
+        return original_prefill(self, running_batch)
 
     @functools.wraps(original_abort)
     def abort(self, request_id, **kwargs):
@@ -157,6 +199,7 @@ def _patch_scheduler(module):
     cls.stream_output = stream
     cls._put_stream_messages = put
     cls._run_speculative_batch = forward
+    cls.get_new_batch_prefill = prefill
     cls.abort = abort
 
 
