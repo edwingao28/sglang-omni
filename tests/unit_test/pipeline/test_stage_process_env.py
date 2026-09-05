@@ -52,6 +52,47 @@ def _worker_spec(*stage_specs: StageLaunchConfig) -> StageWorkerProcessSpec:
     )
 
 
+@pytest.mark.parametrize("fail_stage", [False, True])
+def test_stage_process_releases_distributed_group_on_exit(
+    monkeypatch, tmp_path, fail_stage
+) -> None:
+    dist = torch.distributed
+    if not dist.is_available() or not dist.is_gloo_available():
+        pytest.skip("CPU Gloo process groups are unavailable")
+    assert not dist.is_initialized()
+    monkeypatch.setattr(
+        stage_workers, "_prepare_accelerator_environment", lambda *a: None
+    )
+    monkeypatch.setattr(stage_workers, "apply_gpu_compat_env_defaults", lambda: None)
+    monkeypatch.setattr(
+        stage_workers, "prepare_weight_share_process_compat", lambda: None
+    )
+    monkeypatch.setattr(
+        stage_workers, "_reclaim_process_cuda_memory", lambda *a, **k: None
+    )
+
+    def run_stage(*args):
+        dist.init_process_group(
+            "gloo", init_method=(tmp_path / "rendezvous").as_uri(), rank=0, world_size=1
+        )
+        if fail_stage:
+            raise RuntimeError("stage failed after distributed initialization")
+
+    monkeypatch.setattr(stage_workers, "_run_process", run_stage)
+    try:
+        spec = _worker_spec(StageLaunchConfig(stage_name="thinker"))
+        if fail_stage:
+            with pytest.raises(SystemExit) as exc:
+                stage_workers.stage_process_main(spec, None)
+            assert exc.value.code == 1
+        else:
+            stage_workers.stage_process_main(spec, None)
+        assert not dist.is_initialized()
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
 def test_tp_process_env_maps_logical_gpu_through_visible_devices() -> None:
     env = cuda_platform.get_stage_process_env(
         _tp_spec(gpu_id=1), {"CUDA_VISIBLE_DEVICES": "3,4"}

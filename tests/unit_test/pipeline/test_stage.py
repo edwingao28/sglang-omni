@@ -280,6 +280,8 @@ def test_stage_stop_waits_for_scheduler_model_path_terminalization(
         )
 
         scheduler = object.__new__(OmniScheduler)
+        scheduler.tp_size = 1
+        scheduler._stop_requested = False
         scheduler.enable_async_decode = False
         scheduler.enable_overlap = False
         scheduler._prefill_start_done = {"req-active"}
@@ -329,6 +331,8 @@ def test_stage_stop_warns_but_succeeds_on_a_stuck_scheduler_thread(
         entered = threading.Event()
         release = threading.Event()
         scheduler = object.__new__(OmniScheduler)
+        scheduler.tp_size = 1
+        scheduler._stop_requested = False
         scheduler.enable_async_decode = False
         scheduler.enable_overlap = False
         scheduler._prefill_start_done = set()
