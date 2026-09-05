@@ -53,6 +53,8 @@ def _init_sync_request_build_state(scheduler: OmniScheduler) -> None:
     scheduler._backlogged_request_build_payloads = deque()
     scheduler._request_build_max_pending_observed = 0
     scheduler._async_pending = None
+    scheduler.chunked_req = None
+    scheduler._pending_chunked_abort_req = None
     scheduler.enable_priority_scheduling = False
     scheduler.abort_on_priority_when_disabled = False
     if not hasattr(scheduler, "max_queued_requests"):
@@ -927,6 +929,171 @@ def test_omni_scheduler_abort_marks_running_request_for_finish(monkeypatch) -> N
     assert cleaned == ["req-run"]
     assert scheduler._prefill_start_done == set()
     assert model_path_ends == [("req-run", "aborted")]
+
+
+@pytest.fixture(params=[False, True], ids=["ordinary", "native"])
+def chunked_abort_state(request, monkeypatch):
+    from sglang.srt.disaggregation.utils import DisaggregationMode
+    from sglang.srt.managers import scheduler as upstream_scheduler
+    from sglang.srt.managers.schedule_batch import Req
+    from sglang.srt.sampling.sampling_params import SamplingParams
+
+    scheduler = object.__new__(OmniScheduler)
+    _init_sync_request_build_state(scheduler)
+    scheduler._native_speculative = request.param
+    scheduler._aborted_request_ids = set()
+    scheduler._aborted_request_id_order = deque()
+    scheduler._pending_stream_ingress = {}
+    scheduler._dirty_deferred_request_ids = set()
+    scheduler._first_emit_done = set()
+    scheduler._prefill_start_done = set()
+    scheduler._prefill_end_done = set()
+    scheduler.inbox = Queue()
+    scheduler.outbox = Queue()
+    scheduler.is_entry_rank = True
+    scheduler.waiting_queue = []
+    scheduler.running_batch = SimpleNamespace(reqs=[], batch_is_full=False)
+    scheduler.cur_batch = None
+    scheduler.last_batch = None
+    scheduler.tree_cache = object()
+    scheduler.disaggregation_mode = DisaggregationMode.NULL
+    scheduler.enable_hicache_storage = False
+    scheduler.send_to_detokenizer = omni_scheduler_module._NoOpSender()
+    scheduler.ipc_channels = omni_scheduler_module._OmniIpcChannels(scheduler)
+    cleaned = []
+    scheduler._abort_callback = cleaned.append
+    sampling = SamplingParams(temperature=0, max_new_tokens=32)
+    sampling.normalize(None)
+    req = Req(
+        rid="parked-chunk",
+        origin_input_text="",
+        origin_input_ids=array("q", [1, 2, 3]),
+        sampling_params=sampling,
+        vocab_size=128,
+    )
+    req.req_pool_idx = 1
+    req._omni_terminal_claimed = False
+    req._omni_data = SimpleNamespace(req=req)
+    scheduler.chunked_req = req
+    released = []
+
+    def release(released_req, cache, *, is_insert=True):
+        assert released_req is req and cache is scheduler.tree_cache
+        assert req.req_pool_idx == 1, "request pool slot released twice"
+        released.append(is_insert)
+        req.req_pool_idx = None
+
+    monkeypatch.setattr(omni_scheduler_module, "release_kv_cache", release)
+    monkeypatch.setattr(upstream_scheduler, "release_kv_cache", release)
+    return scheduler, req, released, cleaned
+
+
+def test_chunked_abort_waits_for_upstream_drain(chunked_abort_state):
+    scheduler, req, released, cleaned = chunked_abort_state
+    data = req._omni_data
+
+    scheduler.abort(req.rid)
+    scheduler.abort(req.rid)
+
+    assert scheduler._pending_chunked_abort_req is req
+    assert req.to_finish.to_json()["type"] == "abort"
+    assert released == [] and cleaned == []
+    assert req._omni_data is data and req.req_pool_idx == 1
+
+    scheduler.process_pending_chunked_abort()
+    scheduler.process_pending_chunked_abort()
+
+    assert released == [False]
+    assert cleaned == [req.rid]
+    assert scheduler.chunked_req is None
+    assert scheduler._pending_chunked_abort_req is None
+    assert req.finished() and req.req_pool_idx is None
+    assert req._omni_data is None and data.req is req
+    scheduler.abort(req.rid)
+    assert released == [False]
+
+
+def test_chunked_abort_immediate_clears_batch_aliases(chunked_abort_state):
+    scheduler, req, released, cleaned = chunked_abort_state
+    batch = SimpleNamespace(reqs=[req], batch_is_full=True)
+    scheduler.running_batch = scheduler.cur_batch = scheduler.last_batch = batch
+    scheduler._pending_chunked_abort_req = req
+
+    scheduler.abort(req.rid, defer_running_cleanup=False)
+
+    assert released == [True] and cleaned == [req.rid]
+    assert batch.reqs == []
+    assert scheduler.chunked_req is None
+    assert scheduler._pending_chunked_abort_req is None
+    assert req._omni_data is None
+    scheduler.process_pending_chunked_abort()
+    assert released == [True]
+
+
+def test_chunked_abort_survives_final_chunk_transition(chunked_abort_state):
+    scheduler, req, released, cleaned = chunked_abort_state
+    scheduler.abort(req.rid)
+    scheduler.chunked_req = None
+    scheduler.running_batch.reqs = [req]
+
+    scheduler.process_pending_chunked_abort()
+    assert released == [] and cleaned == []
+    req.output_ids.append(7)
+    req.update_finish_state(1)
+    assert req.finished_reason.to_json()["type"] == "abort"
+    scheduler._release_request_kv_cache(req)
+    scheduler.stream_output([req])
+    scheduler.process_pending_chunked_abort()
+
+    assert released == [True] and cleaned == [req.rid]
+    assert scheduler._pending_chunked_abort_req is None
+    assert req._omni_data is None
+
+
+def test_chunked_abort_all_includes_parked_request(chunked_abort_state):
+    scheduler, req, released, cleaned = chunked_abort_state
+
+    assert scheduler._abort_all_requests() == 1
+
+    assert released == [True] and cleaned == [req.rid]
+    assert scheduler.chunked_req is None
+    assert scheduler._pending_chunked_abort_req is None
+    assert req._omni_data is None
+    assert scheduler._abort_all_requests() == 0
+
+
+def test_chunked_abort_during_upstream_release_keeps_one_owner(
+    chunked_abort_state, monkeypatch
+):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from sglang.srt.managers import scheduler as upstream_scheduler
+
+    scheduler, req, released, cleaned = chunked_abort_state
+    scheduler.abort(req.rid)
+    entered = threading.Event()
+    resume = threading.Event()
+    original_release = upstream_scheduler.release_kv_cache
+
+    def blocked_release(*args, **kwargs):
+        entered.set()
+        assert resume.wait(timeout=3)
+        original_release(*args, **kwargs)
+
+    monkeypatch.setattr(upstream_scheduler, "release_kv_cache", blocked_release)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        drain = pool.submit(scheduler.process_pending_chunked_abort)
+        try:
+            assert entered.wait(timeout=3)
+            assert req.finished()
+            scheduler.abort(req.rid)
+            assert released == [] and cleaned == []
+        finally:
+            resume.set()
+        drain.result(timeout=3)
+
+    assert released == [False] and cleaned == [req.rid]
+    assert req._omni_data is None
 
 
 def test_omni_scheduler_abort_cleans_queued_request_immediately(monkeypatch) -> None:

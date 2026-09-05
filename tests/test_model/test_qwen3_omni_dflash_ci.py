@@ -87,6 +87,7 @@ def dflash_server(tmp_path_factory):
     factory = thinker.setdefault("factory", {})
     factory.update(talker_stream_token_only=True, capture_speech_hidden_states=False)
     engine = thinker.setdefault("engine", {})
+    engine["chunked_prefill_size"] = 512
     if enabled:
         draft = os.environ.get("SGLANG_OMNI_TEST_DFLASH_MODEL") or engine.get(
             "speculative_draft_model_path"
@@ -193,7 +194,7 @@ def _stream(server, request_id, prompt):
             server.url, json=payload, stream=True, timeout=REQUEST_TIMEOUT
         ) as response:
             response.raise_for_status()
-            for line in response.iter_lines(chunk_size=1):
+            for line in response.iter_lines():
                 if not line.startswith(b"data: "):
                     continue
                 data = line[6:]
@@ -299,12 +300,24 @@ def test_native_streaming_and_eos(dflash_server):
     (server.folder / "streaming-result.json").write_text(json.dumps(records, indent=2))
 
 
-def test_cancel_during_verification_then_reuse(dflash_server):
+@pytest.mark.parametrize("phase", ["verification", "chunked_prefill"])
+def test_cancel_during_model_work_then_reuse(dflash_server, phase):
     server = dflash_server
-    if not server.enabled:
+    if phase == "verification" and not server.enabled:
         pytest.skip("the in-flight verification barrier requires DFlash")
     request_id = f"cancel-{uuid.uuid4().hex}"
-    (server.trace / "pause_request").write_text(request_id)
+    (server.trace / "resume_request").unlink(missing_ok=True)
+    if phase == "verification":
+        marker, event = "pause_request", "verify_paused"
+        prompt = "Count from one to five hundred, writing every number in words."
+    else:
+        marker, event = "pause_chunked_request", "chunked_paused"
+        prompt = (
+            "Read this background silently: "
+            + "The morning train crossed the bridge beside the river. " * 160
+            + "Now say exactly: Hello, world."
+        )
+    (server.trace / marker).write_text(request_id)
     response = None
     with requests.Session() as session:
         session.trust_env = False
@@ -314,7 +327,7 @@ def test_cancel_during_verification_then_reuse(dflash_server):
                 json=_payload(
                     server,
                     request_id,
-                    "Count from one to five hundred, writing every number in words.",
+                    prompt,
                     max_tokens=1024,
                 ),
                 stream=True,
@@ -327,8 +340,7 @@ def test_cancel_during_verification_then_reuse(dflash_server):
                     {
                         row["tp_rank"]
                         for row in rows
-                        if row["event"] == "verify_paused"
-                        and row["request_id"] == request_id
+                        if row["event"] == event and row["request_id"] == request_id
                     }
                 )
                 == server.tp,
@@ -340,8 +352,16 @@ def test_cancel_during_verification_then_reuse(dflash_server):
             paused_pids = {
                 row["pid"]
                 for row in rows
-                if row["event"] == "verify_paused" and row["request_id"] == request_id
+                if row["event"] == event and row["request_id"] == request_id
             }
+            if phase == "chunked_prefill":
+                assert all(
+                    row["req_pool_idx"] is not None
+                    and row["prefix_tokens"] >= 512
+                    and not row["batch_aliases"]
+                    for row in rows
+                    if row["event"] == event and row["request_id"] == request_id
+                )
             response.close()
             _wait_events(
                 server,
@@ -375,15 +395,16 @@ def test_cancel_during_verification_then_reuse(dflash_server):
         )
         == server.tp,
     )
-    _assert_completed(server, _stream(server, "after-cancel", PROMPTS[1]))
+    _assert_completed(server, _stream(server, f"after-{phase}", PROMPTS[1]))
     rows = _events(server.trace)
-    abort_times = {
-        row["pid"]: row["monotonic_ns"]
-        for row in rows
-        if row["event"] == "abort"
-        and row["request_id"] == request_id
-        and row["pid"] in paused_pids
-    }
+    abort_times = {}
+    for row in rows:
+        if (
+            row["event"] == "abort"
+            and row["request_id"] == request_id
+            and row["pid"] in paused_pids
+        ):
+            abort_times.setdefault(row["pid"], row["monotonic_ns"])
     assert not any(
         row["event"] == "stream"
         and row["request_id"] == request_id

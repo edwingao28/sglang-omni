@@ -103,7 +103,6 @@ class _UpstreamAbortSender:
         self._scheduler = scheduler
 
     def send_output(self, msg: Any, req: Any = None) -> None:
-        del req
         if not isinstance(msg, AbortReq):
             raise RuntimeError(
                 f"Unexpected upstream scheduler IPC output: {type(msg).__name__}"
@@ -122,6 +121,9 @@ class _UpstreamAbortSender:
         scheduler = self._scheduler
         scheduler._emit_request_error(request_id, RuntimeError(message))
         scheduler.abort(request_id, defer_running_cleanup=False)
+        if req is not None:
+            # note(wenyao): Upstream clears the parked chunk before notifying us.
+            _detach_request_data(req)
 
 
 class _OmniIpcChannels:
@@ -2258,6 +2260,9 @@ class OmniScheduler:
                 rid = req.rid
                 if rid is not None:
                     request_ids.add(rid)
+            chunked_req = self.chunked_req
+            if chunked_req is not None and not chunked_req.finished():
+                request_ids.add(chunked_req.rid)
         for batch in (
             self.running_batch,
             self.cur_batch,
@@ -2318,7 +2323,22 @@ class OmniScheduler:
         torch.cuda.empty_cache()
 
     def _mark_running_request_aborted(self, request_id: str) -> bool:
-        marked = False
+        pending = self._pending_chunked_abort_req
+        # note(wenyao): The drain owns cleanup until it clears this marker,
+        # including when a duplicate abort arrives during its KV release.
+        marked = pending is not None and pending.rid == request_id
+        chunked_req = self.chunked_req
+        if (
+            chunked_req is not None
+            and chunked_req.rid == request_id
+            and not chunked_req.finished()
+            and not chunked_req.is_retracted
+        ):
+            # note(wenyao): A parked chunk can be absent from every batch. Let
+            # upstream release it at the next safe scheduling boundary.
+            self._pending_chunked_abort_req = chunked_req
+            chunked_req.to_finish = FINISH_ABORT()
+            marked = True
         seen: set[int] = set()
         for batch in (
             self.running_batch,
@@ -2367,6 +2387,13 @@ class OmniScheduler:
                     continue
                 seen.add(id(req))
                 self._release_request_kv_cache(req)
+        chunked_req = self.chunked_req
+        if chunked_req is not None and chunked_req.rid == request_id:
+            self._release_request_kv_cache(chunked_req)
+            self.chunked_req = None
+            if self._pending_chunked_abort_req is chunked_req:
+                self._pending_chunked_abort_req = None
+            _detach_request_data(chunked_req)
 
     def _release_request_kv_cache(self, req: Any) -> None:
         if req.req_pool_idx is None and req.mamba_pool_idx is None:
