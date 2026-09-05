@@ -178,6 +178,7 @@ class OmniScheduler:
         model_config: Any,
         *,
         model_runner: Any = None,
+        speculative_worker: Any = None,
         request_builder: Callable | None = None,
         result_adapter: Callable | None = None,
         stream_output_builder: Callable | None = None,
@@ -427,14 +428,31 @@ class OmniScheduler:
         )
         self.current_scheduler_metrics_enabled = False
 
-        # Speculative decoding (disabled)
         from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
-        self.spec_algorithm = SpeculativeAlgorithm.NONE
+        self.spec_algorithm = SpeculativeAlgorithm.from_string(
+            server_args.speculative_algorithm
+        )
         self.dllm_config = None
-        self.draft_worker = None
+        self.draft_worker = speculative_worker
+        self._native_speculative = speculative_worker is not None
         self._execution_bridge = None
-        if model_runner is not None:
+        if self._native_speculative:
+            if not self.spec_algorithm.is_dflash():
+                raise ValueError("Omni native speculation currently requires DFLASH")
+            if enable_overlap or enable_async_decode or model_runner is not None:
+                raise ValueError(
+                    "Omni DFLASH requires synchronous native worker execution"
+                )
+            self.model_worker = speculative_worker
+            self.future_map = self.spec_algorithm.create_future_map(
+                self.device, self.req_to_token_pool, needs_cpu_seq_lens=True
+            )
+        elif not self.spec_algorithm.is_none():
+            raise ValueError(
+                "Speculative decoding requires a native speculative worker"
+            )
+        elif model_runner is not None:
             self.bind_model_runner(model_runner)
 
         # Subsystem stubs
@@ -1401,6 +1419,8 @@ class OmniScheduler:
         a ``GenerationBatchResult``.  We bridge the two formats here.
         """
         del pp_proxy_tensors
+        if getattr(self, "_native_speculative", False):
+            return self._run_speculative_batch(batch)
         self._emit_prefill_start_for_batch(batch)
         self._stamp_batch_launch(batch)
         sched_output = self._build_sched_output(batch)
@@ -1408,6 +1428,57 @@ class OmniScheduler:
         self._emit_prefill_end_for_batch(batch)
         self._emit_stream_output(sched_output, mr_output)
         return self._make_batch_result(mr_output)
+
+    def _run_speculative_batch(self, batch):
+        """Keep the upstream synchronous draft/verify and acceptance contract."""
+        from sglang.srt.managers.overlap_utils import resolve_forward_inputs
+
+        self._emit_prefill_start_for_batch(batch)
+        self._stamp_batch_launch(batch)
+        resolve_forward_inputs(batch, self.future_map)
+        with self._forward_isolation(batch, overlap=False):
+            result = self.model_worker.forward_batch_generation(batch)
+        batch.spec_info = result.next_draft_input
+        if result.new_seq_lens is not None:
+            batch.seq_lens = result.new_seq_lens
+            if batch.seq_lens_cpu is not None:
+                batch.seq_lens_cpu = result.new_seq_lens.to("cpu")
+                batch.seq_lens_sum = int(batch.seq_lens_cpu.sum())
+        batch.input_ids = None
+        self.update_cache_from_scheduler(batch, result)
+        result.copy_done = self.device_module.Event()
+        result.copy_to_cpu(
+            return_logprob=batch.return_logprob,
+            return_hidden_states=batch.return_hidden_states,
+        )
+        self._emit_prefill_end_for_batch(batch)
+        return result
+
+    def _emit_accepted_tokens(self, req) -> None:
+        """Send only committed, stop-trimmed tokens after upstream acceptance."""
+        from sglang_omni.scheduling.types import RequestOutput
+
+        with self._request_admission_lock:
+            if (
+                req.rid in self._aborted_request_ids
+                or isinstance(req.finished_reason, FINISH_ABORT)
+                or req._omni_terminal_claimed
+                or req._omni_data is None
+                or req.inflight_middle_chunks > 0
+            ):
+                return
+            tokens = req.output_ids_through_stop
+            cursor = getattr(req, "_omni_emitted_token_count", 0)
+            if cursor > len(tokens):
+                raise RuntimeError("Committed speculative output shrank after emission")
+            if self._stream_output_builder is not None:
+                for token in tokens[cursor:]:
+                    output = RequestOutput(request_id=req.rid, data=int(token))
+                    self._put_stream_messages(
+                        req.rid,
+                        self._stream_output_builder(req.rid, req._omni_data, output),
+                    )
+            req._omni_emitted_token_count = len(tokens)
 
     def _build_sched_output(self, batch):
         """Wrap a ScheduleBatch into the SchedulerOutput the model runner
@@ -1591,6 +1662,8 @@ class OmniScheduler:
         for req in reqs:
             if skip_req is not None and req is skip_req:
                 continue
+            if getattr(self, "_native_speculative", False):
+                self._emit_accepted_tokens(req)
             if not req.finished():
                 continue
 
@@ -1636,7 +1709,11 @@ class OmniScheduler:
                 model_runner = self._model_runner
                 if model_runner is not None:
                     model_runner.on_request_finished(rid, data)
-                data.output_ids = list(req.output_ids)
+                data.output_ids = list(
+                    req.output_ids_through_stop
+                    if getattr(self, "_native_speculative", False)
+                    else req.output_ids
+                )
                 data.weight_version = get_serving().weight_version
                 finished_reason = req.finished_reason
                 data.finish_reason = (
@@ -1885,6 +1962,22 @@ class OmniScheduler:
         self, action: str, payload: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         payload = dict(payload or {})
+        if getattr(self, "_native_speculative", False) and action in (
+            ADMIN_UPDATE_WEIGHTS_FROM_DISK,
+            ADMIN_UPDATE_WEIGHTS_FROM_TENSOR,
+            ADMIN_UPDATE_WEIGHTS_FROM_DISTRIBUTED,
+            ADMIN_INIT_WEIGHTS_UPDATE_GROUP,
+            ADMIN_DESTROY_WEIGHTS_UPDATE_GROUP,
+        ):
+            message = (
+                "Live weight updates are unsupported with native speculative decoding"
+            )
+            return {
+                "success": False,
+                "message": message,
+                "error": message,
+                "data": {"unsupported": True},
+            }
         if action == ADMIN_MODEL_INFO:
             return self._admin_model_info()
         if action == ADMIN_PAUSE_GENERATION:
@@ -1911,6 +2004,8 @@ class OmniScheduler:
 
     def _admin_model_info(self) -> dict[str, Any]:
         info = self.model_worker.model_info()
+        if getattr(self, "_native_speculative", False):
+            info["supports_weight_update"] = False
         with self._request_admission_lock:
             request_build_pending = len(self._pending_request_builds)
             request_admission_pending = len(self._pending_request_admissions)

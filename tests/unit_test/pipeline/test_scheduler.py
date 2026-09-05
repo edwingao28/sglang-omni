@@ -1930,6 +1930,7 @@ def _construct_omni_scheduler(
         device=torch.device("cpu"),
     )
     server_args = SimpleNamespace(
+        speculative_algorithm=None,
         tp_size=1,
         pp_size=1,
         dp_size=1,
@@ -2125,6 +2126,7 @@ def test_omni_scheduler_binds_one_execution_bridge_to_any_runner(
         device=torch.device("cpu"),
     )
     server_args = SimpleNamespace(
+        speculative_algorithm=None,
         tp_size=1,
         pp_size=1,
         dp_size=1,
@@ -2195,6 +2197,7 @@ def test_omni_scheduler_refuses_overlap_with_async_decode(monkeypatch) -> None:
         device=torch.device("cpu"),
     )
     server_args = SimpleNamespace(
+        speculative_algorithm=None,
         tp_size=1,
         pp_size=1,
         dp_size=1,
