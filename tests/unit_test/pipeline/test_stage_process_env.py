@@ -53,8 +53,9 @@ def _worker_spec(*stage_specs: StageLaunchConfig) -> StageWorkerProcessSpec:
 
 
 @pytest.mark.parametrize("fail_stage", [False, True])
+@pytest.mark.parametrize("cuda_initialized", [False, True])
 def test_stage_process_releases_distributed_group_on_exit(
-    monkeypatch, tmp_path, fail_stage
+    monkeypatch, tmp_path, fail_stage, cuda_initialized
 ) -> None:
     dist = torch.distributed
     if not dist.is_available() or not dist.is_gloo_available():
@@ -70,6 +71,14 @@ def test_stage_process_releases_distributed_group_on_exit(
     monkeypatch.setattr(
         stage_workers, "_reclaim_process_cuda_memory", lambda *a, **k: None
     )
+    collected = []
+
+    def collect_ipc():
+        assert not dist.is_initialized()
+        collected.append(True)
+
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: cuda_initialized)
+    monkeypatch.setattr(torch.cuda, "ipc_collect", collect_ipc)
 
     def run_stage(*args):
         dist.init_process_group(
@@ -88,6 +97,7 @@ def test_stage_process_releases_distributed_group_on_exit(
         else:
             stage_workers.stage_process_main(spec, None)
         assert not dist.is_initialized()
+        assert collected == ([True] if cuda_initialized and not fail_stage else [])
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()

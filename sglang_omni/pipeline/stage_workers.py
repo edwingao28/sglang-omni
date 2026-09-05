@@ -446,6 +446,11 @@ def stage_process_main(
     else:
         # note(wenyao): Normal exit must release groups after scheduler threads stop.
         _destroy_torch_distributed_process_group(log)
+        import torch
+
+        # note(wenyao): Collect retired IPC exports before Torch's global teardown.
+        if torch.cuda.is_initialized():
+            torch.cuda.ipc_collect()
 
 
 def _run_process(
