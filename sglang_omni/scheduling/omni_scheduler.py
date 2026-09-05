@@ -505,6 +505,7 @@ class OmniScheduler:
         self._init_upstream_scheduler_components()
 
         self._running = False
+        self._stop_requested = False
         self._aborted_request_ids: set[str] = set()
         self._aborted_request_id_order: deque[str] = deque()
         # Normal completion closes stream ingress for the request. Keep a
@@ -834,13 +835,20 @@ class OmniScheduler:
         if self.tp_size == 1:
             return self._drain_local_inbox()
 
-        recv_msgs = self._drain_local_inbox() if self.is_entry_rank else []
-        return broadcast_pyobj(
+        recv_msgs = []
+        if self.is_entry_rank:
+            recv_msgs = [None] if self._stop_requested else self._drain_local_inbox()
+        recv_msgs = broadcast_pyobj(
             recv_msgs,
             self.tp_group.rank,
             self.tp_cpu_group,
             src=self.tp_group.ranks[0],
         )
+        # note(wenyao): Every TP rank leaves the same input collective before exit.
+        if recv_msgs == [None]:
+            self._running = False
+            return []
+        return recv_msgs
 
     def _drain_local_inbox(self) -> list[IncomingMessage]:
         recv_msgs: list[IncomingMessage] = []
@@ -1803,8 +1811,11 @@ class OmniScheduler:
             self._dirty_deferred_request_ids.add(request_id)
 
     def start(self) -> None:
-        self._scheduler_thread_id = threading.get_ident()
-        self._running = True
+        with self._shutdown_lock:
+            if self._stop_requested:
+                return
+            self._scheduler_thread_id = threading.get_ident()
+            self._running = True
         model_path_status = "error"
         try:
             if self.enable_async_decode:
@@ -1815,21 +1826,30 @@ class OmniScheduler:
                 self._event_loop_normal()
             model_path_status = "aborted"
         finally:
-            self._emit_remaining_model_path_ends(status=model_path_status)
-            self._scheduler_thread_id = None
+            self._running = False
             try:
-                self._shutdown_request_build_executor()
+                self._emit_remaining_model_path_ends(status=model_path_status)
+                try:
+                    self._shutdown_request_build_executor()
+                finally:
+                    self._discard_pending_request_admissions()
+                    self._shutdown_resources()
             finally:
-                self._discard_pending_request_admissions()
-                self._shutdown_resources()
+                self._scheduler_thread_id = None
 
     def event_loop(self) -> None:
         self.start()
 
     def stop(self) -> None:
-        self._running = False
-        self._discard_pending_request_admissions()
-        self._shutdown_resources()
+        with self._shutdown_lock:
+            self._stop_requested = True
+            active = self._scheduler_thread_id is not None
+            if not active or self.tp_size == 1:
+                self._running = False
+        # note(wenyao): Active threads own cleanup after their last forward/collective.
+        if not active:
+            self._discard_pending_request_admissions()
+            self._shutdown_resources()
 
     def _discard_pending_request_admissions(self) -> None:
         with self._request_admission_lock:
@@ -2410,6 +2430,8 @@ class OmniScheduler:
         while self._running:
             self._process_admin_requests()
             recv_reqs = self.recv_requests()
+            if not self._running:
+                break
             recv_reqs.extend(self._take_deferred_request_payloads())
             self.process_input_requests(recv_reqs)
             if self._engine_paused:
@@ -2625,6 +2647,8 @@ class OmniScheduler:
         while self._running:
             self._process_admin_requests()
             recv_reqs = self.recv_requests()
+            if not self._running:
+                break
             recv_reqs.extend(self._take_deferred_request_payloads())
             self.process_input_requests(recv_reqs)
             if self._engine_paused:
@@ -2700,6 +2724,9 @@ class OmniScheduler:
             self.last_batch = batch
             if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
                 self.self_check_during_busy()
+
+        # note(wenyao): TP1 can be stopped while a launch is still publishing its step.
+        self._resolve_pending_async()
 
     def _drain_inbox_for_request(self, request_id: str) -> None:
         retained: list[IncomingMessage] = []
