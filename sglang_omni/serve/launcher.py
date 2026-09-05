@@ -99,6 +99,8 @@ def _find_available_port(host: str, port: int) -> int:
     """
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            # note(wenyao): Match Uvicorn's reuse of a closed server's TIME_WAIT port.
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind((host, port))
             return port
     except OSError as exc:
