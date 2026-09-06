@@ -36,6 +36,7 @@ def _runner(
     runner = object.__new__(QwenTalkerModelRunner)
     runner.model = model
     runner._feedback_enabled = True
+    runner._request_is_aborted = None
     runner._code2wav_target = "code2wav"
     runner._codec_coalesce_frames = coalesce
     runner._codec_coalesce_early_frames = 0

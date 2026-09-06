@@ -24,6 +24,7 @@ def _runner(model: SimpleNamespace) -> QwenTalkerModelRunner:
     runner = object.__new__(QwenTalkerModelRunner)
     runner.model = model
     runner._feedback_enabled = True
+    runner._request_is_aborted = None
     runner._code2wav_target = "code2wav"
     runner._codec_coalesce_frames = 0
     runner._outbox = SimpleNamespace(sent=[])
