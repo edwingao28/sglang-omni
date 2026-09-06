@@ -307,3 +307,28 @@ def test_qwen3_omni_talker_stage_keeps_greedy_selection_off_aiter_on_rocm(
 
         assert _stage(config, "talker_ar").env == expected_env
         assert _stage(config, "thinker").env == {}
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_talker_start_topology_reaches_bootstrap(monkeypatch, enabled):
+    from sglang_omni.models.qwen3_omni import bootstrap, stages
+
+    manager = ConfigManager(Qwen3OmniSpeechColocatedPipelineConfig(model_path="dummy"))
+    config = manager.merge_config(
+        {
+            "talker_ar.factory.enable_talker_start_topology": enabled,
+            "talker_ar.factory.enable_partial_start": True,
+            "talker_ar.engine.disable_cuda_graph": True,
+        }
+    )
+    args = resolve_stage_factory_args(_stage(config, "talker_ar"), config)
+    monkeypatch.setattr(stages, "avail_gpu_mem", lambda *_: 0)
+    monkeypatch.setattr(stages, "get_process_gpu_memory_bytes", lambda *_: 0)
+    monkeypatch.setattr(stages, "validate_generation_batch_policy", lambda **_: None)
+    monkeypatch.setattr(
+        bootstrap, "create_talker_scheduler", lambda *_, **kwargs: kwargs
+    )
+    received = stages.create_talker_ar_executor_from_config(**args)
+    assert received["enable_talker_start_topology"] is enabled
+    assert received["enable_partial_start"] is True
+    assert received["partial_start_min_chunks"] == 5
