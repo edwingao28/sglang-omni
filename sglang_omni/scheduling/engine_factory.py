@@ -117,6 +117,13 @@ class SGLangGenerationEngineBuilder(ABC):
             model_name=self.model_name,
         )
 
+        from sglang_omni.model_runner.hybrid_prefill_router import (
+            extract_hybrid_prefill_overrides,
+        )
+
+        server_args_overrides, hybrid_full_bs = extract_hybrid_prefill_overrides(
+            server_args_overrides
+        )
         operator_selected_prefill_backend = _operator_selected_prefill_graph_backend(
             server_args_overrides
         )
@@ -228,6 +235,17 @@ class SGLangGenerationEngineBuilder(ABC):
                 cuda_graph_batch_validator.attest_prefill_cuda_graphs(
                     model_worker.model_runner, server_args
                 )
+            if hybrid_full_bs is not None:
+                from sglang_omni.model_runner.hybrid_prefill_router import (
+                    install_hybrid_full_prefill,
+                )
+
+                install_hybrid_full_prefill(model_worker, hybrid_full_bs, server_args)
+        elif hybrid_full_bs is not None:
+            raise RuntimeError(
+                "prefill backend 'hybrid' was declared but CUDA graphs are "
+                "disabled for this stage"
+            )
 
         try:
             # Model-local encoder graphs and caches must be initialized after

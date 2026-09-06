@@ -19,6 +19,7 @@ def create_thinker_scheduler(
     prefill_coalesce_requests: int = 0,
     prefill_coalesce_wait_ms: float = 60.0,
     prefill_coalesce_when_idle: bool = False,
+    hybrid_full_bs: list[int] | None = None,
 ):
     """Create the Qwen thinker scheduler."""
     from sglang.srt.utils.hf_transformers_utils import get_tokenizer
@@ -80,6 +81,17 @@ def create_thinker_scheduler(
     if prefill_graph_backend == CudaGraphBackend.BREAKABLE:
         cuda_graph_batch_validator.attest_prefill_cuda_graphs(
             model_worker.model_runner, server_args
+        )
+        if hybrid_full_bs is not None:
+            from sglang_omni.model_runner.hybrid_prefill_router import (
+                install_hybrid_full_prefill,
+            )
+
+            install_hybrid_full_prefill(model_worker, hybrid_full_bs, server_args)
+    elif hybrid_full_bs is not None:
+        raise RuntimeError(
+            "prefill backend 'hybrid' was declared but the thinker prefill "
+            "graph backend resolved to a non-BREAKABLE mode"
         )
 
     def _should_generate_qwen_audio_output(request: Any) -> bool:
