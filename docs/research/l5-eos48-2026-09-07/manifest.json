@@ -1,0 +1,15 @@
+{
+  "baseline_omni_commit": "8cc5739cb18d6d5ecf3d65e69f514699706fe9dc",
+  "historical_source_worktree": "/Users/wenyaogao/dev/sgl/sglang-omni-eos48-cheap-20260903",
+  "historical_source_base": "73b9e0d55de5daa39f6b55720bbd822ef36fa530",
+  "baseline_config_source": "/Users/wenyaogao/benchmark-results/qwen3-omni/merge-fixes-20260906-a01/h100-packages/full-seedtts-en-serving-a01/configs/s5.yaml",
+  "configs": {
+    "s5.yaml": "a841e2a49e5d714b3da54a5e4ceab9702e5b4524114d1554c82004b68fd4ab98",
+    "s5-eos48.yaml": "2d8010d287fce3879c83aed26124d0554fa8dcee69d42c2beb7634b62748bbd0"
+  },
+  "config_delta": {
+    "stages.code2wav.factory.enable_eos_cuda_graph": true,
+    "stages.code2wav.factory.eos_cuda_graph_max_frames": 48
+  },
+  "actual_gpu_execution": false
+}

@@ -1,0 +1,8 @@
+{
+  "passed": true,
+  "only_added_factory_fields": {
+    "enable_eos_cuda_graph": true,
+    "eos_cuda_graph_max_frames": 48
+  },
+  "l5_fused_batching_and_memory_preserved": true
+}

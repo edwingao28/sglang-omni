@@ -1,0 +1,106 @@
+config_cls: Qwen3OmniSpeechPipelineConfig
+name: five-prefix-s5
+model_path: /root/.cache/huggingface/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/snapshots/26291f793822fb6be9555850f06dfe95f2d7e695
+stages:
+  preprocessing:
+    factory:
+      max_seq_len: 32768
+  image_encoder:
+    gpu_memory_fraction: 0.02
+    gpu: 0
+  audio_encoder:
+    gpu_memory_fraction: 0.02
+    factory:
+      enable_layer_cuda_graph: true
+    gpu: 0
+  thinker:
+    gpu_memory_fraction: 0.9
+    factory:
+      max_seq_len: 32768
+    engine:
+      max_running_requests: 64
+      enable_mixed_chunk: true
+      chunked_prefill_size: 32768
+      cuda_graph_config:
+        prefill:
+          backend: hybrid
+          full_prefill_max_req: 64
+      cuda_graph_bs_prefill:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 512
+      - 1024
+      cuda_graph_bs_prefill_full:
+      - 1280
+      - 1536
+      - 1792
+      - 2048
+      - 2560
+      - 3072
+      - 3584
+      - 4096
+      - 4608
+      - 5120
+      - 6144
+    gpu: 0
+  talker_ar:
+    gpu_memory_fraction: 0.6
+    factory:
+      enable_partial_start: true
+      partial_start_min_chunks: 3
+      assistant_projection_cache_size: 4096
+      prefill_coalesce_requests: 4
+      prefill_coalesce_wait_ms: 40.0
+      prefill_coalesce_when_idle: false
+      enable_async_decode: true
+      async_decode_min_batch_size: 2
+      code_predictor_skip_scratch_writes: true
+      enable_talker_start_topology: false
+    engine:
+      max_running_requests: 64
+      enable_mixed_chunk: true
+      cuda_graph_config:
+        prefill:
+          backend: breakable
+      cuda_graph_bs_prefill:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 32
+      - 64
+      - 128
+      - 256
+      - 384
+      - 512
+      - 640
+      - 768
+      - 896
+      - 1024
+    gpu: 1
+  code2wav:
+    gpu_memory_fraction: 0.1
+    factory:
+      initial_codec_chunk_frames: 2
+      stream_chunk_size: 10
+      enable_batching: true
+      snake_beta_implementation: fused
+      max_batch_wait_ms: 8
+      batch_floor: 4
+      batch_ceiling: 16
+      enable_eos_cuda_graph: true
+      eos_cuda_graph_max_frames: 48
+    gpu: 1
+boot_warmup_requests: 32
+env_defaults:
+  SGLANG_JIT_DEEPGEMM_PRECOMPILE: '0'
+  OMP_NUM_THREADS: '8'
+  TOKENIZERS_PARALLELISM: 'false'
