@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import pytest
@@ -21,6 +21,11 @@ from sglang_omni.utils.gpu_memory import get_gpu_startup_lock_path
 from tests.unit_test.fixtures.pipeline_fakes import FakeScheduler, fake_factory_path
 
 cuda_platform = CUDAOmniPlatform()
+_CUDA_TP_MASKS = [
+    "3,4",
+    "GPU-00000000-0000-0000-0000-000000000003,"
+    "GPU-00000000-0000-0000-0000-000000000004",
+]
 
 
 @pytest.fixture(autouse=True)
@@ -103,13 +108,15 @@ def test_stage_process_releases_distributed_group_on_exit(
             dist.destroy_process_group()
 
 
-def test_tp_process_env_maps_logical_gpu_through_visible_devices() -> None:
-    env = cuda_platform.get_stage_process_env(
-        _tp_spec(gpu_id=1), {"CUDA_VISIBLE_DEVICES": "3,4"}
-    )
+@pytest.mark.parametrize("visible_devices", [None, *_CUDA_TP_MASKS])
+def test_tp_process_env_preserves_common_device_namespace(visible_devices) -> None:
+    parent_env = {"CUDA_VISIBLE_DEVICES": visible_devices} if visible_devices else {}
+    env = cuda_platform.get_stage_process_env(_tp_spec(gpu_id=1), parent_env)
 
-    assert env["CUDA_VISIBLE_DEVICES"] == "4"
-    assert env["SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS"] == "true"
+    assert env == {"SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK": "false"}
+    assert parent_env == (
+        {"CUDA_VISIBLE_DEVICES": visible_devices} if visible_devices else {}
+    )
 
 
 def test_tp_process_env_turns_nccl_nvls_off() -> None:
@@ -277,6 +284,64 @@ def test_xpu_tp_rank_keeps_its_card_despite_an_inherited_cuda_marker(
     assert "CUDA_VISIBLE_DEVICES" not in os.environ
 
 
+@pytest.mark.parametrize("visible_devices", _CUDA_TP_MASKS)
+def test_tp_children_keep_distinct_devices_in_common_namespace(
+    monkeypatch, visible_devices
+) -> None:
+    monkeypatch.setattr(stage_workers, "current_platform", cuda_platform)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible_devices)
+    monkeypatch.delenv("SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS", raising=False)
+    monkeypatch.setenv("SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK", "true")
+
+    for rank in range(2):
+        spec = StageLaunchConfig(
+            stage_name="thinker",
+            role="leader" if rank == 0 else "follower",
+            tp_rank=rank,
+            tp_size=2,
+            gpu_id=rank,
+            factory_kwargs={"gpu_id": rank},
+            typed_kwargs={"gpu_id": rank},
+            factory_arg_defaults={"gpu_id": rank},
+            comm_config={"gpu_id": rank},
+        )
+
+        stage_workers._prepare_accelerator_environment(spec, _RecordingLog())
+
+        assert spec.gpu_id == rank
+        assert spec.placement_gpu_id is None
+        assert spec.factory_kwargs["gpu_id"] == rank
+        assert spec.typed_kwargs["gpu_id"] == rank
+        assert spec.factory_arg_defaults["gpu_id"] == rank
+        assert spec.comm_config["gpu_id"] == rank
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == visible_devices
+        assert "SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS" not in os.environ
+        assert os.environ["SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK"] == "false"
+
+
+@pytest.mark.parametrize("visible_devices", _CUDA_TP_MASKS)
+def test_explicit_single_visible_spawn_keeps_each_tp_rank_on_its_device(
+    monkeypatch, visible_devices
+) -> None:
+    monkeypatch.setattr(stage_workers, "current_platform", cuda_platform)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible_devices)
+    monkeypatch.setenv("SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS", "true")
+    monkeypatch.setenv("SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK", "true")
+
+    for rank, visible_device in enumerate(visible_devices.split(",")):
+        spec = _tp_spec(gpu_id=rank)
+        with _patched_spawn_env(_worker_spec(spec)):
+            assert os.environ["CUDA_VISIBLE_DEVICES"] == visible_device
+            stage_workers._prepare_accelerator_environment(spec, _RecordingLog())
+            assert spec.gpu_id == 0
+            assert spec.placement_gpu_id == rank
+            assert os.environ["SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS"] == "true"
+
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == visible_devices
+        assert os.environ["SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS"] == "true"
+        assert os.environ["SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK"] == "true"
+
+
 def test_tp_child_keeps_parent_mapped_visible_device(monkeypatch) -> None:
     """Child startup normalizes the already-mapped TP device to local cuda:0."""
     monkeypatch.setattr(stage_workers, "current_platform", cuda_platform)
@@ -362,20 +427,37 @@ def test_spawn_env_preserves_operator_stage_defaults(monkeypatch) -> None:
     assert os.environ["SGLANG_TEST_STAGE_ENV"] == "operator"
 
 
-def test_spawn_env_combines_stage_defaults_with_tp_visible_device(monkeypatch) -> None:
+@pytest.mark.parametrize("visible_devices", _CUDA_TP_MASKS)
+@pytest.mark.parametrize("fail_spawn", [False, True])
+def test_spawn_env_preserves_common_tp_mask_and_restores_defaults(
+    monkeypatch, visible_devices, fail_spawn
+) -> None:
     monkeypatch.delenv("SGLANG_TEST_STAGE_ENV", raising=False)
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,4")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible_devices)
+    monkeypatch.delenv("SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS", raising=False)
+    monkeypatch.setenv("SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK", "true")
     monkeypatch.setattr(stage_workers, "current_platform", cuda_platform)
     stage_spec = _tp_spec(gpu_id=1)
     stage_spec.env_defaults = {"SGLANG_TEST_STAGE_ENV": "default"}
 
-    with _patched_spawn_env(_worker_spec(stage_spec)):
-        assert os.environ["SGLANG_TEST_STAGE_ENV"] == "default"
-        assert os.environ["CUDA_VISIBLE_DEVICES"] == "4"
-        assert os.environ["SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS"] == "true"
+    expected = (
+        pytest.raises(RuntimeError, match="spawn failed")
+        if fail_spawn
+        else nullcontext()
+    )
+    with expected:
+        with _patched_spawn_env(_worker_spec(stage_spec)):
+            assert os.environ["SGLANG_TEST_STAGE_ENV"] == "default"
+            assert os.environ["CUDA_VISIBLE_DEVICES"] == visible_devices
+            assert "SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS" not in os.environ
+            assert os.environ["SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK"] == "false"
+            if fail_spawn:
+                raise RuntimeError("spawn failed")
 
     assert "SGLANG_TEST_STAGE_ENV" not in os.environ
-    assert os.environ["CUDA_VISIBLE_DEVICES"] == "3,4"
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == visible_devices
+    assert "SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS" not in os.environ
+    assert os.environ["SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK"] == "true"
 
 
 def test_rocm_spawn_env_maps_rank_through_hip_visible_devices(monkeypatch) -> None:
