@@ -21,6 +21,7 @@ from sglang_omni.proto import (
     OmniRequest,
     StreamMessage,
 )
+from sglang_omni.scheduling.types import KV_CAPACITY_ERROR_PREFIX
 from sglang_omni.serve import create_app
 from sglang_omni.serve.openai_api import (
     _await_speech_response,
@@ -2660,7 +2661,7 @@ def test_transcription_endpoint_preserves_audio_backend_error_as_500() -> None:
 
 def test_transcription_endpoint_maps_kv_capacity_error_to_400() -> None:
     bad_request_error = (
-        "Request requires more tokens than the thinker KV cache can hold "
+        f"{KV_CAPACITY_ERROR_PREFIX} "
         "(input_tokens=1500, max_new_tokens=128, required_tokens=1628, "
         "kv_capacity=1600)."
     )
@@ -2678,7 +2679,7 @@ def test_transcription_endpoint_maps_kv_capacity_error_to_400() -> None:
     )
 
     assert response.status_code == 400
-    assert "thinker KV cache" in response.json()["detail"]
+    assert KV_CAPACITY_ERROR_PREFIX in response.json()["detail"]
 
 
 def test_transcription_endpoint_maps_max_new_tokens_error_to_400() -> None:

@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import torch
 
+KV_CAPACITY_ERROR_PREFIX = "Request requires more tokens than the KV cache can hold"
+
 
 class SchedulerStatus(Enum):
     WAITING = auto()

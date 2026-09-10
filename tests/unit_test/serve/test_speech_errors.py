@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 
 from sglang_omni.admission import QueueFullError
+from sglang_omni.scheduling.types import KV_CAPACITY_ERROR_PREFIX
 from sglang_omni.serve.speech_errors import speech_generation_error
 
 
@@ -30,7 +31,7 @@ def test_speech_generation_error_keeps_other_failures_as_500() -> None:
     [
         "The request is longer than the model's context length",
         "Requested token count exceeds the model's maximum context length",
-        "Request requires more tokens than the thinker KV cache can hold",
+        KV_CAPACITY_ERROR_PREFIX,
         "Request req-1 exceeds the maximum number of tokens: 8193 > 8192",
         "Request req-1 requires too many SWA KV tokens for decode preallocation",
     ],

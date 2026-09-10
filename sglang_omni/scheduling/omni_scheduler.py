@@ -61,7 +61,11 @@ from sglang_omni.proto.admin import (
     ADMIN_WEIGHTS_CHECKER,
 )
 from sglang_omni.scheduling.messages import IncomingMessage, OutgoingMessage
-from sglang_omni.scheduling.types import ARRequestData, DeferredAdmission
+from sglang_omni.scheduling.types import (
+    KV_CAPACITY_ERROR_PREFIX,
+    ARRequestData,
+    DeferredAdmission,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1320,17 +1324,19 @@ class OmniScheduler:
         )
         mem_fraction = get_schedule().mem_fraction_static
         if kv_cache_bytes is not None:
-            mem_hint = " Try raising engine.kv_cache_bytes."
-        elif mem_fraction is not None:
-            mem_hint = (
-                f" Current mem_fraction_static is {mem_fraction:.3f}; try setting "
-                "--thinker-mem-fraction-static higher."
-            )
+            mem_hint = " Try raising <stage>.engine.kv_cache_bytes."
         else:
-            mem_hint = " Try setting a higher --thinker-mem-fraction-static value."
+            mem_hint = (
+                " Try raising <stage>.engine.mem_fraction_static, or "
+                "--mem-fraction-static for every stage."
+            )
+            if mem_fraction is not None:
+                mem_hint = (
+                    f" Current mem_fraction_static is {mem_fraction:.3f}.{mem_hint}"
+                )
 
         return (
-            "Request requires more tokens than the thinker KV cache can hold "
+            f"{KV_CAPACITY_ERROR_PREFIX} "
             f"(input_tokens={input_len}, max_new_tokens={max_new_tokens}, "
             f"required_tokens={required_tokens}, kv_capacity={kv_capacity})."
             f"{mem_hint}"

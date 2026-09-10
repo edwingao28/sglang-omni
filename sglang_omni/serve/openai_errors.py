@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import re
 
+from sglang_omni.scheduling.types import KV_CAPACITY_ERROR_PREFIX
+
 _BAD_REQUEST_MARKERS = (
     "Unsupported language:",
     "longer than the model's context length",
     "Requested token count exceeds the model's maximum context length",
-    "Request requires more tokens than the thinker KV cache can hold",
+    KV_CAPACITY_ERROR_PREFIX,
     "accepts audio up to",
     "could not decode the uploaded audio",
     "max_new_tokens must be",
