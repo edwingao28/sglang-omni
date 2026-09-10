@@ -16,7 +16,6 @@ from sglang_omni.models.qwen3_omni.payload_types import Qwen3OmniPipelineState
 from sglang_omni.models.qwen3_omni.request_builders import (
     _compute_mrope_positions,
     build_sglang_thinker_request,
-    build_thinker_request,
 )
 from tests.unit_test.fixtures.qwen_fakes import (
     FakeQwenTokenizer,
@@ -42,9 +41,6 @@ def test_empty_model_inputs_are_not_replaced_by_the_flat_state(monkeypatch):
     state = Qwen3OmniPipelineState.from_dict(merged.data)
     assert state.thinker_inputs == {"model_inputs": {}}
 
-    generic = build_thinker_request(state, params={"max_new_tokens": 3})
-    assert generic.model_inputs == {}
-
     sglang_request = build_sglang_thinker_request(
         state,
         params={"max_new_tokens": 3},
@@ -64,8 +60,7 @@ def test_empty_model_inputs_are_not_replaced_by_the_flat_state(monkeypatch):
     assert getattr(sglang_request.req, "_omni_mm_positions", None) is None
 
 
-@pytest.mark.parametrize("entrypoint", ["generic", "sglang"])
-def test_nested_non_dict_model_inputs_fail_loudly(monkeypatch, entrypoint):
+def test_nested_non_dict_model_inputs_fail_loudly(monkeypatch):
     _patch_sampling_validation(monkeypatch)
     state = make_qwen_state(thinker_inputs={"model_inputs": ["malformed"]})
 
@@ -73,24 +68,22 @@ def test_nested_non_dict_model_inputs_fail_loudly(monkeypatch, entrypoint):
         TypeError,
         match="Qwen3-Omni thinker model_inputs must be a dict when provided",
     ):
-        if entrypoint == "generic":
-            build_thinker_request(state, params={"max_new_tokens": 3})
-        else:
-            build_sglang_thinker_request(
-                state,
-                params={"max_new_tokens": 3},
-                tokenizer=FakeQwenTokenizer(),
-                vocab_size=256,
-                request_id="malformed-model-inputs",
-                thinker_config=SimpleNamespace(
-                    image_token_id=55,
-                    video_token_id=66,
-                    audio_token_id=77,
-                ),
-            )
+        build_sglang_thinker_request(
+            state,
+            params={"max_new_tokens": 3},
+            tokenizer=FakeQwenTokenizer(),
+            vocab_size=256,
+            request_id="malformed-model-inputs",
+            thinker_config=SimpleNamespace(
+                image_token_id=55,
+                video_token_id=66,
+                audio_token_id=77,
+            ),
+        )
 
 
-def test_legacy_flat_payloads_still_reach_the_model_input_field():
+def test_legacy_flat_payloads_still_reach_the_model_input_field(monkeypatch):
+    _patch_sampling_validation(monkeypatch)
     audio_embeds = torch.ones((1, 4))
     state = make_qwen_state(
         thinker_inputs={
@@ -99,9 +92,16 @@ def test_legacy_flat_payloads_still_reach_the_model_input_field():
         }
     )
 
-    request = build_thinker_request(state, params={"max_new_tokens": 3})
+    sglang_request = build_sglang_thinker_request(
+        state,
+        params={"max_new_tokens": 3},
+        tokenizer=FakeQwenTokenizer(),
+        vocab_size=256,
+        request_id="legacy-flat",
+    )
 
-    assert request.model_inputs == {"audio_embeds": audio_embeds}
+    assert sglang_request.model_inputs == {"audio_embeds": audio_embeds}
+    assert sglang_request.req.omni_model_inputs == {"audio_embeds": audio_embeds}
 
 
 def test_pure_text_qwen_mrope_is_ordinary_sequential_positions():

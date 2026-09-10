@@ -530,7 +530,6 @@ models/qwen3_omni/
 ├── hf_config.py           — HF config classes
 ├── merge.py               — Merge 3 encoder outputs for thinker
 ├── components/
-│   ├── thinker.py         — Model loader/wrapper (Qwen3OmniSplitThinker)
 │   ├── thinker_model.py   — SGLang thinker model definition
 │   ├── talker.py          — SGLang talker model (fused MTP)
 │   ├── preprocessor.py    — Tokenize, load media, apply HF processor

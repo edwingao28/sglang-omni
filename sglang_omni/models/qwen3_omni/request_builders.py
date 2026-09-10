@@ -23,7 +23,6 @@ from sglang_omni.models.qwen3_omni.pending_text_queue import (
 from sglang_omni.proto import OmniRequest, StagePayload
 from sglang_omni.scheduling.messages import OutgoingMessage
 from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
-from sglang_omni.scheduling.types import ARRequestData
 
 logger = logging.getLogger(__name__)
 
@@ -482,34 +481,6 @@ def _extract_thinker_model_inputs(thinker_inputs: dict[str, Any]) -> dict[str, A
         for key, value in thinker_inputs.items()
         if key not in ("capture_model_output_keys", "media_cache_keys")
     }
-
-
-def build_thinker_request(
-    state: Qwen3OmniPipelineState,
-    *,
-    params: dict[str, Any],
-) -> ARRequestData:
-    prompt = state.prompt
-    input_ids = prompt["input_ids"]
-    attention_mask = prompt.get("attention_mask")
-    thinker_inputs = state.thinker_inputs or {}
-
-    model_inputs = _extract_thinker_model_inputs(thinker_inputs)
-
-    capture_keys = thinker_inputs.get("capture_model_output_keys", ())
-    if "attention_mask" in model_inputs:
-        model_inputs.pop("attention_mask", None)
-
-    return ARRequestData(
-        input_ids=input_ids.to(dtype=torch.long),
-        attention_mask=(
-            attention_mask if isinstance(attention_mask, torch.Tensor) else None
-        ),
-        model_inputs=model_inputs,
-        capture_model_output_keys=tuple(capture_keys) if capture_keys else (),
-        max_new_tokens=params.get("max_new_tokens"),
-        temperature=params.get("temperature", 0.0),
-    )
 
 
 def _compute_mrope_positions(

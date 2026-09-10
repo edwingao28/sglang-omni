@@ -18,14 +18,12 @@ if TYPE_CHECKING:
     from sglang_omni.models.qwen3_omni.components.preprocessor import (
         Qwen3OmniPreprocessor,
     )
-    from sglang_omni.models.qwen3_omni.components.thinker import Qwen3OmniSplitThinker
 
 __all__ = [
     "Qwen3OmniPreprocessor",
     "Qwen3OmniSpec",
     "Qwen3OmniAudioEncoder",
     "Qwen3OmniImageEncoder",
-    "Qwen3OmniSplitThinker",
     "config",
 ]
 
@@ -55,10 +53,4 @@ def __getattr__(name: str):
         )
 
         return Qwen3OmniImageEncoder
-    if name == "Qwen3OmniSplitThinker":
-        from sglang_omni.models.qwen3_omni.components.thinker import (
-            Qwen3OmniSplitThinker,
-        )
-
-        return Qwen3OmniSplitThinker
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
