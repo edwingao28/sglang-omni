@@ -208,7 +208,7 @@ def test_default_speech_rejects_same_gpu_thinker_and_talker_colocation() -> None
     ):
         _stage(config, stage_name).gpu_memory_fraction = 0.10
 
-    with pytest.raises(ValueError, match="Qwen3OmniSpeechColocatedPipelineConfig"):
+    with pytest.raises(ValueError, match="colocated_speech_topology"):
         build_stage_placement_plan(config)
 
 

@@ -300,6 +300,7 @@ _SPEECH_DEFAULT_PROCESSES = {
 
 class _Qwen3OmniBasePipelineConfig(PipelineConfig):
     architecture: ClassVar[str] = "Qwen3OmniMoeForConditionalGeneration"
+    colocated_speech_topology: ClassVar[bool] = False
     tensor_parallel_disable_custom_all_reduce_stages: ClassVar[tuple[str, ...]] = (
         THINKER_STAGE,
     )
@@ -389,6 +390,8 @@ class Qwen3OmniSpeechColocatedPipelineConfig(Qwen3OmniSpeechPipelineConfig):
     file so deployments can use hardware-appropriate stage fractions and
     SGLang AR cache fractions.
     """
+
+    colocated_speech_topology: ClassVar[bool] = True
 
     env_defaults: dict[str, str] = Field(
         default_factory=lambda: dict(_COLOCATED_STAGE_ENV_DEFAULTS)

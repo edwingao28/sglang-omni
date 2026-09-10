@@ -23,7 +23,6 @@ _COLOCATED_BUDGET_STAGES = {
     "code2wav",
 }
 _AR_STAGES = ("thinker", "talker_ar")
-_COLOCATED_CONFIG_CLASS = "Qwen3OmniSpeechColocatedPipelineConfig"
 
 
 class Qwen3OmniPlacementPolicy:
@@ -44,7 +43,7 @@ class Qwen3OmniPlacementPolicy:
         if not has_speech_stage:
             return
 
-        if type(config).__name__ == _COLOCATED_CONFIG_CLASS:
+        if getattr(type(config), "colocated_speech_topology", False):
             self._validate_colocated_qwen_replicas(plan)
             self._validate_colocated_qwen_parallelism(stage_map)
             self._validate_colocated_qwen_topology(plan)
@@ -64,7 +63,8 @@ class Qwen3OmniPlacementPolicy:
                     continue
                 raise ValueError(
                     f"Qwen thinker and talker_ar ({talker.stage_name!r}) may "
-                    f"share a GPU only with {_COLOCATED_CONFIG_CLASS}"
+                    "share a GPU only when the config declares "
+                    "colocated_speech_topology = True"
                 )
 
     def _validate_colocated_qwen_replicas(self, plan: StagePlacementPlan) -> None:
