@@ -8,13 +8,19 @@ from typing import Any, ClassVar
 from pydantic import Field
 
 from sglang_omni.config import (
+    CustomVoiceConfig,
     EngineStageConfig,
     FactoryArgs,
     PipelineConfig,
     PlacementConfig,
     StageConfig,
 )
+from sglang_omni.config.runtime import (
+    resolve_stage_factory_kwargs,
+    resolve_stage_typed_kwargs,
+)
 from sglang_omni.platforms import current_platform
+from sglang_omni.utils.hf import load_raw_checkpoint_config
 
 _PKG = "sglang_omni.models.qwen3_omni"
 _PLACEMENT_POLICY = f"{_PKG}.placement.Qwen3OmniPlacementPolicy"
@@ -378,6 +384,22 @@ class Qwen3OmniSpeechPipelineConfig(_Qwen3OmniBasePipelineConfig):
                 "enable_cuda_graph": current_platform.enable_code2wav_graph(),
             }
         return super().stage_factory_kwargs(stage_name)
+
+    def resolve_custom_voice_config(self) -> CustomVoiceConfig | None:
+        talker_stage = self.stage_named("talker_ar")
+        talker_kwargs = {
+            "model_path": self.model_path,
+            **resolve_stage_factory_kwargs(talker_stage, self),
+            **resolve_stage_typed_kwargs(talker_stage),
+        }
+        speakers = (
+            load_raw_checkpoint_config(talker_kwargs["model_path"])
+            .get("talker_config", {})
+            .get("speaker_id")
+        )
+        if not isinstance(speakers, dict) or not speakers:
+            return None
+        return CustomVoiceConfig(speakers=tuple(speakers), task_type=None)
 
 
 class Qwen3OmniSpeechColocatedPipelineConfig(Qwen3OmniSpeechPipelineConfig):

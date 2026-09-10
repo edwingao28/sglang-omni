@@ -109,7 +109,8 @@ tests/
     │   ├── test_talker_speaker.py
     │   ├── test_talker_token_readback.py
     │   ├── test_text_template.py
-    │   └── test_thinker_prefill_contract.py
+    │   ├── test_thinker_prefill_contract.py
+    │   └── test_voice_listing.py
     ├── ming_omni/
     │   ├── test_omni_serve.py
     │   ├── test_pipeline.py
@@ -637,6 +638,11 @@ that happened to contain an older version of the test.
     case-insensitively, an absent voice falls back to Ethan then the first
     checkpoint voice, an unknown voice raises a message `is_bad_request_error`
     classifies as 400, and the `speaker_id` path is used only without a speaker map
+  - checkpoint voice listing (`test_voice_listing.py`): the speech pipeline
+    config reads `talker_config.speaker_id` from a local or hub `config.json`
+    (honouring a talker-stage `model_path` override) into a task-type-less
+    `CustomVoiceConfig`, and returns none for text-only pipelines or
+    checkpoints without a speaker table
   - Code2Wav streaming/cleanup behavior plus bounded batching deadlines,
     fire rules, sub-batch decomposition, output equivalence, and lifecycle
   - Code2Wav CUDA Graph lifecycle, exact-shape replay, atomic rollback, memory

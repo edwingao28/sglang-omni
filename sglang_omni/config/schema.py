@@ -553,7 +553,9 @@ class CustomVoiceConfig:
     # Note(yzxiao): CustomVoice selects a checkpoint speaker without reference
     # audio. Only an absent config disables this contract; speakers is required.
     speakers: tuple[str, ...]
-    task_type: str
+    # Note (wenyao): None means the checkpoint has no task types at all, so the
+    # speech path rejects any explicit task_type instead of matching one.
+    task_type: str | None
 
 
 class PipelineConfig(BaseModel):

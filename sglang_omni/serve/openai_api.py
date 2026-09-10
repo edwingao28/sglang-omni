@@ -679,6 +679,16 @@ def _register_chat_completions(app: FastAPI) -> None:
         created = int(time.time())
         model = req.model or default_model
 
+        if "audio" in (req.modalities or []):
+            try:
+                app.state.speech_service.validate_voice_name(
+                    req.audio.get("voice") if isinstance(req.audio, dict) else None
+                )
+            except SpeechAPIError as exc:
+                raise HTTPException(
+                    status_code=exc.status_code, detail=exc.message
+                ) from exc
+
         gen_req = _build_chat_generate_request(req)
 
         # Determine audio format from request

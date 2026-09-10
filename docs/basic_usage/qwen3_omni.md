@@ -303,12 +303,15 @@ stages:
 
 Qwen3-Omni ships three speakers: Ethan (the default), Chelsie and Aiden. Pick
 one per request with the OpenAI `audio.voice` field; names are
-case-insensitive, and `default` or an absent voice keeps Ethan. A name the
-checkpoint lacks (for example OpenAI's `alloy`) is rejected with
-`Unknown voice '<name>'. Supported voices: chelsie, ethan, aiden` instead of
-silently speaking another voice: a non-streaming request gets HTTP 400, and a
-streaming request's SSE stream stops after the text without a `[DONE]`
-sentinel (the message is in the server log).
+case-insensitive, and `default` or an absent voice keeps Ethan. The server
+reads the speaker table from the checkpoint's `config.json`
+(`talker_config.speaker_id`) at startup, so `GET /v1/audio/voices` lists the
+voices this checkpoint can speak, and a name it lacks (for example OpenAI's
+`alloy`) is rejected up front with HTTP 400
+`Unknown voice '<name>'. Supported voices: default, chelsie, ethan, aiden`
+before any model runs, for streaming and non-streaming requests alike. The
+check only applies when `"audio"` is among the requested `modalities`; a
+text-only request ignores `audio.voice` as before.
 
 ```json
 {

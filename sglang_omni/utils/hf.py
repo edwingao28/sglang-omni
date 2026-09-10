@@ -9,6 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import huggingface_hub
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
 from transformers import AutoConfig
@@ -200,6 +201,23 @@ def try_resolve_arch_from_auk_layout(
         if architecture is not None:
             return architecture
     return None
+
+
+def load_raw_checkpoint_config(model_path: str | os.PathLike[str]) -> dict[str, Any]:
+    """Return ``config.json`` of a local or hub checkpoint as plain JSON."""
+    checkpoint_dir = Path(model_path).expanduser()
+    if checkpoint_dir.is_dir():
+        config_path = checkpoint_dir / "config.json"
+    else:
+        # Note (wenyao): resolved through the module at call time so tests can
+        # monkeypatch huggingface_hub.hf_hub_download without touching this one.
+        config_path = Path(
+            huggingface_hub.hf_hub_download(
+                repo_id=str(model_path), filename="config.json"
+            )
+        )
+    with config_path.open(encoding="utf-8") as handle:
+        return json.load(handle)
 
 
 @lru_cache(maxsize=8)

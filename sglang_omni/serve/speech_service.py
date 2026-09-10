@@ -286,6 +286,10 @@ class SpeechRequestValidator:
         if config is None:
             return
         if task_type is not None and task_type != config.task_type:
+            if config.task_type is None:
+                raise bad_request(
+                    "task_type is not supported by this model", param="task_type"
+                )
             raise bad_request(
                 f"task_type must be one of: {config.task_type}", param="task_type"
             )
@@ -298,13 +302,18 @@ class SpeechRequestValidator:
             raise bad_request(
                 "references are not supported by this model", param="references"
             )
-        name = request.voice.strip().casefold()
+        self.validate_voice_name(request.voice)
+
+    def validate_voice_name(self, voice: Any) -> None:
+        config = self.custom_voice_config
+        if config is None or voice is None:
+            return
+        name = str(voice).strip().casefold()
         if name in {"", "default"} or name in self._speaker_keys:
             return
         supported = ", ".join(("default", *config.speakers))
         raise bad_request(
-            f"Unknown voice '{request.voice}'. Supported voices: {supported}",
-            param="voice",
+            f"Unknown voice '{voice}'. Supported voices: {supported}", param="voice"
         )
 
     def _normalize_language(self, value: str) -> str:

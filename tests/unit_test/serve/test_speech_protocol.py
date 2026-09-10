@@ -1068,3 +1068,64 @@ def test_file_reference_rejects_symlink_escape(tmp_path: Path) -> None:
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.param == "ref_audio"
+
+
+def test_speaker_table_without_task_type_rejects_explicit_task_type() -> None:
+    config = CustomVoiceConfig(speakers=("ethan", "chelsie"), task_type=None)
+    store = Mock(spec=["get", "resolve_reference"])
+    service = SpeechRequestValidator(
+        default_model="omni",
+        custom_voice_config=config,
+        requires_uploaded_voice_for_named_voice=True,
+        supports_uploaded_voice_references=True,
+        voice_store=store,
+    )
+
+    assert service.requires_uploaded_voice_for_named_voice is False
+    assert service.supports_uploaded_voice_references is False
+    assert service.parse_request({"input": "hello", "voice": "Ethan"}).voice == "Ethan"
+    with pytest.raises(SpeechAPIError) as exc:
+        service.parse_request(
+            {"input": "hello", "voice": "Ethan", "task_type": "CustomVoice"}
+        )
+    assert exc.value.status_code == 400
+    assert exc.value.param == "task_type"
+    assert exc.value.message == "task_type is not supported by this model"
+    assert store.mock_calls == []
+
+
+@pytest.mark.parametrize("voice", [None, "", "default", " Default ", "ETHAN"])
+def test_validate_voice_name_accepts_default_and_table_entries(voice) -> None:
+    config = CustomVoiceConfig(speakers=("ethan",), task_type=None)
+    service = SpeechRequestValidator(
+        default_model="omni",
+        custom_voice_config=config,
+        voice_store=Mock(spec=["get", "resolve_reference"]),
+    )
+
+    service.validate_voice_name(voice)
+
+
+def test_validate_voice_name_rejects_names_outside_the_table() -> None:
+    config = CustomVoiceConfig(speakers=("ethan", "chelsie"), task_type=None)
+    service = SpeechRequestValidator(
+        default_model="omni",
+        custom_voice_config=config,
+        voice_store=Mock(spec=["get", "resolve_reference"]),
+    )
+
+    with pytest.raises(SpeechAPIError) as exc:
+        service.validate_voice_name("Nobody")
+    assert exc.value.status_code == 400
+    assert exc.value.param == "voice"
+    assert exc.value.message == (
+        "Unknown voice 'Nobody'. Supported voices: default, ethan, chelsie"
+    )
+
+
+def test_validate_voice_name_is_a_no_op_without_a_speaker_table() -> None:
+    service = SpeechRequestValidator(
+        default_model="tts", voice_store=Mock(spec=["get", "resolve_reference"])
+    )
+
+    service.validate_voice_name("Nobody")

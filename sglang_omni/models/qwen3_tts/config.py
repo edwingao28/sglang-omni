@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any, ClassVar
@@ -19,6 +18,7 @@ from sglang_omni.config.runtime import (
     resolve_stage_factory_kwargs,
     resolve_stage_typed_kwargs,
 )
+from sglang_omni.utils.hf import load_raw_checkpoint_config
 
 _PKG = "sglang_omni.models.qwen3_tts"
 _QWEN3_TTS_CUSTOM_VARIANT_MARKERS = (
@@ -126,7 +126,7 @@ class Qwen3TTSPipelineConfig(PipelineConfig):
             **resolve_stage_factory_kwargs(engine_stage, self),
             **resolve_stage_typed_kwargs(engine_stage),
         }
-        checkpoint_config = _load_qwen3_tts_checkpoint_config(
+        checkpoint_config = load_raw_checkpoint_config(
             engine_factory_kwargs["model_path"]
         )
         model_type = _normalize_qwen3_tts_model_type(
@@ -151,18 +151,6 @@ class Qwen3TTSPipelineConfig(PipelineConfig):
         return None
 
 
-def _load_qwen3_tts_checkpoint_config(model_path: str) -> dict[str, Any]:
-    checkpoint_dir = Path(model_path).expanduser()
-    if checkpoint_dir.is_dir():
-        config_path = checkpoint_dir / "config.json"
-    else:
-        from huggingface_hub import hf_hub_download
-
-        config_path = Path(hf_hub_download(repo_id=model_path, filename="config.json"))
-    with config_path.open(encoding="utf-8") as handle:
-        return json.load(handle)
-
-
 def _normalize_qwen3_tts_model_type(raw: Any) -> str:
     normalized = str(raw or "base").replace("-", "_").strip().lower()
     if normalized == "customvoice":
@@ -182,7 +170,7 @@ def qwen3_tts_checkpoint_model_type(checkpoint_dir: str) -> str:
     """
     if not (Path(checkpoint_dir) / "config.json").is_file():
         return "base"
-    config = _load_qwen3_tts_checkpoint_config(checkpoint_dir)
+    config = load_raw_checkpoint_config(checkpoint_dir)
     return _normalize_qwen3_tts_model_type(config.get("tts_model_type"))
 
 

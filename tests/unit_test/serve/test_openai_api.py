@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 from typing import Any
 
@@ -14,6 +15,8 @@ from sglang_omni.admission import QueueFullError
 from sglang_omni.client import Client, ClientError, GenerateChunk
 from sglang_omni.client.audio import encode_pcm
 from sglang_omni.client.types import GenerateRequest
+from sglang_omni.config import CustomVoiceConfig
+from sglang_omni.models.qwen3_omni.config import Qwen3OmniSpeechPipelineConfig
 from sglang_omni.pipeline.coordinator import Coordinator
 from sglang_omni.proto import (
     EXPLICIT_GENERATION_PARAMS_KEY,
@@ -3479,3 +3482,132 @@ def test_chat_without_audio_voice_sets_no_speaker() -> None:
             audio=audio,
         )
         assert "speaker" not in _build_chat_generate_request(req).extra_params
+
+
+_OMNI_SPEAKERS = CustomVoiceConfig(
+    speakers=("ethan", "chelsie", "aiden"), task_type=None
+)
+
+
+class _UntouchableClient:
+    def health(self) -> dict[str, Any]:
+        return {"running": True}
+
+    async def completion(self, *args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("generation must not start for a rejected voice")
+
+    async def generate(self, *args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("generation must not start for a rejected voice")
+
+    async def completion_stream(self, *args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("generation must not start for a rejected voice")
+
+
+def _chat_payload(audio: dict[str, Any] | None, *, stream: bool) -> dict[str, Any]:
+    return {
+        "model": "qwen3-omni",
+        "messages": [{"role": "user", "content": "hello"}],
+        "modalities": ["text", "audio"],
+        "audio": audio,
+        "stream": stream,
+    }
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_chat_rejects_unknown_voice_before_generation(stream: bool) -> None:
+    client = TestClient(
+        create_app(
+            _UntouchableClient(),
+            model_name="qwen3-omni",
+            custom_voice_config=_OMNI_SPEAKERS,
+        )
+    )
+
+    resp = client.post(
+        "/v1/chat/completions",
+        json=_chat_payload({"voice": "Nobody", "format": "wav"}, stream=stream),
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == (
+        "Unknown voice 'Nobody'. Supported voices: default, ethan, chelsie, aiden"
+    )
+
+
+@pytest.mark.parametrize(
+    "audio",
+    [None, {"format": "wav"}, {"voice": "default"}, {"voice": "CHELSIE"}],
+)
+def test_chat_accepted_voice_reaches_generation(audio: dict[str, Any] | None) -> None:
+    client = TestClient(
+        create_app(
+            _fault_client("qwen3-omni"),
+            model_name="qwen3-omni",
+            custom_voice_config=_OMNI_SPEAKERS,
+        )
+    )
+
+    resp = client.post("/v1/chat/completions", json=_chat_payload(audio, stream=False))
+
+    assert resp.status_code == 500
+    assert "cuda out of memory" in resp.json()["detail"]
+
+
+def test_chat_text_only_request_ignores_voice() -> None:
+    client = TestClient(
+        create_app(
+            _fault_client("qwen3-omni"),
+            model_name="qwen3-omni",
+            custom_voice_config=_OMNI_SPEAKERS,
+        )
+    )
+    payload = _chat_payload({"voice": "Nobody", "format": "wav"}, stream=False)
+
+    for modalities in (["text"], None):
+        payload["modalities"] = modalities
+        resp = client.post("/v1/chat/completions", json=payload)
+        assert resp.status_code == 500
+        assert "cuda out of memory" in resp.json()["detail"]
+
+
+def test_chat_without_speaker_table_leaves_voice_to_the_pipeline() -> None:
+    client = TestClient(
+        create_app(_fault_client("qwen3-omni"), model_name="qwen3-omni")
+    )
+
+    resp = client.post(
+        "/v1/chat/completions",
+        json=_chat_payload({"voice": "Nobody", "format": "wav"}, stream=False),
+    )
+
+    assert resp.status_code == 500
+    assert "cuda out of memory" in resp.json()["detail"]
+
+
+def test_voices_listing_reads_the_qwen3_omni_checkpoint_table(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("SPEAKER_SAMPLES_DIR", str(tmp_path / "samples"))
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text(
+        json.dumps(
+            {
+                "talker_config": {
+                    "speaker_id": {"chelsie": 2301, "ethan": 2302, "aiden": 2303}
+                }
+            }
+        )
+    )
+    app = create_app(
+        _UntouchableClient(),
+        model_name="qwen3-omni",
+        custom_voice_config=Qwen3OmniSpeechPipelineConfig(
+            model_path=str(checkpoint)
+        ).resolve_custom_voice_config(),
+    )
+
+    with TestClient(app) as client:
+        listed = client.get("/v1/audio/voices").json()
+
+    assert listed["voices"] == ["aiden", "chelsie", "default", "ethan"]
