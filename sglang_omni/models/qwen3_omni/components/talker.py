@@ -5,6 +5,7 @@ SGLang-native Talker model for Qwen3-Omni compatiable with hf formatting.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from typing import Iterable, Optional, Tuple
 
 import torch
@@ -1011,6 +1012,8 @@ class Qwen3OmniTalker(nn.Module):
             tuple[int, torch.dtype], _PredictorDecodeGraph
         ] = {}
         self._predictor_decode_graph_disabled: set[tuple[int, torch.dtype]] = set()
+        self._predictor_decode_graph_replay_count = 0
+        self._predictor_decode_graph_fallback_counts: Counter[str] = Counter()
         _bind_default_weight_loaders(self)
         self._cached_params_dict = dict(self.named_parameters())
         self._sampler = None
@@ -1518,10 +1521,12 @@ class Qwen3OmniTalker(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor] | None:
         bucket_size = self._predictor_decode_graph_bucket_size(batch_size)
         if bucket_size is None:
+            self._predictor_decode_graph_fallback_counts["no_bucket"] += 1
             return None
 
         key = (bucket_size, code_dtype)
         if key in self._predictor_decode_graph_disabled:
+            self._predictor_decode_graph_fallback_counts["disabled"] += 1
             return None
 
         graph = self._predictor_decode_graphs.get(key)
@@ -1530,6 +1535,7 @@ class Qwen3OmniTalker(nn.Module):
                 graph = _PredictorDecodeGraph(self, bucket_size, code_dtype)
             except Exception:
                 self._predictor_decode_graph_disabled.add(key)
+                self._predictor_decode_graph_fallback_counts["capture_failed"] += 1
                 logger.warning(
                     "Disabling Qwen3-Omni predictor CUDA graph for "
                     "batch_size=%s dtype=%s",
@@ -1546,7 +1552,25 @@ class Qwen3OmniTalker(nn.Module):
                 code_dtype,
             )
 
+        self._predictor_decode_graph_replay_count += 1
         return graph.replay(layer0_codes, talker_hidden)
+
+    def predictor_decode_graph_info(self) -> dict[str, object]:
+        def _labels(keys: Iterable[tuple[int, torch.dtype]]) -> list[str]:
+            return [
+                f"{bucket}:{str(dtype).removeprefix('torch.')}"
+                for bucket, dtype in sorted(keys, key=lambda key: (key[0], str(key[1])))
+            ]
+
+        return {
+            "batch_sizes": list(self._predictor_decode_graph_batch_sizes),
+            "captured": _labels(self._predictor_decode_graphs),
+            "disabled": _labels(self._predictor_decode_graph_disabled),
+            "replay_count": int(self._predictor_decode_graph_replay_count),
+            "fallback_counts": dict(
+                sorted(self._predictor_decode_graph_fallback_counts.items())
+            ),
+        }
 
     def _code_predictor_forward_incremental_eager(
         self,

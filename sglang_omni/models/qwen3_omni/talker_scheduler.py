@@ -60,6 +60,12 @@ class QwenTalkerScheduler(OmniScheduler):
         self._partial_start_min_chunks = int(partial_start_min_chunks)
         self._im_end_token_id = im_end_token_id
 
+    def _admin_model_info(self) -> dict[str, Any]:
+        response = super()._admin_model_info()
+        model = self.model_worker.model_runner.model
+        response["data"]["predictor_decode_graph"] = model.predictor_decode_graph_info()
+        return response
+
     def _count_usable_prefetched_chunks(self, prefetched: list[Any]) -> int:
         im_end = self._im_end_token_id
         if im_end is None or not prefetched:

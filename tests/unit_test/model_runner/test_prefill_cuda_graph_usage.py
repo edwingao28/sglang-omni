@@ -124,6 +124,9 @@ def test_model_worker_reports_actual_prefill_graph_replays_by_bucket(
         _forward_batch(1, forward_mode=ForwardMode.TARGET_VERIFY),
     )
     ModelWorker.record_custom_prefill_eager(worker)
+    ModelWorker.record_prefill_sidecar_decline(worker, "model_inputs")
+    ModelWorker.record_prefill_sidecar_decline(worker, "model_inputs")
+    ModelWorker.record_prefill_sidecar_decline(worker, "batch_shape")
 
     stats = ModelWorker.model_info(worker)["prefill_cuda_graph"]
 
@@ -136,4 +139,5 @@ def test_model_worker_reports_actual_prefill_graph_replays_by_bucket(
     assert stats["standard_eager_count"] == 1
     assert stats["custom_eager_count"] == 1
     assert stats["replay_buckets"] == {"16": 1, "32": 1}
+    assert stats["sidecar_decline_reasons"] == {"batch_shape": 1, "model_inputs": 2}
     assert json.loads(json.dumps(stats)) == stats

@@ -27,7 +27,13 @@ AUDIO_ID = 53
 
 def _runner() -> Qwen3OmniThinkerModelRunner:
     runner = object.__new__(Qwen3OmniThinkerModelRunner)
-    runner.tp_worker = SimpleNamespace(record_custom_prefill_eager=lambda: None)
+    declines: list[str] = []
+    runner.tp_worker = SimpleNamespace(
+        record_custom_prefill_eager=lambda: None,
+        record_prefill_sidecar_decline=declines.append,
+        sidecar_declines=declines,
+    )
+    runner._sidecar_decline_warned = set()
     torch.manual_seed(0)
     runner._embed_tokens = torch.nn.Embedding(VOCAB, HIDDEN)
     runner._image_token_id = IMAGE_ID
@@ -103,11 +109,15 @@ def test_custom_prefill_forward_records_eager_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner = object.__new__(Qwen3OmniThinkerModelRunner)
+    runner._sidecar_decline_warned = set()
     calls: list[str] = []
     runner.tp_worker = SimpleNamespace(
-        record_custom_prefill_eager=lambda: calls.append("recorded")
+        record_custom_prefill_eager=lambda: calls.append("recorded"),
+        record_prefill_sidecar_decline=calls.append,
     )
-    runner._classify_prefill = lambda *_args: SimpleNamespace(kind="custom")
+    runner._classify_prefill = lambda *_args: SimpleNamespace(
+        kind="custom", reason="visual_inputs"
+    )
     expected = object()
     monkeypatch.setattr(
         ThinkerModelRunner,
@@ -118,7 +128,7 @@ def test_custom_prefill_forward_records_eager_fallback(
     result = runner.custom_prefill_forward(SimpleNamespace(), object(), [])
 
     assert result is expected
-    assert calls == ["recorded"]
+    assert calls == ["visual_inputs", "recorded"]
 
 
 def test_text_only_prefill_attaches_live_embeddings_without_official_batch_mutation():
@@ -271,6 +281,7 @@ def test_audio_prefill_composes_embeddings_into_the_private_sidecar():
     assert request.omni_model_inputs is None
     assert request._omni_consumed is None
     assert request._omni_mm_positions is None
+    assert runner.tp_worker.sidecar_declines == []
 
 
 def test_array_backed_origin_input_ids_are_sidecar_eligible():
@@ -497,6 +508,7 @@ def test_fresh_cached_audio_prefix_uses_correct_inherited_eager_embedding(
     assert request._omni_mm_positions is None
     assert request.multimodal_inputs is official_request_mm_inputs
     assert request.multimodal_inputs.mrope_position_delta is official_mrope_delta
+    assert runner.tp_worker.sidecar_declines == ["cached_prefix"]
 
 
 def test_cached_audio_eager_cursor_survives_text_only_middle_chunk():
@@ -643,20 +655,20 @@ def test_cached_audio_eager_cursor_preserves_existing_cursor():
 
 
 @pytest.mark.parametrize(
-    "case",
+    ("case", "reason"),
     [
-        "image",
-        "video",
-        "deepstack",
-        "image_audio",
-        "video_audio",
-        "audio_in_video",
-        "unknown",
-        "malformed_audio",
+        ("image", "model_inputs"),
+        ("video", "model_inputs"),
+        ("deepstack", "model_inputs"),
+        ("image_audio", "model_inputs"),
+        ("video_audio", "model_inputs"),
+        ("audio_in_video", "model_inputs"),
+        ("unknown", "model_inputs"),
+        ("malformed_audio", "audio_embeds"),
     ],
 )
 def test_unsupported_payloads_delegate_to_the_inherited_eager_path(
-    monkeypatch: pytest.MonkeyPatch, case: str
+    monkeypatch: pytest.MonkeyPatch, case: str, reason: str
 ):
     runner = _runner()
     if case == "image":
@@ -722,6 +734,7 @@ def test_unsupported_payloads_delegate_to_the_inherited_eager_path(
     )
     assert len(seen) == 1
     assert forward_batch.input_embeds is None
+    assert runner.tp_worker.sidecar_declines == [reason]
 
 
 def test_mixed_supported_and_unsupported_batch_falls_back_as_one_batch(
@@ -740,11 +753,7 @@ def test_mixed_supported_and_unsupported_batch_falls_back_as_one_batch(
         {"image_embeds": torch.ones(1, HIDDEN)},
         positions=_positions(image=(0,)),
     )
-    forward_batch, schedule_batch = _batch(
-        [text_request, audio_request, image_request],
-        chunks=[[7], [8], [IMAGE_ID]],
-        prefix_lens=[0, 1, 0],
-    )
+    forward_batch, schedule_batch = _batch([text_request, audio_request, image_request])
 
     monkeypatch.setattr(
         ThinkerModelRunner,
@@ -768,6 +777,7 @@ def test_mixed_supported_and_unsupported_batch_falls_back_as_one_batch(
         )
         == "eager"
     )
+    assert runner.tp_worker.sidecar_declines == ["model_inputs"]
 
 
 def test_forward_batch_cardinality_mismatch_falls_back_without_sidecar(
@@ -790,6 +800,7 @@ def test_forward_batch_cardinality_mismatch_falls_back_without_sidecar(
         runner.custom_prefill_forward(forward_batch, schedule_batch, [request])
         == "eager"
     )
+    assert runner.tp_worker.sidecar_declines == ["batch_shape"]
 
 
 def test_malformed_consumed_audio_offset_falls_back_without_mutation(
@@ -819,6 +830,7 @@ def test_malformed_consumed_audio_offset_falls_back_without_mutation(
         runner.custom_prefill_forward(forward_batch, schedule_batch, [request])
         == "eager"
     )
+    assert runner.tp_worker.sidecar_declines == ["audio_offset"]
 
 
 @pytest.mark.parametrize("field", ["input_embeds", "replace_embeds"])
@@ -844,3 +856,85 @@ def test_existing_official_embedding_fields_never_get_overwritten(
         runner.custom_prefill_forward(forward_batch, schedule_batch, [request])
         == "eager"
     )
+    assert runner.tp_worker.sidecar_declines == ["official_embeds"]
+
+
+def test_mm_positions_error_propagates_from_classification() -> None:
+    runner = _runner()
+
+    def _raise(*_args):
+        raise RuntimeError("positions unavailable")
+
+    runner._req_mm_token_positions = _raise
+    request = _request(
+        [1, AUDIO_ID, AUDIO_ID, 2],
+        {"audio_embeds": torch.zeros(2, HIDDEN)},
+        positions=_positions(audio=(1, 2)),
+    )
+    forward_batch, schedule_batch = _batch([request])
+
+    with pytest.raises(RuntimeError, match="positions unavailable"):
+        runner.before_prefill(forward_batch, schedule_batch, [request])
+
+    assert get_omni_prefill_inputs(forward_batch) is None
+    assert runner.tp_worker.sidecar_declines == []
+
+
+def test_visual_inputs_are_declined_with_a_named_reason() -> None:
+    runner = _runner()
+    request = _request(
+        [1, IMAGE_ID, AUDIO_ID, 2],
+        {"audio_embeds": torch.zeros(1, HIDDEN)},
+        positions=_positions(image=(1,), audio=(2,)),
+    )
+    forward_batch, schedule_batch = _batch([request])
+
+    disposition = runner._classify_prefill(forward_batch, schedule_batch, [request])
+
+    assert (disposition.kind, disposition.reason) == ("unsupported", "visual_inputs")
+
+
+def test_sidecar_decline_is_recorded_and_warned_once_per_reason(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    runner = _runner()
+    eager_calls: list[str] = []
+    runner.tp_worker.record_custom_prefill_eager = lambda: eager_calls.append("x")
+    monkeypatch.setattr(
+        ThinkerModelRunner, "custom_prefill_forward", lambda *_args: None
+    )
+    visual_request = _request(
+        [1, IMAGE_ID, AUDIO_ID, 2],
+        {"audio_embeds": torch.zeros(1, HIDDEN)},
+        positions=_positions(image=(1,), audio=(2,)),
+    )
+    visual_batch, visual_schedule = _batch([visual_request])
+    text_request = _request([7], None)
+    shape_batch, shape_schedule = _batch([text_request])
+    shape_batch.batch_size = 2
+
+    with caplog.at_level("WARNING", logger=qwen_thinker_runner_module.__name__):
+        for _ in range(2):
+            assert (
+                runner.custom_prefill_forward(
+                    visual_batch, visual_schedule, [visual_request]
+                )
+                is None
+            )
+        assert (
+            runner.custom_prefill_forward(shape_batch, shape_schedule, [text_request])
+            is None
+        )
+
+    assert runner.tp_worker.sidecar_declines == [
+        "visual_inputs",
+        "visual_inputs",
+        "batch_shape",
+    ]
+    assert eager_calls == []
+    warnings = [record for record in caplog.records if record.levelname == "WARNING"]
+    assert [record.args for record in warnings] == [
+        ("visual_inputs",),
+        ("batch_shape",),
+    ]
+    assert "sidecar_decline_reasons" in warnings[0].getMessage()

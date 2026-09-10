@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -585,6 +585,8 @@ def _build_fake_predictor_graph_talker(device: torch.device) -> Qwen3OmniTalker:
     talker._predictor_decode_graphs = {}
     talker._predictor_decode_graph_disabled = set()
     talker._predictor_decode_graph_batch_sizes = (1, 2, 4)
+    talker._predictor_decode_graph_replay_count = 0
+    talker._predictor_decode_graph_fallback_counts = Counter()
     layer0_embedding = nn.Embedding(16, 8).to(device)
     talker.get_input_embeddings = lambda: layer0_embedding
     talker.code_predictor = SimpleNamespace(

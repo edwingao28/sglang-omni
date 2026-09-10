@@ -41,6 +41,7 @@ class _PrefillCudaGraphUsage:
     standard_eager_count: int = 0
     custom_eager_count: int = 0
     replay_buckets: Counter[int] = field(default_factory=Counter)
+    sidecar_decline_reasons: Counter[str] = field(default_factory=Counter)
 
 
 _ARCH_CONFIG_MAP: dict[str, tuple[str, str | None]] = {
@@ -331,6 +332,10 @@ class ModelWorker:
         """Record a custom prefill forward that bypasses SGLang graph dispatch."""
         self._prefill_cuda_graph_usage.custom_eager_count += 1
 
+    def record_prefill_sidecar_decline(self, reason: str) -> None:
+        """Record a prefill batch the model sidecar handed to the inherited path."""
+        self._prefill_cuda_graph_usage.sidecar_decline_reasons[reason] += 1
+
     def _prefill_cuda_graph_info(self) -> dict[str, Any]:
         from sglang.srt.model_executor.runner.prefill_cuda_graph_runner import (
             PrefillCudaGraphRunner,
@@ -359,6 +364,10 @@ class ModelWorker:
             "replay_buckets": {
                 str(bucket): int(count)
                 for bucket, count in sorted(usage.replay_buckets.items())
+            },
+            "sidecar_decline_reasons": {
+                reason: int(count)
+                for reason, count in sorted(usage.sidecar_decline_reasons.items())
             },
         }
 

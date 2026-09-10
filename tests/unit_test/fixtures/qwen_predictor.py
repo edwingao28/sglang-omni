@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from types import SimpleNamespace
 
 import torch
@@ -81,6 +82,8 @@ def build_real_step_predictor_graph_talker(
     talker._predictor_decode_graph_batch_sizes = (1, 2, 4)
     talker._predictor_decode_graphs = {}
     talker._predictor_decode_graph_disabled = set()
+    talker._predictor_decode_graph_replay_count = 0
+    talker._predictor_decode_graph_fallback_counts = Counter()
 
     layer = SimpleNamespace(
         input_layernorm=nn.Identity(),
