@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+from collections.abc import Iterator
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -9,7 +10,7 @@ import sglang.srt.managers.schedule_policy as schedule_policy
 from sglang.srt.managers.schedule_batch import Req
 from sglang.srt.managers.schedule_policy import AddReqResult, PrefillAdder
 from sglang.srt.mem_cache.base_prefix_cache import DecLockRefResult, IncLockRefResult
-from sglang.srt.server_args import ServerArgs, set_global_server_args_for_scheduler
+from sglang.srt.runtime_context import get_context
 
 from sglang_omni.models.qwen3_omni.config import TALKER_MAX_NEW_TOKENS_ESTIMATION
 
@@ -21,8 +22,10 @@ _PAGE_SIZE = 1
 
 
 @pytest.fixture(autouse=True)
-def _scheduler_server_args() -> None:
-    set_global_server_args_for_scheduler(ServerArgs(model_path="dummy"))
+def _scheduler_server_args() -> Iterator[None]:
+    # Restore the process-wide context so later bootstrap tests can publish it.
+    with get_context().override_server_args():
+        yield
 
 
 def _talker_request(rid: int) -> MagicMock:
