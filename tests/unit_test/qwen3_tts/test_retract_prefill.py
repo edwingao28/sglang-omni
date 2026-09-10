@@ -11,7 +11,9 @@ import pytest
 import torch
 from sglang.srt.sampling.penaltylib import BatchedRepetitionPenalizer
 
+from sglang_omni.models.qwen3_omni.talker_model_runner import QwenTalkerModelRunner
 from sglang_omni.models.qwen3_tts.model_runner import Qwen3TTSModelRunner
+from sglang_omni.models.qwen3_tts.request_builders import Qwen3TTSSGLangRequestData
 
 
 class _TinyModel(torch.nn.Module):
@@ -52,6 +54,22 @@ def _sched_req(
             tts_pad_embed=torch.zeros(prompt.shape[-1], dtype=prompt.dtype),
         )
     )
+
+
+def test_peek_next_decode_inputs_pads_real_tts_request_data() -> None:
+    feedback = torch.tensor([1.0, 2.0])
+    pad = torch.tensor([0.5, 0.5])
+    data = Qwen3TTSSGLangRequestData(
+        pending_feedback_queue=deque([feedback]),
+        pending_text_queue=deque(),
+        tts_pad_embed=pad,
+    )
+
+    peeked = QwenTalkerModelRunner._peek_next_decode_inputs(data)
+
+    assert peeked is not None
+    assert peeked[0] is feedback
+    assert peeked[1] is pad
 
 
 def test_write_feedback_buffers_records_decode_input_history() -> None:

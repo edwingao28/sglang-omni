@@ -27,16 +27,20 @@ from sglang_omni.models.qwen3_omni.pending_text_queue import (
     PendingTextTensorQueue,
     coerce_pending_text_queue,
 )
-from sglang_omni.models.qwen3_omni.request_builders import build_sglang_talker_request
+from sglang_omni.models.qwen3_omni.request_builders import (
+    Qwen3OmniTalkerRequestData,
+    build_sglang_talker_request,
+    make_talker_scheduler_adapters,
+)
 from sglang_omni.models.qwen3_omni.talker_model_runner import QwenTalkerModelRunner
 from sglang_omni.models.qwen3_omni.talker_scheduler import (
     MIN_PARTIAL_START_CHUNKS,
     QwenTalkerScheduler,
     configure_talker_server_args,
 )
+from sglang_omni.proto import OmniRequest, StagePayload
 from sglang_omni.scheduling.messages import IncomingMessage
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
-from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
 from tests.unit_test.fixtures.qwen_fakes import FakeQwenTokenizer
 from tests.unit_test.fixtures.qwen_predictor import (
     build_real_step_predictor_graph_talker,
@@ -198,19 +202,19 @@ def test_qwen_talker_decode_input_preserves_feedback_until_text_arrives() -> Non
 
 def test_qwen_talker_decode_readiness_requires_feedback_and_text_or_pad() -> None:
     """Preserves decode gating across no-text, text-ready, and pad-ready states."""
-    no_text = SimpleNamespace(
+    no_text = Qwen3OmniTalkerRequestData(
         pending_feedback_queue=deque([torch.tensor([1.0, 2.0])]),
         pending_text_queue=deque(),
         thinker_chunks_done=False,
         tts_pad_embed=torch.tensor([7.0, 8.0]),
     )
-    with_text = SimpleNamespace(
+    with_text = Qwen3OmniTalkerRequestData(
         pending_feedback_queue=deque([torch.tensor([1.0, 2.0])]),
         pending_text_queue=deque([torch.tensor([20.0, 20.0])]),
         thinker_chunks_done=False,
         tts_pad_embed=torch.tensor([7.0, 8.0]),
     )
-    with_pad = SimpleNamespace(
+    with_pad = Qwen3OmniTalkerRequestData(
         pending_feedback_queue=deque([torch.tensor([1.0, 2.0])]),
         pending_text_queue=deque(),
         thinker_chunks_done=True,
@@ -226,7 +230,7 @@ def test_qwen_talker_decode_inputs_read_the_request_data_as_built() -> None:
     """The decode input helpers read the request data fields as the builders
     leave them: empty queues, the pad fallback, and the history the scheduler
     clears at finish."""
-    data = SGLangARRequestData()
+    data = Qwen3OmniTalkerRequestData()
 
     assert not QwenTalkerModelRunner._data_has_next_decode_input(data)
     assert QwenTalkerModelRunner._peek_next_decode_inputs(data) is None
@@ -1242,6 +1246,62 @@ def test_real_builder_attaches_tts_eos_and_stage_payload() -> None:
     assert req_data.stage_payload.request_id == "r0"
 
 
+def test_talker_adapters_round_trip_talker_request_data(monkeypatch: Any) -> None:
+    from sglang_omni.models.qwen3_omni import request_builders as rb_mod
+
+    class StubPrefillBuilder:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def build_prompt_prefill(
+            self, _payload: Any, thinker_chunks: list[Any], *, thinker_done: bool
+        ) -> dict[str, Any]:
+            del thinker_chunks, thinker_done
+            return {
+                "input_embeds": torch.zeros((9, 2), dtype=torch.float32),
+                "input_ids": torch.zeros((9,), dtype=torch.long),
+                "pending_text_queue": deque([torch.zeros((2,), dtype=torch.float32)]),
+                "tts_eos_embed": torch.full((2,), 0.5, dtype=torch.float32),
+                "tts_pad_embed": torch.full((2,), 0.25, dtype=torch.float32),
+                "prompt_model_inputs": {},
+            }
+
+        def append_text_chunk(self, req_data: Any, chunk: Any) -> None:
+            del req_data, chunk
+
+        def mark_thinker_done(self, req_data: Any) -> None:
+            del req_data
+
+    monkeypatch.setattr(rb_mod, "TalkerPrefillBuilder", StubPrefillBuilder)
+    request_builder, result_adapter, _, _ = make_talker_scheduler_adapters(
+        tokenizer=FakeQwenTokenizer(),
+        codec_vocab_size=4096,
+        model=SimpleNamespace(config=SimpleNamespace(codec_eos_token_id=7)),
+        model_path="unused",
+        thinker_config=None,
+        required_aux_hidden_key=0,
+    )
+    payload = StagePayload(
+        request_id="r0",
+        request=OmniRequest(inputs={"text": "hello"}, params={}),
+        data={"stream_state": {}},
+    )
+    payload.prefetched_chunks = [object()]
+    payload.prefetched_stream_done = False
+
+    req_data = request_builder(payload)
+
+    assert isinstance(req_data, Qwen3OmniTalkerRequestData)
+    assert req_data.thinker_chunks_done is False
+    assert torch.equal(
+        req_data.tts_eos_embed, torch.full((2,), 0.5, dtype=torch.float32)
+    )
+    assert req_data.stage_payload is payload
+    result = result_adapter(req_data)
+    assert result.request_id == "r0"
+    assert result.data is payload.data
+
+
 def test_real_builder_rejects_zero_chunks_without_done() -> None:
     """Empty prefetched_chunks indicates a readiness or projection bug."""
     with pytest.raises(RuntimeError, match="requires prefetched thinker chunks"):
@@ -1294,7 +1354,7 @@ def test_process_input_requests_partial_build_state_machine() -> None:
     def stub_request_builder(payload: Any) -> Any:
         captured_done = bool(payload.prefetched_stream_done)
         origin_input_ids: list[int] = []
-        req_data = SGLangARRequestData(
+        req_data = Qwen3OmniTalkerRequestData(
             req=SimpleNamespace(
                 rid=payload.request_id,
                 _omni_data=None,

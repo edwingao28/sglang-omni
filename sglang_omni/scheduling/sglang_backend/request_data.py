@@ -23,12 +23,7 @@ class SGLangARRequestData(ARRequestData):
     repetition_penalty: float = 1.0
     input_embeds_are_projected: bool = False
     stage_payload: Any = None
-    talker_model_inputs: dict[str, Any] = field(default_factory=dict)
     pending_feedback_queue: Any = field(default_factory=collections.deque)
-    pending_text_queue: Any = field(default_factory=collections.deque)
-    tts_pad_embed: Any = None
-    tts_eos_embed: Any = None
-    thinker_chunks_done: bool = True
 
 
 @dataclass

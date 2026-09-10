@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
+import collections
 import logging
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -710,6 +711,21 @@ def build_sglang_thinker_request(
     return data
 
 
+# Note (wenyao): Qwen3-TTS reuses the Omni talker's text/pad decode-input helpers, so
+# these fields live here rather than on every SGLang AR stage or on the Omni class alone.
+@dataclass
+class QwenTalkerRequestData(SGLangARRequestData):
+    pending_text_queue: Any = field(default_factory=collections.deque)
+    tts_pad_embed: Any = None
+    thinker_chunks_done: bool = True
+
+
+@dataclass
+class Qwen3OmniTalkerRequestData(QwenTalkerRequestData):
+    talker_model_inputs: dict[str, Any] = field(default_factory=dict)
+    tts_eos_embed: Any = None
+
+
 def build_sglang_talker_request(
     thinker_hidden_states: torch.Tensor,
     *,
@@ -740,7 +756,7 @@ def build_sglang_talker_request(
     thinker_config: Any = None,
     talker_model_inputs: dict[str, Any] | None = None,
     seed: int | None = None,
-) -> "SGLangARRequestData":
+) -> Qwen3OmniTalkerRequestData:
     """Build SGLang AR request for the Talker from thinker hidden states.
 
     Uses dummy input_ids of matching length for position tracking, while the
@@ -847,7 +863,7 @@ def build_sglang_talker_request(
     else:
         req.omni_model_inputs = None
 
-    data = SGLangARRequestData(
+    data = Qwen3OmniTalkerRequestData(
         input_ids=input_ids_tensor,
         max_new_tokens=max_new_tokens,
         temperature=temperature,
@@ -1093,7 +1109,7 @@ def make_talker_scheduler_adapters(
             "seed": _resolve_seed(params),
         }
 
-    def request_builder(payload: StagePayload) -> SGLangARRequestData:
+    def request_builder(payload: StagePayload) -> Qwen3OmniTalkerRequestData:
         return _build_talker_request_data(
             payload,
             prefill_builder=prefill_builder,
@@ -1107,7 +1123,7 @@ def make_talker_scheduler_adapters(
             resolve_sampling_config=_resolve_talker_sampling_config,
         )
 
-    def result_adapter(data: SGLangARRequestData) -> StagePayload:
+    def result_adapter(data: Qwen3OmniTalkerRequestData) -> StagePayload:
         payload = data.stage_payload
         return StagePayload(
             request_id=payload.request_id,
@@ -1135,7 +1151,7 @@ def _build_talker_request_data(
     video_token_id: int | None,
     thinker_config: Any,
     resolve_sampling_config: Callable[[dict[str, Any]], dict[str, Any]],
-) -> SGLangARRequestData:
+) -> Qwen3OmniTalkerRequestData:
     params = payload.request.params
     sampling_cfg = resolve_sampling_config(params)
     if sampling_cfg.get("seed") is None:

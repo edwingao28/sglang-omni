@@ -16,6 +16,7 @@ from typing import Any
 import torch
 
 from sglang_omni.models.qwen3_omni.pending_text_queue import PendingTextTensorQueue
+from sglang_omni.models.qwen3_omni.request_builders import QwenTalkerRequestData
 from sglang_omni.models.qwen3_tts.payload_types import Qwen3TTSState
 from sglang_omni.preprocessing.cache_key import hash_bytes as _hash_bytes
 from sglang_omni.preprocessing.cache_key import (
@@ -32,7 +33,6 @@ from sglang_omni.scheduling.reference_encoder import (
     KeyedReferenceEncodeHook,
     ReferenceEncodeService,
 )
-from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
 from sglang_omni.scheduling.speaker_cache import (
     SpeakerCacheKey,
     get_speaker_artifact_cache,
@@ -121,7 +121,7 @@ def resolve_subtalker_sampling(gen_kwargs: dict[str, Any]) -> SubtalkerSampling:
 
 
 @dataclass
-class Qwen3TTSSGLangRequestData(SGLangARRequestData):
+class Qwen3TTSSGLangRequestData(QwenTalkerRequestData):
     """Qwen3-TTS scheduler-owned request state."""
 
     enforce_request_limits: bool = True
