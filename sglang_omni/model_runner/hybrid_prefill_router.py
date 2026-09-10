@@ -78,6 +78,8 @@ class HybridPrefillGraphRouter:
     def _select(self, forward_batch: Any) -> Any:
         if self.breakable_runner.can_run_graph(forward_batch):
             return self.breakable_runner
+        if forward_batch.forward_mode.is_mixed():
+            return None
         if self.full_runner.can_run_graph(forward_batch):
             return self.full_runner
         return None
@@ -138,7 +140,8 @@ def install_hybrid_full_prefill(model_worker: Any, full_bs: Sequence[int]) -> No
     if model_worker.enable_prefill_input_embeds:
         model_config.is_multimodal = True
     try:
-        full_runner = PrefillCudaGraphRunner(model_runner)
+        with get_schedule().override(enable_mixed_chunk=False):
+            full_runner = PrefillCudaGraphRunner(model_runner)
     finally:
         model_config.is_multimodal = saved_is_multimodal
         (
