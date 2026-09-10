@@ -13,7 +13,7 @@ from sglang_omni.model_runner import speculative_target_worker as target_module
 
 def test_native_target_prefill_samples_and_verify_preserves_logits(monkeypatch):
     seen = []
-    logits = SimpleNamespace(hidden_states=torch.ones(2, 3))
+    logits = SimpleNamespace(hidden_states=torch.ones(2, 3), next_token_logits=None)
     next_ids = torch.tensor([7])
     forward_batch = SimpleNamespace(
         is_prefill_only=False,

@@ -31,10 +31,14 @@ from tests.unit_test.pipeline.helpers import run_scheduler
 
 
 @pytest.fixture(autouse=True)
-def _serving_bag(monkeypatch):
+def _runtime_bags(monkeypatch):
     serving = SimpleNamespace(weight_version=None)
     monkeypatch.setattr(omni_scheduler_module, "get_serving", lambda: serving)
     monkeypatch.setattr(sglang_scheduler_module, "get_serving", lambda: serving)
+    monkeypatch.setattr(
+        "sglang.srt.runtime_context.get_spec",
+        lambda: SimpleNamespace(speculative_algorithm=None),
+    )
 
 
 def _ingress(

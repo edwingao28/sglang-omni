@@ -1345,6 +1345,11 @@ def test_qwen_thinker_factory_forwards_token_only_dflash_options(
         ),
     )
 
+    monkeypatch.setattr(
+        "sglang.srt.runtime_context.get_schedule",
+        lambda: SimpleNamespace(mem_fraction_static=0.70),
+    )
+
     scheduler = qwen_stages.create_sglang_thinker_executor_from_config(**factory_args)
 
     assert scheduler.speech_enabled is True
