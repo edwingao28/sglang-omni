@@ -340,3 +340,9 @@ def test_qwen3_omni_xpu_b60_example_config_loads_and_plans() -> None:
     assert plan.stages["thinker"].gpu_ids == tuple(range(8))
     assert plan.stages["talker_ar"].gpu_ids == (6,)
     assert plan.stages["code2wav"].gpu_ids == (7,)
+
+
+def test_qwen3_omni_realtime_audio_output_is_declared_by_speech_variants() -> None:
+    assert Qwen3OmniPipelineConfig.supports_realtime_audio_output is False
+    assert Qwen3OmniSpeechPipelineConfig.supports_realtime_audio_output is True
+    assert Qwen3OmniSpeechColocatedPipelineConfig.supports_realtime_audio_output is True

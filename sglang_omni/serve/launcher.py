@@ -445,7 +445,7 @@ async def _run_server(
             max_speech_input_chars=pipeline_config.max_speech_input_chars,
             enable_realtime=enable_realtime,
             supports_realtime_audio_output=(
-                type(pipeline_config).code2wav_stage() is not None
+                type(pipeline_config).supports_realtime_audio_output
             ),
             realtime_transcription=type(pipeline_config).realtime_transcription,
             allowed_local_media_path=allowed_local_media_path,

@@ -345,10 +345,7 @@ class Qwen3OmniSpeechPipelineConfig(_Qwen3OmniBasePipelineConfig):
         THINKER_STAGE: EngineStageConfig,
         "talker_ar": EngineStageConfig,
     }
-
-    @classmethod
-    def code2wav_stage(cls) -> str | None:
-        return "code2wav"
+    supports_realtime_audio_output: ClassVar[bool] = True
 
     model_path: str
     placement_policy: str | None = _PLACEMENT_POLICY

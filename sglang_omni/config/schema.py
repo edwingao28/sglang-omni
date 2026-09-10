@@ -574,6 +574,7 @@ class PipelineConfig(BaseModel):
     speech_reference_text_excludes_instructions: ClassVar[bool] = False
     additional_speech_languages: ClassVar[frozenset[str]] = frozenset()
     realtime_transcription: ClassVar[RealtimeTranscriptionConfig | None] = None
+    supports_realtime_audio_output: ClassVar[bool] = False
 
     # Note (Jeffro): the model-owned parameters of the long-audio transcription
     # contract. Chunking stays off by default: some models can't correctly
@@ -752,11 +753,6 @@ class PipelineConfig(BaseModel):
     def generation_admission_defaults(cls) -> dict[str, Any]:
         """Coordinator in-flight cap defaults (running + queued). Overlay with CLI."""
         return {}
-
-    @classmethod
-    def code2wav_stage(cls) -> str | None:
-        """Return the code2wav stage name when the pipeline supports it."""
-        return None
 
     @classmethod
     def tensor_parallel_server_args_overrides(
