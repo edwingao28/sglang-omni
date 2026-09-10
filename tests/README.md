@@ -106,6 +106,7 @@ tests/
     │   ├── test_talker_emit_snapshot.py
     │   ├── test_talker_feedback_write.py
     │   ├── test_talker_row_ownership.py
+    │   ├── test_talker_speaker.py
     │   ├── test_talker_token_readback.py
     │   ├── test_text_template.py
     │   └── test_thinker_prefill_contract.py
@@ -632,6 +633,10 @@ that happened to contain an older version of the test.
     `_rollback_decode_prep_after_skip` idempotency contract, projected prefill
     tensor storage/slicing, decode feedback/text FIFO consumption, and replay
     of generated-token input embeds after decode retract
+  - talker speaker resolution (`test_talker_speaker.py`): named voices resolve
+    case-insensitively, an absent voice falls back to Ethan then the first
+    checkpoint voice, an unknown voice raises a message `is_bad_request_error`
+    classifies as 400, and the `speaker_id` path is used only without a speaker map
   - Code2Wav streaming/cleanup behavior plus bounded batching deadlines,
     fire rules, sub-batch decomposition, output equivalence, and lifecycle
   - Code2Wav CUDA Graph lifecycle, exact-shape replay, atomic rollback, memory

@@ -299,6 +299,26 @@ stages:
       max_running_requests: 16
 ```
 
+### Voices
+
+Qwen3-Omni ships three speakers: Ethan (the default), Chelsie and Aiden. Pick
+one per request with the OpenAI `audio.voice` field; names are
+case-insensitive, and `default` or an absent voice keeps Ethan. A name the
+checkpoint lacks (for example OpenAI's `alloy`) is rejected with
+`Unknown voice '<name>'. Supported voices: chelsie, ethan, aiden` instead of
+silently speaking another voice: a non-streaming request gets HTTP 400, and a
+streaming request's SSE stream stops after the text without a `[DONE]`
+sentinel (the message is in the server log).
+
+```json
+{
+  "model": "qwen3-omni",
+  "messages": [{"role": "user", "content": "Introduce yourself in one sentence."}],
+  "modalities": ["text", "audio"],
+  "audio": {"voice": "Chelsie", "format": "wav"}
+}
+```
+
 ### Speech Stage Placement
 
 At concurrency 8, the talker is the heaviest speech stage: it holds its GPU
@@ -655,5 +675,5 @@ The table below lists all parameters accepted by the `/v1/chat/completions` endp
 | `repetition_penalty` | float | `null` | Repetition penalty |
 | `seed` | int | `null` | Random seed for reproducibility |
 | `stream` | bool | `false` | Enable streaming via SSE |
-| `audio` | dict | `null` | Speech response format configuration, e.g. `{"format": "wav"}` |
+| `audio` | dict | `null` | Speech response configuration, e.g. `{"voice": "Chelsie", "format": "wav"}`; `voice` selects a checkpoint speaker (see Voices) |
 | `stage_sampling` | dict | `null` | Per-stage sampling overrides, e.g. `{"thinker": {"temperature": 0.8}}` |

@@ -1002,6 +1002,9 @@ def _build_chat_generate_request(req: ChatCompletionRequest) -> GenerateRequest:
     ):
         if value is not None:
             extra_params[field_name] = value
+    voice = (req.audio or {}).get("voice")
+    if voice is not None and str(voice).strip().casefold() not in {"", "default"}:
+        extra_params["speaker"] = str(voice).strip()
 
     return GenerateRequest(
         model=req.model,

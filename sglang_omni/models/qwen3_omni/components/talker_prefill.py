@@ -120,12 +120,20 @@ def merge_prompt_modality(
 
 
 def resolve_speaker_id(params: dict[str, Any], speaker_map: dict[str, int]) -> int:
-    speaker_name = str(params.get("speaker", "Ethan")).lower()
-    if speaker_name in speaker_map:
-        return speaker_map[speaker_name]
-    if speaker_map:
-        return next(iter(speaker_map.values()))
-    return int(params.get("speaker_id", 0))
+    if not speaker_map:
+        return int(params.get("speaker_id", 0))
+    requested = params.get("speaker")
+    name = "" if requested is None else str(requested).strip().lower()
+    if name in {"", "default"}:
+        return speaker_map.get("ethan", next(iter(speaker_map.values())))
+    speaker_id = speaker_map.get(name)
+    if speaker_id is not None:
+        return speaker_id
+    # Note (wenyao): openai_errors matches the literal substring "Unknown voice '",
+    # so rewording this message turns the client's 400 into a 500.
+    raise ValueError(
+        f"Unknown voice '{requested}'. Supported voices: {', '.join(speaker_map)}"
+    )
 
 
 class TalkerPrefillBuilder:

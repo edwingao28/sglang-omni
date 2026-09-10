@@ -3446,3 +3446,36 @@ def test_stub_endpoint_checks_auth_before_501() -> None:
 
     resp = client.post("/update_weights_from_tensor", json={})
     assert resp.status_code == 401
+
+
+@pytest.mark.parametrize("voice", ["Chelsie", " Chelsie "])
+def test_chat_audio_voice_reaches_the_pipeline_as_speaker(voice: str) -> None:
+    req = ChatCompletionRequest(
+        model="qwen3-omni",
+        messages=[{"role": "user", "content": "hi"}],
+        modalities=["text", "audio"],
+        audio={"voice": voice, "format": "pcm"},
+    )
+
+    gen_req = _build_chat_generate_request(req)
+
+    assert gen_req.extra_params["speaker"] == "Chelsie"
+    assert gen_req.metadata["audio_config"] == {"voice": voice, "format": "pcm"}
+    assert Client._build_omni_request(gen_req).params["speaker"] == "Chelsie"
+
+
+def test_chat_without_audio_voice_sets_no_speaker() -> None:
+    for audio in (
+        None,
+        {"format": "pcm"},
+        {"voice": "default"},
+        {"voice": " Default "},
+        {"voice": ""},
+        {"voice": "   "},
+    ):
+        req = ChatCompletionRequest(
+            model="qwen3-omni",
+            messages=[{"role": "user", "content": "hi"}],
+            audio=audio,
+        )
+        assert "speaker" not in _build_chat_generate_request(req).extra_params
