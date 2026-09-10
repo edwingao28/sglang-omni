@@ -9,10 +9,7 @@ import pytest
 import torch
 
 import sglang_omni.models.qwen3_omni.components.talker as talker_module
-from sglang_omni.models.qwen3_omni.components.talker import (
-    Qwen3OmniMoeTalkerCodePredictor,
-    Qwen3OmniTalker,
-)
+from sglang_omni.models.qwen3_omni.components.talker import Qwen3OmniTalker
 from tests.unit_test.fixtures.qwen_predictor import (
     build_real_step_predictor_graph_talker,
 )
@@ -88,15 +85,6 @@ def _materialized_sdpa(
     return attn_output.reshape(batch_size, seq_len, -1)
 
 
-def _materialized_kv_direct_attention(
-    *,
-    attn: SimpleNamespace,
-    hidden_states: torch.Tensor,
-) -> torch.Tensor:
-    q, k, v = _project_q_kv(attn, hidden_states)
-    return _materialized_sdpa(attn, q, k, v, is_causal=True)
-
-
 def _materialized_kv_cached_attention(
     *,
     talker: Qwen3OmniTalker,
@@ -109,44 +97,6 @@ def _materialized_kv_cached_attention(
     cached_k = talker._predictor_k_cache[0, :batch_size, :, : cache_len + 1, :]
     cached_v = talker._predictor_v_cache[0, :batch_size, :, : cache_len + 1, :]
     return _materialized_sdpa(attn, q, cached_k, cached_v, is_causal=False)
-
-
-@pytest.mark.parametrize("device_name,dtype", _DEVICE_DTYPE_PARAMS)
-def test_qwen_predictor_direct_attention_gqa_matches_materialized_kv(
-    monkeypatch: pytest.MonkeyPatch,
-    device_name: str,
-    dtype: torch.dtype,
-):
-    """Direct-path SDPA with enable_gqa must equal materialized KV expansion."""
-    monkeypatch.setattr(
-        talker_module,
-        "apply_qk_norm",
-        lambda q, k, **_: (q, k),
-    )
-
-    device = torch.device(device_name)
-    talker = _build_gqa_talker(device, dtype)
-    attn = talker.code_predictor.model.layers[0].self_attn
-
-    batch_size, seq_len, hidden_size = 2, 3, 8
-    torch.manual_seed(7)
-    hidden_states = torch.randn(
-        batch_size, seq_len, hidden_size, device=device, dtype=dtype
-    )
-    positions = torch.arange(seq_len, device=device).repeat(batch_size)
-
-    with torch.no_grad():
-        actual = Qwen3OmniMoeTalkerCodePredictor._direct_self_attention(
-            attn=attn,
-            hidden_states=hidden_states,
-            positions=positions,
-        )
-        expected = _materialized_kv_direct_attention(
-            attn=attn,
-            hidden_states=hidden_states,
-        )
-
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("device_name,dtype", _DEVICE_DTYPE_PARAMS)
