@@ -12,6 +12,7 @@ import torch
 import xxhash
 
 from sglang_omni.models.qwen3_omni.components.talker_prefill import TalkerPrefillBuilder
+from sglang_omni.models.qwen3_omni.frame_cap import resolve_talker_frame_cap
 from sglang_omni.models.qwen3_omni.payload_types import (
     Qwen3OmniPipelineState,
     ThinkerOutput,
@@ -740,6 +741,8 @@ def build_sglang_talker_request(
     thinker_config: Any = None,
     talker_model_inputs: dict[str, Any] | None = None,
     seed: int | None = None,
+    frame_cap_floor: int = 0,
+    frame_cap_per_text_token: int = 0,
 ) -> "SGLangARRequestData":
     """Build SGLang AR request for the Talker from thinker hidden states.
 
@@ -865,6 +868,12 @@ def build_sglang_talker_request(
     data.thinker_chunks_done = bool(thinker_chunks_done)
     data.pending_text_queue = coerce_pending_text_queue(pending_text_queue)
     data.tts_pad_embed = tts_pad_embed
+    data.talker_frame_cap = resolve_talker_frame_cap(
+        floor=frame_cap_floor,
+        per_text_token=frame_cap_per_text_token,
+        eos_id=codec_eos_id,
+        vocab_size=codec_vocab_size,
+    )
     return data
 
 
@@ -1051,6 +1060,8 @@ def make_talker_scheduler_adapters(
     user_token_id: int = 872,
     assistant_token_id: int = 77091,
     speaker_map: dict[str, int] | None = None,
+    talker_frame_cap_floor: int = 40,
+    talker_frame_cap_per_text_token: int = 0,
 ):
     """Build model-specific StagePayload <-> scheduler adapters for talker."""
     prefill_builder = TalkerPrefillBuilder(
@@ -1091,6 +1102,8 @@ def make_talker_scheduler_adapters(
             "codec_eos_id": codec_eos_id if codec_eos_id >= 0 else None,
             "suppress_tokens": suppress_tokens,
             "seed": _resolve_seed(params),
+            "frame_cap_floor": int(talker_frame_cap_floor),
+            "frame_cap_per_text_token": int(talker_frame_cap_per_text_token),
         }
 
     def request_builder(payload: StagePayload) -> SGLangARRequestData:
@@ -1193,6 +1206,8 @@ def _build_talker_request_data(
         thinker_config=thinker_config,
         talker_model_inputs=prompt_prefill["prompt_model_inputs"],
         seed=sampling_cfg.get("seed"),
+        frame_cap_floor=sampling_cfg.get("frame_cap_floor", 0),
+        frame_cap_per_text_token=sampling_cfg.get("frame_cap_per_text_token", 0),
     )
     req_data.tts_eos_embed = prompt_prefill["tts_eos_embed"]
     req_data.stage_payload = payload

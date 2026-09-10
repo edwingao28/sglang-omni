@@ -20,6 +20,7 @@ from sglang_omni.models.qwen3_omni.components.thinker_model import (
     Qwen3OmniMoeThinkerTextDecoderLayer,
     Qwen3OmniMoeThinkerTextSparseMoeBlock,
 )
+from sglang_omni.models.qwen3_omni.frame_cap import talker_frame_limit
 from sglang_omni.models.qwen3_omni.hf_config import (
     Qwen3OmniMoeTalkerConfig,
     Qwen3OmniMoeTalkerTextConfig,
@@ -1032,8 +1033,8 @@ class Qwen3OmniTalker(nn.Module):
         return next_code
 
     def _reuse_decode_buffers(self, requests: list) -> bool:
-        # Note (akazaakane): sampling params/suppress mask are static per
-        # request, so only the repetition mask needs updating here.
+        # Note (akazaakane): sampling params/suppress mask are static per request until
+        # the frame cap forces EOS, so only the repetition mask and that row change here.
         prev_rids = self._decode_prep_rids
         if prev_rids is None or len(prev_rids) != len(requests):
             return False
@@ -1051,7 +1052,35 @@ class Qwen3OmniTalker(nn.Module):
             self._repetition_mask[rep_rows, self._sampled_token_ids[rep_rows]] = True
         for row_idx in range(len(prev_lens)):
             prev_lens[row_idx] += 1
+        self._force_frame_cap_rows(requests, rebuilt=False)
         return True
+
+    def _force_frame_cap_rows(self, requests: list, *, rebuilt: bool) -> None:
+        # Note (wenyao): EOS through the suppress mask keeps the decode graph static and
+        # ends the request on the EOS path, so code2wav still gets its tail row.
+        for row_idx, sched_req in enumerate(requests):
+            data = sched_req.data
+            if not rebuilt and data.talker_frame_cap_hit_at is not None:
+                continue
+            limit = talker_frame_limit(data)
+            if limit is None:
+                continue
+            req = data.req
+            out_len = len(req.output_ids) if req.output_ids else 0
+            if out_len < limit:
+                continue
+            row = self._suppress_mask[row_idx]
+            row.fill_(True)
+            row[data.talker_frame_cap.eos_id] = False
+            if data.talker_frame_cap_hit_at is None:
+                data.talker_frame_cap_hit_at = out_len
+                logger.warning(
+                    "talker_frame_cap rid=%s frames=%d text_rows=%d limit=%d",
+                    req.rid,
+                    out_len,
+                    data.pending_text_queue.appended_total,
+                    limit,
+                )
 
     def invalidate_decode_buffers(self) -> None:
         # Note (akazaakane): a prefill's sampled token bypasses
@@ -1173,6 +1202,7 @@ class Qwen3OmniTalker(nn.Module):
             self._suppress_mask[
                 sup_pairs[: len(sup_rows)], sup_pairs[len(sup_rows) :]
             ] = True
+        self._force_frame_cap_rows(requests, rebuilt=True)
 
         self._decode_prep_rids = [sched_req.data.req.rid for sched_req in requests]
         self._decode_prep_out_lens = [

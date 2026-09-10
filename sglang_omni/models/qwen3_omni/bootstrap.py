@@ -144,6 +144,8 @@ def create_talker_scheduler(
     total_gpu_memory_fraction: float | None = None,
     enable_partial_start: bool = False,
     partial_start_min_chunks: int = 5,
+    talker_frame_cap_floor: int = 40,
+    talker_frame_cap_per_text_token: int = 0,
 ):
     """Create the Qwen talker scheduler."""
     del speech_enabled
@@ -243,6 +245,8 @@ def create_talker_scheduler(
         user_token_id=root_config.user_token_id,
         assistant_token_id=root_config.assistant_token_id,
         speaker_map=talker_config.speaker_id,
+        talker_frame_cap_floor=talker_frame_cap_floor,
+        talker_frame_cap_per_text_token=talker_frame_cap_per_text_token,
     )
 
     scheduler = QwenTalkerScheduler(

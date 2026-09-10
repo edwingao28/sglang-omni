@@ -102,6 +102,7 @@ tests/
     │   ├── test_sglang_ar_budget.py
     │   ├── test_streaming.py
     │   ├── test_talker.py
+    │   ├── test_talker_frame_cap.py
     │   ├── test_talker_prefill_embed_cache.py
     │   ├── test_talker_emit_snapshot.py
     │   ├── test_talker_feedback_write.py
@@ -632,6 +633,12 @@ that happened to contain an older version of the test.
     `_rollback_decode_prep_after_skip` idempotency contract, projected prefill
     tensor storage/slicing, decode feedback/text FIFO consumption, and replay
     of generated-token input embeds after decode retract
+  - talker frame cap (`test_talker_frame_cap.py`): text-row accounting on the
+    pending text FIFO, `floor + per_text_token x rows` limit gated on the closed
+    Thinker stream, forced codec EOS through the static suppress mask on both
+    decode-prep paths, launch-time validation of the factory knobs, and the
+    bootstrap -> adapter -> builder knob plumbing (the factory -> bootstrap hop
+    is covered in `test_sglang_ar_budget.py`)
   - Code2Wav streaming/cleanup behavior plus bounded batching deadlines,
     fire rules, sub-batch decomposition, output equivalence, and lifecycle
   - Code2Wav CUDA Graph lifecycle, exact-shape replay, atomic rollback, memory

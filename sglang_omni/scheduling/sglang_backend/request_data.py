@@ -29,6 +29,8 @@ class SGLangARRequestData(ARRequestData):
     tts_pad_embed: Any = None
     tts_eos_embed: Any = None
     thinker_chunks_done: bool = True
+    talker_frame_cap: Any = None
+    talker_frame_cap_hit_at: int | None = None
 
 
 @dataclass

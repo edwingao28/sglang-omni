@@ -39,6 +39,7 @@ class PendingTextTensorQueue:
 
     rows: torch.Tensor | None = None
     cursor: int = 0
+    appended_total: int = 0
     _chunks: deque[torch.Tensor] = field(default_factory=deque, repr=False)
     _pending_rows: int = field(init=False, repr=False)
 
@@ -49,9 +50,12 @@ class PendingTextTensorQueue:
             if self.rows is not None
             else 0
         )
-        self._pending_rows = head_rows + sum(
-            int(chunk.shape[0]) for chunk in self._chunks
-        )
+        chunk_rows = sum(int(chunk.shape[0]) for chunk in self._chunks)
+        self._pending_rows = head_rows + chunk_rows
+        held_rows = (
+            int(self.rows.shape[0]) if self.rows is not None else 0
+        ) + chunk_rows
+        self.appended_total = max(int(self.appended_total), held_rows)
 
     @classmethod
     def from_tensor(cls, tensor: torch.Tensor) -> "PendingTextTensorQueue":
@@ -66,6 +70,7 @@ class PendingTextTensorQueue:
         return type(self)(
             rows=self.rows,
             cursor=self.cursor,
+            appended_total=self.appended_total,
             _chunks=deque(self._chunks),
         )
 
@@ -116,6 +121,7 @@ class PendingTextTensorQueue:
         if rows is None:
             return
         appended_rows = int(rows.shape[0])
+        self.appended_total += appended_rows
         if self.rows is None or len(self) == 0:
             self.rows = rows
             self.cursor = 0

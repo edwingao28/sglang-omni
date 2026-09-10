@@ -1152,6 +1152,37 @@ def create_sglang_thinker_executor_from_config(
     return scheduler
 
 
+def _validate_talker_frame_cap_kwargs(
+    floor: Any, per_text_token: Any
+) -> tuple[int, int]:
+    # Note (wenyao): free-form factory keys arrive unvalidated from YAML/CLI and
+    # would otherwise fail inside every request build instead of at launch.
+    values = {
+        "talker_frame_cap_floor": floor,
+        "talker_frame_cap_per_text_token": per_text_token,
+    }
+    resolved: list[int] = []
+    for name, value in values.items():
+        if isinstance(value, bool) or (
+            isinstance(value, float) and not value.is_integer()
+        ):
+            raise ValueError(
+                f"talker_ar.factory.{name} must be an integer >= 0, got {value!r}"
+            )
+        try:
+            as_int = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"talker_ar.factory.{name} must be an integer >= 0, got {value!r}"
+            ) from exc
+        if as_int < 0:
+            raise ValueError(
+                f"talker_ar.factory.{name} must be an integer >= 0, got {value!r}"
+            )
+        resolved.append(as_int)
+    return resolved[0], resolved[1]
+
+
 def create_talker_ar_executor_from_config(
     model_path: str,
     *,
@@ -1167,10 +1198,17 @@ def create_talker_ar_executor_from_config(
     total_gpu_memory_fraction: float | None = None,
     enable_partial_start: bool = False,
     partial_start_min_chunks: int = 5,
+    talker_frame_cap_floor: int = 40,
+    talker_frame_cap_per_text_token: int = 0,
 ):
     """Returns OmniScheduler for talker."""
     from sglang_omni.models.qwen3_omni.bootstrap import create_talker_scheduler
 
+    talker_frame_cap_floor, talker_frame_cap_per_text_token = (
+        _validate_talker_frame_cap_kwargs(
+            talker_frame_cap_floor, talker_frame_cap_per_text_token
+        )
+    )
     # Note (Xuesong, Chenyang): cuda_graph defaults to ON for the talker
     # after #384, which routed talker MoE through `self.experts` (FusedMoE)
     # — the `fused_experts (full graph)` backend picked in #344. Caller can
@@ -1231,6 +1269,8 @@ def create_talker_ar_executor_from_config(
         total_gpu_memory_fraction=total_gpu_memory_fraction,
         enable_partial_start=enable_partial_start,
         partial_start_min_chunks=partial_start_min_chunks,
+        talker_frame_cap_floor=talker_frame_cap_floor,
+        talker_frame_cap_per_text_token=talker_frame_cap_per_text_token,
     )
     from sglang.srt.runtime_context import get_schedule
 

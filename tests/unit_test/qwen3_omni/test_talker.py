@@ -37,7 +37,10 @@ from sglang_omni.models.qwen3_omni.talker_scheduler import (
 from sglang_omni.scheduling.messages import IncomingMessage
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
-from tests.unit_test.fixtures.qwen_fakes import FakeQwenTokenizer
+from tests.unit_test.fixtures.qwen_fakes import (
+    FakeQwenTokenizer,
+    make_talker_decode_prep_fake,
+)
 from tests.unit_test.fixtures.qwen_predictor import (
     build_real_step_predictor_graph_talker,
 )
@@ -2146,43 +2149,6 @@ def test_build_talker_request_wall_clock(seq_len: int) -> None:
     print(f"\n[seq_len={seq_len}] mean={mean_ms:.2f}ms  floats={seq_len * 2048:,}")
 
 
-def _talker_seed_self(
-    max_bs: int = 4,
-    vocab: int = 8,
-    device: torch.device | None = None,
-) -> SimpleNamespace:
-    """Minimal stand-in carrying only the buffers prepare_decode_buffers writes."""
-    device = device or torch.device("cpu")
-    fake = SimpleNamespace(
-        _repetition_mask=torch.zeros(max_bs, vocab, dtype=torch.bool, device=device),
-        _suppress_mask=torch.zeros(max_bs, vocab, dtype=torch.bool, device=device),
-        _repetition_penalties=torch.ones(max_bs, 1, device=device),
-        _sampling_temperatures=torch.ones(max_bs, 1, device=device),
-        _sampling_top_ps=torch.ones(max_bs, device=device),
-        _sampling_top_ks=torch.ones(max_bs, dtype=torch.long, device=device),
-        _sampling_min_ps=torch.zeros(max_bs, device=device),
-        _sampling_seeds=torch.zeros(max_bs, dtype=torch.long, device=device),
-        _sampling_staging_cpu=torch.zeros(
-            6,
-            max_bs,
-            dtype=torch.int64,
-            device="cpu",
-            pin_memory=device.type == "cuda",
-        ),
-        _sampling_staging_gpu=torch.zeros(6, max_bs, dtype=torch.int64, device=device),
-        _sampling_staging_event=(torch.cuda.Event() if device.type == "cuda" else None),
-        _sampled_token_ids=torch.zeros(max_bs, dtype=torch.long, device=device),
-        _decode_prep_rids=None,
-        _decode_prep_out_lens=[],
-        _decode_prep_rep_rows=None,
-    )
-    fake._reuse_decode_buffers = Qwen3OmniTalker._reuse_decode_buffers.__get__(fake)
-    fake.invalidate_decode_buffers = Qwen3OmniTalker.invalidate_decode_buffers.__get__(
-        fake
-    )
-    return fake
-
-
 def _talker_seed_req(seed: int | None, rid: str) -> SimpleNamespace:
     sp = SimpleNamespace(
         repetition_penalty=1.0,  # keep rep/suppress branches off
@@ -2195,7 +2161,14 @@ def _talker_seed_req(seed: int | None, rid: str) -> SimpleNamespace:
     req = SimpleNamespace(
         sampling_params=sp, output_ids=[], _codec_suppress_tokens=None, rid=rid
     )
-    return SimpleNamespace(data=SimpleNamespace(req=req, suppress_tokens=None))
+    return SimpleNamespace(
+        data=SimpleNamespace(
+            req=req,
+            suppress_tokens=None,
+            talker_frame_cap=None,
+            talker_frame_cap_hit_at=None,
+        )
+    )
 
 
 def test_talker_prepare_decode_buffers_unseeded_seed_is_rank_shared() -> None:
@@ -2203,7 +2176,7 @@ def test_talker_prepare_decode_buffers_unseeded_seed_is_rank_shared() -> None:
     # os.urandom, or TP ranks desync.
     from sglang_omni.sampling.seed import SAMPLING_SEED_MASK, derive_sampling_seed
 
-    fake = _talker_seed_self()
+    fake = make_talker_decode_prep_fake()
     seeded = _talker_seed_req(123, "seeded")
     unseeded = _talker_seed_req(None, "unseeded")
     out_of_range = _talker_seed_req(0xFFFFFFFF, "oor")
@@ -2255,12 +2228,17 @@ def _talker_prep_req(
         rid=rid,
     )
     return SimpleNamespace(
-        data=SimpleNamespace(req=req, suppress_tokens=list(suppress or []) or None)
+        data=SimpleNamespace(
+            req=req,
+            suppress_tokens=list(suppress or []) or None,
+            talker_frame_cap=None,
+            talker_frame_cap_hit_at=None,
+        )
     )
 
 
 def test_talker_prepare_decode_buffers_steady_state_reuse() -> None:
-    fake = _talker_seed_self()
+    fake = make_talker_decode_prep_fake()
     requests = [
         _talker_prep_req("a", penalty=1.5, output_ids=[2], suppress=[3]),
         _talker_prep_req("b", penalty=1.0, output_ids=[4]),
@@ -2288,7 +2266,7 @@ def test_talker_prepare_decode_buffers_steady_state_reuse() -> None:
     assert not fake._repetition_mask[1].any()
     assert bool(fake._suppress_mask[0, 3])
 
-    fresh = _talker_seed_self()
+    fresh = make_talker_decode_prep_fake()
     Qwen3OmniTalker.prepare_decode_buffers(fresh, requests)
     assert torch.equal(fake._repetition_mask, fresh._repetition_mask)
     assert torch.equal(fake._suppress_mask, fresh._suppress_mask)
@@ -2300,7 +2278,7 @@ def test_talker_prepare_decode_buffers_steady_state_reuse() -> None:
 )
 def test_talker_prepare_decode_buffers_cuda_matches_fresh_rebuild() -> None:
     device = torch.device("cuda")
-    fake = _talker_seed_self(device=device)
+    fake = make_talker_decode_prep_fake(device=device)
     requests = [
         _talker_prep_req(
             "a",
@@ -2360,7 +2338,7 @@ def test_talker_prepare_decode_buffers_cuda_matches_fresh_rebuild() -> None:
     requests[1].data.req.output_ids.append(5)
     Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
 
-    fresh = _talker_seed_self(device=device)
+    fresh = make_talker_decode_prep_fake(device=device)
     Qwen3OmniTalker.prepare_decode_buffers(fresh, requests)
     torch.cuda.synchronize(device)
 
@@ -2381,7 +2359,7 @@ def test_talker_prepare_decode_buffers_cuda_matches_fresh_rebuild() -> None:
 
 def test_talker_prepare_decode_buffers_rebuild_triggers() -> None:
     def _prepared() -> tuple[SimpleNamespace, list[SimpleNamespace]]:
-        fake = _talker_seed_self()
+        fake = make_talker_decode_prep_fake()
         requests = [
             _talker_prep_req("a", penalty=1.5, output_ids=[2]),
             _talker_prep_req("b", penalty=1.5, output_ids=[4]),
@@ -2417,7 +2395,7 @@ def test_talker_prefill_forward_invalidates_next_decode_reuse() -> None:
         def is_decode(self) -> bool:
             return not self._is_extend
 
-    fake = _talker_seed_self()
+    fake = make_talker_decode_prep_fake()
     requests = [_talker_prep_req("a", penalty=1.5, output_ids=[2])]
     Qwen3OmniTalker.prepare_decode_buffers(fake, requests)
     fake._sampling_temperatures[0, 0] = 123.0

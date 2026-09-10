@@ -348,6 +348,33 @@ GPUs, so these numbers describe that experiment's topology change, not the
 default code2wav placement. Streaming TTS workloads should prefer this
 layout regardless, since TTFA is the latency users notice first.
 
+### Talker Frame Cap
+
+The Talker occasionally keeps sampling codec frames after the text has been
+spoken (a repeated syllable over an otherwise correct answer). Such a request
+ends on a natural codec EOS, so `talker_max_new_tokens` does not bound it. An
+optional cap on frames, scaled by the number of text rows the Talker received,
+forces the codec EOS once a request reaches `floor + per_text_token x text_rows`;
+the request finishes through the normal EOS path and Code2Wav emits its tail as
+usual. The cap is off by default; set it on the stage in the YAML config:
+
+```yaml
+stages:
+  talker_ar:
+    factory:
+      talker_frame_cap_per_text_token: 12
+      talker_frame_cap_floor: 40
+```
+
+`talker_frame_cap_per_text_token: 0` disables the cap. Text rows are the
+Thinker's assistant tokens after the first spoken one plus the TTS end row, so
+the count is close to the Thinker output length. On English SeedTTS utterances,
+normal speech runs 3.6 frames per text row at the median, 9.1 at the 99.9th
+percentile and 9.7 at most, while runaway outputs run 15 to 17, so a slope of 12
+separates them with margin. Other languages and slow speaking styles have not
+been measured, which is why the default stays off. Each forced stop logs a
+`talker_frame_cap` warning with the request id, frame count and limit.
+
 ### Realtime Speech with Server-Side Turn Detection
 
 The speech pipeline can stream spoken responses over `/v1/realtime`. Enable the

@@ -66,6 +66,48 @@ def make_qwen_payload(
     )
 
 
+def make_talker_decode_prep_fake(
+    max_bs: int = 4,
+    vocab: int = 8,
+    device: torch.device | None = None,
+    *,
+    sampler: Any = None,
+) -> SimpleNamespace:
+    from sglang_omni.models.qwen3_omni.components.talker import Qwen3OmniTalker
+
+    device = device or torch.device("cpu")
+    fake = SimpleNamespace(
+        _repetition_mask=torch.zeros(max_bs, vocab, dtype=torch.bool, device=device),
+        _suppress_mask=torch.zeros(max_bs, vocab, dtype=torch.bool, device=device),
+        _repetition_penalties=torch.ones(max_bs, 1, device=device),
+        _sampling_temperatures=torch.ones(max_bs, 1, device=device),
+        _sampling_top_ps=torch.ones(max_bs, device=device),
+        _sampling_top_ks=torch.ones(max_bs, dtype=torch.long, device=device),
+        _sampling_min_ps=torch.zeros(max_bs, device=device),
+        _sampling_seeds=torch.zeros(max_bs, dtype=torch.long, device=device),
+        _sampling_staging_cpu=torch.zeros(
+            6,
+            max_bs,
+            dtype=torch.int64,
+            device="cpu",
+            pin_memory=device.type == "cuda",
+        ),
+        _sampling_staging_gpu=torch.zeros(6, max_bs, dtype=torch.int64, device=device),
+        _sampling_staging_event=(torch.cuda.Event() if device.type == "cuda" else None),
+        _sampled_token_ids=torch.zeros(max_bs, dtype=torch.long, device=device),
+        _decode_prep_rids=None,
+        _decode_prep_out_lens=[],
+        _decode_prep_rep_rows=None,
+        _sampler=sampler,
+    )
+    fake._reuse_decode_buffers = Qwen3OmniTalker._reuse_decode_buffers.__get__(fake)
+    fake.invalidate_decode_buffers = Qwen3OmniTalker.invalidate_decode_buffers.__get__(
+        fake
+    )
+    fake._force_frame_cap_rows = Qwen3OmniTalker._force_frame_cap_rows.__get__(fake)
+    return fake
+
+
 class FakeCodecEmbedding(nn.Module):
     def __init__(self, hidden_size: int) -> None:
         super().__init__()

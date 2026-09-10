@@ -558,6 +558,66 @@ def test_qwen_talker_ar_threads_explicit_generation_batch_policy(monkeypatch) ->
     ]
 
 
+def test_talker_ar_forwards_frame_cap_kwargs(monkeypatch) -> None:
+    scheduler_kwargs: list[dict[str, object]] = []
+
+    def _fake_builder(model_path, context_length, **overrides):
+        return SimpleNamespace(
+            mem_fraction_static=overrides.get("mem_fraction_static"),
+            max_running_requests=overrides["max_running_requests"],
+            cuda_graph_max_bs=overrides["cuda_graph_max_bs"],
+            cuda_graph_bs=overrides["cuda_graph_bs"],
+            cuda_graph_config=SimpleNamespace(
+                decode=SimpleNamespace(
+                    max_bs=overrides["cuda_graph_max_bs"],
+                    bs=overrides["cuda_graph_bs"],
+                ),
+                prefill=SimpleNamespace(backend="disabled", bs=None, max_bs=None),
+            ),
+            disable_cuda_graph=overrides["disable_cuda_graph"],
+            enable_torch_compile=overrides.get("enable_torch_compile", False),
+            torch_compile_max_bs=overrides["torch_compile_max_bs"],
+        )
+
+    def _fake_create_talker_scheduler(server_args, gpu_id, **kwargs):
+        scheduler_kwargs.append(dict(kwargs))
+        return _publish_for(server_args)
+
+    monkeypatch.setattr(qwen_stages, "build_sglang_server_args", _fake_builder)
+    monkeypatch.setattr(
+        qwen_bootstrap, "create_talker_scheduler", _fake_create_talker_scheduler
+    )
+    monkeypatch.setattr(qwen_stages, "avail_gpu_mem", lambda gpu_id: 90.0)
+    monkeypatch.setattr(
+        qwen_stages, "get_process_gpu_memory_bytes", lambda gpu_id: None
+    )
+
+    qwen_stages.create_talker_ar_executor_from_config("dummy")
+    assert scheduler_kwargs[-1]["talker_frame_cap_per_text_token"] == 0
+    assert scheduler_kwargs[-1]["talker_frame_cap_floor"] == 40
+
+    qwen_stages.create_talker_ar_executor_from_config(
+        "dummy", talker_frame_cap_per_text_token=12, talker_frame_cap_floor=64
+    )
+    assert scheduler_kwargs[-1]["talker_frame_cap_per_text_token"] == 12
+    assert scheduler_kwargs[-1]["talker_frame_cap_floor"] == 64
+
+    qwen_stages.create_talker_ar_executor_from_config(
+        "dummy", talker_frame_cap_per_text_token="12", talker_frame_cap_floor=64.0
+    )
+    assert scheduler_kwargs[-1]["talker_frame_cap_per_text_token"] == 12
+    assert scheduler_kwargs[-1]["talker_frame_cap_floor"] == 64
+
+    for bad in (
+        {"talker_frame_cap_per_text_token": "twelve"},
+        {"talker_frame_cap_floor": -1},
+        {"talker_frame_cap_per_text_token": 12.5},
+        {"talker_frame_cap_floor": None},
+    ):
+        with pytest.raises(ValueError, match="talker_ar.factory.talker_frame_cap"):
+            qwen_stages.create_talker_ar_executor_from_config("dummy", **bad)
+
+
 def test_talker_ar_default_running_batch_width_is_32(monkeypatch) -> None:
     """talker_ar default max_running_requests is 32; a config override still wins."""
     captured: list[dict[str, object]] = []
