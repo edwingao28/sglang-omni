@@ -129,7 +129,7 @@ def test_upstream_acceptance_unpack_excludes_rejected_padding():
     )
 
     a, b = request("a"), request("b")
-    a.kv_committed_len = b.kv_committed_len = 3
+    a.kv.kv_committed_len = b.kv.kv_committed_len = 3
     observations = []
     processor = SimpleNamespace(
         model_worker=SimpleNamespace(
@@ -147,7 +147,7 @@ def test_upstream_acceptance_unpack_excludes_rejected_padding():
     assert SchedulerBatchResultProcessor._resolve_spec_v2_tokens(
         processor, result, SimpleNamespace(reqs=[a, b])
     ) == [[10, 11, 12], [20]]
-    assert [a.kv_committed_len, b.kv_committed_len] == [6, 4]
+    assert [a.kv.kv_committed_len, b.kv.kv_committed_len] == [6, 4]
     assert [a.spec_verify_ct, b.spec_verify_ct] == [1, 1]
     assert observations == [[2, 0]]
 

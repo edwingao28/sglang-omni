@@ -113,7 +113,10 @@ def test_tp_process_env_preserves_common_device_namespace(visible_devices) -> No
     parent_env = {"CUDA_VISIBLE_DEVICES": visible_devices} if visible_devices else {}
     env = cuda_platform.get_stage_process_env(_tp_spec(gpu_id=1), parent_env)
 
-    assert env == {"SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK": "false"}
+    assert env == {
+        "SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK": "false",
+        "NCCL_NVLS_ENABLE": "0",
+    }
     assert parent_env == (
         {"CUDA_VISIBLE_DEVICES": visible_devices} if visible_devices else {}
     )
@@ -133,10 +136,11 @@ def test_tp_process_env_leaves_an_operator_nvls_value_alone() -> None:
     assert "NCCL_NVLS_ENABLE" not in env
 
 
-def test_spawn_env_maps_the_planned_gpu_even_with_a_configured_visibility(
+def test_single_visible_spawn_env_maps_planned_gpu_over_configured_visibility(
     monkeypatch,
 ) -> None:
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setenv("SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS", "true")
     monkeypatch.setattr(stage_workers, "current_platform", cuda_platform)
     stage_spec = _tp_spec(gpu_id=1)
     stage_spec.env_defaults = {"CUDA_VISIBLE_DEVICES": "2,3"}

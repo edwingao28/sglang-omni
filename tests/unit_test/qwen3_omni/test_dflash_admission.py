@@ -48,6 +48,7 @@ def test_dflash_bootstrap_selects_native_worker_and_disables_lookahead(
     from sglang_omni.scheduling import bootstrap as infrastructure
     from sglang_omni.scheduling import omni_scheduler, sglang_backend
     from sglang_omni.scheduling.generation_batch_policy import CudaGraphBackend
+    from sglang_omni.utils import cuda_graph_batch_validator
     from sglang_omni.vendor.sglang import server_args as server_args_module
 
     args = SimpleNamespace(
@@ -65,6 +66,13 @@ def test_dflash_bootstrap_selects_native_worker_and_disables_lookahead(
                 ),
                 bs=[32, 64],
             )
+        ),
+    )
+    monkeypatch.setattr(
+        cuda_graph_batch_validator,
+        "get_exec",
+        lambda: SimpleNamespace(
+            graph=SimpleNamespace(cuda_graph_config=args.cuda_graph_config)
         ),
     )
     config = SimpleNamespace(
@@ -197,12 +205,13 @@ def test_dflash_admits_greedy_text_and_preserves_request_parameters(monkeypatch)
     assert seen[0]["params"] == params and data.stage_payload is payload
 
 
-def test_native_prefill_attestation_keeps_backend_and_bucket_checks():
+def test_native_prefill_attestation_keeps_backend_and_bucket_checks(monkeypatch):
     from sglang.srt.model_executor.runner.prefill_cuda_graph_runner import (
         PrefillCudaGraphRunner,
     )
 
     from sglang_omni.scheduling.generation_batch_policy import CudaGraphBackend
+    from sglang_omni.utils import cuda_graph_batch_validator
     from sglang_omni.utils.cuda_graph_batch_validator import attest_prefill_cuda_graphs
 
     runner = object.__new__(PrefillCudaGraphRunner)
@@ -215,14 +224,27 @@ def test_native_prefill_attestation_keeps_backend_and_bucket_checks():
             prefill=SimpleNamespace(backend=CudaGraphBackend.BREAKABLE, bs=[32, 64])
         )
     )
+    monkeypatch.setattr(
+        cuda_graph_batch_validator,
+        "get_exec",
+        lambda: SimpleNamespace(
+            graph=SimpleNamespace(cuda_graph_config=args.cuda_graph_config)
+        ),
+    )
     with pytest.raises(RuntimeError, match="no input_embeds slot"):
-        attest_prefill_cuda_graphs(model_runner, args)
-    attest_prefill_cuda_graphs(model_runner, args, require_input_embeds=False)
+        attest_prefill_cuda_graphs(model_runner, operator_selected=True)
+    attest_prefill_cuda_graphs(
+        model_runner, operator_selected=True, require_input_embeds=False
+    )
 
     runner.prefill_backend_name = CudaGraphBackend.DISABLED
     with pytest.raises(RuntimeError, match="backend mismatch"):
-        attest_prefill_cuda_graphs(model_runner, args, require_input_embeds=False)
+        attest_prefill_cuda_graphs(
+            model_runner, operator_selected=True, require_input_embeds=False
+        )
     runner.prefill_backend_name = CudaGraphBackend.BREAKABLE
     runner.capture_num_tokens = [32]
     with pytest.raises(RuntimeError, match="capture shapes differ"):
-        attest_prefill_cuda_graphs(model_runner, args, require_input_embeds=False)
+        attest_prefill_cuda_graphs(
+            model_runner, operator_selected=True, require_input_embeds=False
+        )

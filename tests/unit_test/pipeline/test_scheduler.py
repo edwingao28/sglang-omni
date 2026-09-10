@@ -1087,7 +1087,7 @@ def chunked_abort_state(request, monkeypatch):
         sampling_params=sampling,
         vocab_size=128,
     )
-    req.req_pool_idx = 1
+    req.kv.req_pool_idx = 1
     req._omni_terminal_claimed = False
     req._omni_data = SimpleNamespace(req=req)
     scheduler.chunked_req = req
@@ -1095,9 +1095,9 @@ def chunked_abort_state(request, monkeypatch):
 
     def release(released_req, cache, *, is_insert=True):
         assert released_req is req and cache is scheduler.tree_cache
-        assert req.req_pool_idx == 1, "request pool slot released twice"
+        assert req.kv.req_pool_idx == 1, "request pool slot released twice"
         released.append(is_insert)
-        req.req_pool_idx = None
+        req.kv.req_pool_idx = None
 
     monkeypatch.setattr(omni_scheduler_module, "release_kv_cache", release)
     monkeypatch.setattr(upstream_scheduler, "release_kv_cache", release)
@@ -1114,7 +1114,7 @@ def test_chunked_abort_waits_for_upstream_drain(chunked_abort_state):
     assert scheduler._pending_chunked_abort_req is req
     assert req.to_finish.to_json()["type"] == "abort"
     assert released == [] and cleaned == []
-    assert req._omni_data is data and req.req_pool_idx == 1
+    assert req._omni_data is data and req.kv.req_pool_idx == 1
 
     scheduler.process_pending_chunked_abort()
     scheduler.process_pending_chunked_abort()
@@ -1123,7 +1123,7 @@ def test_chunked_abort_waits_for_upstream_drain(chunked_abort_state):
     assert cleaned == [req.rid]
     assert scheduler.chunked_req is None
     assert scheduler._pending_chunked_abort_req is None
-    assert req.finished() and req.req_pool_idx is None
+    assert req.finished() and req.kv.req_pool_idx is None
     assert req._omni_data is None and data.req is req
     scheduler.abort(req.rid)
     assert released == [False]

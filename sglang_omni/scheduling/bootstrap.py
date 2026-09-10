@@ -140,9 +140,12 @@ def create_sglang_infrastructure(
     from sglang_omni.scheduling.stage_kv_budget import consume_stage_kv_cache_bytes
 
     if speculative:
+        from sglang.srt.arg_groups.model_override_base import resolved_view
         from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
-        algorithm = SpeculativeAlgorithm.from_string(server_args.speculative_algorithm)
+        algorithm = SpeculativeAlgorithm.from_string(
+            resolved_view(server_args).speculative_algorithm
+        )
         if not algorithm.is_dflash():
             raise ValueError(
                 "Omni speculative infrastructure currently requires DFLASH"

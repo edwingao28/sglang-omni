@@ -445,10 +445,11 @@ class OmniScheduler:
         )
         self.current_scheduler_metrics_enabled = False
 
+        from sglang.srt.runtime_context import get_spec
         from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
         self.spec_algorithm = SpeculativeAlgorithm.from_string(
-            server_args.speculative_algorithm
+            get_spec().speculative_algorithm
         )
         self.future_map = self.spec_algorithm.create_future_map(
             torch.device(self.device),

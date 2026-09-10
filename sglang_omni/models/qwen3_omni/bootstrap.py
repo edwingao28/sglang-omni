@@ -37,7 +37,10 @@ def _configure_thinker_speculation(
     talker_stream_token_only: bool,
     capture_speech_hidden_states: bool,
 ) -> bool:
-    algorithm = getattr(server_args, "speculative_algorithm", None)
+    from sglang.srt.arg_groups.model_override_base import resolved_view
+
+    cfg = resolved_view(server_args)
+    algorithm = getattr(cfg, "speculative_algorithm", None)
     if algorithm is None:
         return False
     if algorithm != "DFLASH":
@@ -51,7 +54,7 @@ def _configure_thinker_speculation(
             "DFLASH requires speech_enabled=True, talker_stream_token_only=True, "
             "and capture_speech_hidden_states=False"
         )
-    if not getattr(server_args, "speculative_draft_model_path", None):
+    if not getattr(cfg, "speculative_draft_model_path", None):
         raise ValueError("DFLASH requires speculative_draft_model_path")
     from sglang_omni.vendor.sglang.server_args import override_server_args
 
@@ -91,7 +94,7 @@ def create_thinker_scheduler(
         talker_stream_token_only=talker_stream_token_only,
         capture_speech_hidden_states=capture_speech_hidden_states,
         enable_return_hidden_states=getattr(
-            server_args, "enable_return_hidden_states", False
+            resolved_view(server_args), "enable_return_hidden_states", False
         ),
     )
     speculative_enabled = _configure_thinker_speculation(

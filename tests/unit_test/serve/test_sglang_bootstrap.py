@@ -586,7 +586,9 @@ def test_create_sglang_infrastructure_consumes_scoped_kv_budget(
     assert captured["kv_cache_bytes"] is None
 
 
-def test_dflash_loads_both_models_before_allocating_shared_pools(monkeypatch):
+def test_dflash_loads_both_models_before_allocating_shared_pools(
+    monkeypatch, published
+):
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
     from sglang_omni.model_runner import speculative_target_worker
@@ -621,6 +623,8 @@ def test_dflash_loads_both_models_before_allocating_shared_pools(monkeypatch):
 
         def __init__(self, **kwargs):
             events.append("target_weights")
+            published.append(get_context().override_server_args(page_size=1))
+            published[-1].install()
             self.model_runner = Runner()
 
         def get_memory_pool(self):
