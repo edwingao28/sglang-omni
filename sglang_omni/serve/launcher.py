@@ -432,6 +432,7 @@ async def _run_server(
             ),
             custom_voice_config=pipeline_config.resolve_custom_voice_config(),
             supports_audio_translation=(pipeline_config.supports_audio_translation()),
+            supports_audio_output=pipeline_config.supports_audio_output(),
             required_speech_reference_count=(
                 pipeline_config.required_speech_reference_count
             ),

@@ -8,7 +8,7 @@ Install `sglang-omni` by following [Installation](../get_started/installation.md
 
 ## Text-Only Mode
 
-Text-only mode runs the thinker pipeline on a single GPU. It accepts multi-modal input (text, image, audio) and produces text output only.
+Text-only mode runs the thinker pipeline on a single GPU. It accepts multi-modal input (text, image, audio) and produces text output only. A chat request that asks for `"modalities": ["text", "audio"]` is rejected up front with HTTP 400 `Audio output is unavailable for this pipeline; request "modalities": ["text"].`, and a `/generate` request with `"audio"` in `output_modalities` gets the same 400 naming `output_modalities`, rather than quietly returning text alone.
 
 ### Launch the Server
 

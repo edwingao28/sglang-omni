@@ -795,6 +795,10 @@ class PipelineConfig(BaseModel):
         """Return whether this pipeline can serve /v1/audio/translations."""
         return False
 
+    def supports_audio_output(self) -> bool | None:
+        """Return whether chat and /generate may return audio; None when undeclared."""
+        return None
+
     @property
     def gpu_placement(self) -> dict[str, int | list[int]]:
         out: dict[str, int | list[int]] = {}

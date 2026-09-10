@@ -24,7 +24,7 @@ Usage:
     python benchmarks/eval/benchmark_omni_mmsu.py \
         --model qwen3-omni --port 8000 --max-samples 50
 
-    # Text + audio
+    # Text + audio (speech-mode server; a --text-only server answers 400)
     python benchmarks/eval/benchmark_omni_mmsu.py \
         --model qwen3-omni --port 8000 --max-samples 50 \
         --modalities text+audio
@@ -43,6 +43,10 @@ CI runs on a subset and has its own thresholds elsewhere (see tasks/*.py).
 Benchmark: MMSU     |  Dataset: MMSU full (5000 samples)
 Hardware:  1 x H200 (default; non-H200 sources are tagged in Source column)
 Last verified: 2026-05-04
+
+The `modalities=text+audio` rows tagged `text-only server` predate the 400 that
+text-only servers now return for the audio modality; no audio was produced, so
+they measure the text path only.
 
 Accuracy (accuracy)
 

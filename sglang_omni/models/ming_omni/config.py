@@ -303,6 +303,11 @@ class _MingOmniBasePipelineConfig(PipelineConfig):
     def topology_gated_custom_all_reduce_stages(cls) -> set[str]:
         return {THINKER_STAGE}
 
+    def supports_audio_output(self) -> bool:
+        return any(
+            stage.name in (TALKER_STAGE, TALKER_STREAM_STAGE) for stage in self.stages
+        )
+
 
 class MingOmniPipelineConfig(_MingOmniBasePipelineConfig):
     """6-stage text pipeline."""

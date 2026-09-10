@@ -340,3 +340,16 @@ def test_qwen3_omni_xpu_b60_example_config_loads_and_plans() -> None:
     assert plan.stages["thinker"].gpu_ids == tuple(range(8))
     assert plan.stages["talker_ar"].gpu_ids == (6,)
     assert plan.stages["code2wav"].gpu_ids == (7,)
+
+
+@pytest.mark.parametrize(
+    ("variant", "expected"),
+    [("text", False), ("speech", True), ("speech-colocated", True)],
+)
+def test_supports_audio_output_follows_the_talker_stage(
+    variant: str, expected: bool
+) -> None:
+    config = qwen3_omni_config.Variants[variant](model_path="dummy")
+
+    assert config.supports_audio_output() is expected
+    assert ("speech_enabled" in config.stage_factory_kwargs("thinker")) is expected

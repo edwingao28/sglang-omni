@@ -16,7 +16,10 @@ from sglang_omni.client.types import (
 )
 from sglang_omni.proto import EXPLICIT_GENERATION_PARAMS_KEY
 from sglang_omni.serve import create_app
-from sglang_omni.serve.openai_api import _build_rollout_generate_request
+from sglang_omni.serve.openai_api import (
+    GENERATE_AUDIO_OUTPUT_UNAVAILABLE_MESSAGE,
+    _build_rollout_generate_request,
+)
 from sglang_omni.serve.protocol import RolloutGenerateRequest as RolloutRequest
 
 
@@ -227,6 +230,22 @@ def test_generate_audio_requires_logprob_opt_out_without_omni_rollout() -> None:
     )
     assert resp.status_code == 200
     assert resp.json()["audio"]["data"] == "QUJD"
+
+
+def test_generate_rejects_audio_modality_when_pipeline_declares_no_audio() -> None:
+    client = _RolloutClient(_text_result())
+    tc = TestClient(
+        create_app(client, model_name="qwen3-omni", supports_audio_output=False)
+    )
+
+    resp = tc.post(
+        "/generate",
+        json={"prompt": "hi", "output_modalities": ["text", "audio"]},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == GENERATE_AUDIO_OUTPUT_UNAVAILABLE_MESSAGE
+    assert client.requests == []
 
 
 def test_generate_rejects_logprob_length_mismatch() -> None:

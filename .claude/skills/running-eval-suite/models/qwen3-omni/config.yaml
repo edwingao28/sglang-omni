@@ -135,7 +135,7 @@ server_profiles:
     router_policy: least_request
 
 rows:
-  # ===================== mmsu (Qwen3-Omni text-only) =====================
+  # ===================== mmsu (text rows: Qwen3-Omni text-only; text+audio rows: default speech profile) =====================
   - id: mmsu-text-c8-accuracy
     file: "benchmarks/eval/benchmark_omni_mmsu.py"
     server_profile: qwen3_omni_mmsu_router
@@ -152,7 +152,6 @@ rows:
 
   - id: mmsu-text-audio-c8-accuracy
     file: "benchmarks/eval/benchmark_omni_mmsu.py"
-    server_profile: qwen3_omni_mmsu_router
     locate:
       section_substring: "Accuracy (accuracy)"
       config_substring: "modalities=text+audio"
@@ -181,7 +180,6 @@ rows:
 
   - id: mmsu-text-audio-c8-speed
     file: "benchmarks/eval/benchmark_omni_mmsu.py"
-    server_profile: qwen3_omni_mmsu_router
     locate:
       section_substring: "Speed (speed)"
       config_substring: "modalities=text+audio"

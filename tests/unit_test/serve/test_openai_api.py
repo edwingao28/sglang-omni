@@ -26,6 +26,7 @@ from sglang_omni.proto import (
 )
 from sglang_omni.serve import create_app
 from sglang_omni.serve.openai_api import (
+    CHAT_AUDIO_OUTPUT_UNAVAILABLE_MESSAGE,
     _await_speech_response,
     _build_chat_generate_request,
     _chat_stream,
@@ -3578,6 +3579,84 @@ def test_chat_without_speaker_table_leaves_voice_to_the_pipeline() -> None:
     resp = client.post(
         "/v1/chat/completions",
         json=_chat_payload({"voice": "Nobody", "format": "wav"}, stream=False),
+    )
+
+    assert resp.status_code == 500
+    assert "cuda out of memory" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_chat_rejects_audio_modality_when_pipeline_declares_no_audio(
+    stream: bool,
+) -> None:
+    client = TestClient(
+        create_app(
+            _UntouchableClient(), model_name="qwen3-omni", supports_audio_output=False
+        )
+    )
+
+    resp = client.post(
+        "/v1/chat/completions",
+        json=_chat_payload({"format": "wav"}, stream=stream),
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == CHAT_AUDIO_OUTPUT_UNAVAILABLE_MESSAGE
+
+
+def test_chat_audio_output_check_precedes_voice_validation() -> None:
+    client = TestClient(
+        create_app(
+            _UntouchableClient(),
+            model_name="qwen3-omni",
+            custom_voice_config=_OMNI_SPEAKERS,
+            supports_audio_output=False,
+        )
+    )
+
+    resp = client.post(
+        "/v1/chat/completions",
+        json=_chat_payload({"voice": "Nobody", "format": "wav"}, stream=False),
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == CHAT_AUDIO_OUTPUT_UNAVAILABLE_MESSAGE
+
+
+@pytest.mark.parametrize("modalities", [["text"], None])
+def test_chat_text_modalities_ignore_declared_no_audio(
+    modalities: list[str] | None,
+) -> None:
+    client = TestClient(
+        create_app(
+            _fault_client("qwen3-omni"),
+            model_name="qwen3-omni",
+            supports_audio_output=False,
+        )
+    )
+    payload = _chat_payload({"format": "wav"}, stream=False)
+    payload["modalities"] = modalities
+
+    resp = client.post("/v1/chat/completions", json=payload)
+
+    assert resp.status_code == 500
+    assert "cuda out of memory" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("supports_audio_output", [None, True])
+def test_chat_audio_modality_reaches_generation_unless_declared_unavailable(
+    supports_audio_output: bool | None,
+) -> None:
+    client = TestClient(
+        create_app(
+            _fault_client("qwen3-omni"),
+            model_name="qwen3-omni",
+            supports_audio_output=supports_audio_output,
+        )
+    )
+
+    resp = client.post(
+        "/v1/chat/completions", json=_chat_payload({"format": "wav"}, stream=False)
     )
 
     assert resp.status_code == 500

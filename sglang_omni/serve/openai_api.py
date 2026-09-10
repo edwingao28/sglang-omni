@@ -131,6 +131,15 @@ from sglang_omni.serve.translations import register_translations
 logger = logging.getLogger(__name__)
 HTTP_DISCONNECT_POLL_INTERVAL_S = 0.05
 HTTP_DISCONNECT_CANCEL_TIMEOUT_S = 0.1
+_AUDIO_OUTPUT_UNAVAILABLE = (
+    'Audio output is unavailable for this pipeline; request "{field}": ["text"].'
+)
+CHAT_AUDIO_OUTPUT_UNAVAILABLE_MESSAGE = _AUDIO_OUTPUT_UNAVAILABLE.format(
+    field="modalities"
+)
+GENERATE_AUDIO_OUTPUT_UNAVAILABLE_MESSAGE = _AUDIO_OUTPUT_UNAVAILABLE.format(
+    field="output_modalities"
+)
 
 
 class _RequestBodyTooLarge(Exception):
@@ -184,6 +193,7 @@ def create_app(
     supports_uploaded_voice_references: bool = True,
     custom_voice_config: CustomVoiceConfig | None = None,
     supports_audio_translation: bool = False,
+    supports_audio_output: bool | None = None,
     required_speech_reference_count: int | None = None,
     speech_reference_text_required: bool = False,
     speech_reference_text_excludes_instructions: bool = False,
@@ -212,6 +222,9 @@ def create_app(
             When present, reference inputs and uploaded-voice resolution are disabled.
         supports_audio_translation: Whether the configured pipeline supports
             ``/v1/audio/translations``.
+        supports_audio_output: Whether chat and ``/generate`` requests may ask
+            for audio output. ``False`` rejects an audio modality with 400;
+            ``None`` (undeclared) leaves the request to the pipeline.
         required_speech_reference_count: Exact reference count required before
             dispatching a speech request to the backend.
         speech_reference_text_required: Whether each speech reference requires
@@ -257,6 +270,7 @@ def create_app(
     app.state.model_name = model_name or "sglang-omni"
     app.state.architectures = [a for a in (architectures or []) if a]
     app.state.supports_audio_translation = supports_audio_translation
+    app.state.supports_audio_output = supports_audio_output
     app.state.audio_chunking = audio_chunking or ResolvedAudioChunking.disabled()
     app.state.realtime_enabled = enable_realtime
     app.state.supports_realtime_audio_output = supports_realtime_audio_output
@@ -680,6 +694,10 @@ def _register_chat_completions(app: FastAPI) -> None:
         model = req.model or default_model
 
         if "audio" in (req.modalities or []):
+            if app.state.supports_audio_output is False:
+                raise HTTPException(
+                    status_code=400, detail=CHAT_AUDIO_OUTPUT_UNAVAILABLE_MESSAGE
+                )
             try:
                 app.state.speech_service.validate_voice_name(
                     req.audio.get("voice") if isinstance(req.audio, dict) else None
@@ -1047,6 +1065,13 @@ def _register_generate(app: FastAPI) -> None:
             raise HTTPException(
                 status_code=400,
                 detail="stream=true is not supported by /generate yet",
+            )
+        if (
+            "audio" in (req.output_modalities or [])
+            and app.state.supports_audio_output is False
+        ):
+            raise HTTPException(
+                status_code=400, detail=GENERATE_AUDIO_OUTPUT_UNAVAILABLE_MESSAGE
             )
 
         request_id = str(uuid.uuid4())

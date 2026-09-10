@@ -49,7 +49,7 @@ python -m sglang_omni.cli serve \
 python -m sglang_omni.cli serve \
     --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct --port 8000
 
-# Qwen3-Omni, text-only mode — for sections 4 (MMSU) and 5 (MMMU)
+# Qwen3-Omni, text-only mode — for sections 4a (MMSU, text output), 5 and 6
 python -m sglang_omni.cli serve \
     --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct --text-only --port 8000
 
@@ -125,7 +125,12 @@ python -m benchmarks.eval.benchmark_omni_seedtts \
     --warmup 16 --max-concurrency 16 \
     --output-dir results/qwen3_omni_en --model qwen3-omni --port 8000
 
-# 4. Qwen3-Omni — MMSU (audio comprehension)
+# 4a. Qwen3-Omni — MMSU (audio comprehension, text output)
+python -m benchmarks.eval.benchmark_omni_mmsu \
+    --model qwen3-omni --port 8000 --max-samples 50
+
+# 4b. Qwen3-Omni — MMSU with spoken answers + text/audio WER (speech-mode server
+#     from section 3; a --text-only server rejects the audio modality with 400)
 python -m benchmarks.eval.benchmark_omni_mmsu \
     --model qwen3-omni --port 8000 \
     --modalities text+audio --max-samples 50

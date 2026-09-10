@@ -320,13 +320,15 @@ class _Qwen3OmniBasePipelineConfig(PipelineConfig):
     def topology_gated_custom_all_reduce_stages(cls) -> set[str]:
         return {THINKER_STAGE}
 
+    def supports_audio_output(self) -> bool:
+        return any(stage.name == "talker_ar" for stage in self.stages)
+
     def stage_factory_kwargs(self, stage_name: str) -> dict[str, Any]:
-        speech_enabled = any(stage.name == "talker_ar" for stage in self.stages)
         if stage_name in ("image_encoder", "audio_encoder"):
             # Device selection is deferred to the worker; the encoders read
             # the platform default at construction.
             return {}
-        if stage_name == "thinker" and speech_enabled:
+        if stage_name == "thinker" and self.supports_audio_output():
             return {"speech_enabled": True}
         return {}
 
