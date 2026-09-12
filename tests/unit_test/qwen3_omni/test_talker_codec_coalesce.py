@@ -116,8 +116,6 @@ def test_default_early_frames_preserve_order_and_final_tail(steps, finish_reason
     data = requests[0].data
     data.finish_reason = finish_reason
     runner.on_request_finished("r0", data)
-    if finish_reason == "stop":
-        expected.pop()
 
     messages = runner._outbox.sent
     assert all(message.data.ndim == 1 for message in messages[:12])
@@ -170,12 +168,12 @@ def test_on_request_finished_flushes_partial_tail() -> None:
     assert runner._outbox.sent == []
 
     runner.on_request_finished("r0", requests[0].data)
-    assert len(runner._outbox.sent) == 1
-    assert runner._outbox.sent[0].data.shape == (2, 2)
+    assert len(runner._outbox.sent) == 2
+    assert all(msg.data.shape == (2,) for msg in runner._outbox.sent)
     assert not requests[0].data.pending_codec_rows
 
     runner.on_request_finished("r0", requests[0].data)
-    assert len(runner._outbox.sent) == 1
+    assert len(runner._outbox.sent) == 2
 
 
 def test_single_row_flush_keeps_legacy_1d_shape() -> None:
@@ -267,40 +265,59 @@ def test_ingest_1d_row_lazy_path_drops_eos_at_final_scan() -> None:
     assert model.calls == []
 
 
-def test_stop_finish_pops_trailing_eos_row_before_tail_flush() -> None:
-    n, k = 1, 5
-    runner = _runner(_fake_model(n, 4, 2), coalesce=k)
-    requests, batch = _requests(n), _sched_batch(n)
-    seen = _run_steps(runner, requests, batch, steps=3)
-    requests[0].data.finish_reason = "stop"
+@pytest.mark.parametrize("finish_reason", [None, "stop", "length"])
+@pytest.mark.parametrize("steps", [1, 3, 4])
+def test_finish_sends_uncertain_last_row_separately(finish_reason, steps) -> None:
+    runner = _runner(_fake_model(1, 4, 2), coalesce=3)
+    requests, batch = _requests(1), _sched_batch(1)
+    seen = _run_steps(runner, requests, batch, steps=steps)
+    requests[0].data.finish_reason = finish_reason
     runner.on_request_finished("r0", requests[0].data)
-    assert len(runner._outbox.sent) == 1
-    msg = runner._outbox.sent[0]
-    assert msg.data.shape == (2, 2)
-    assert torch.equal(msg.data, torch.stack(seen[:2], dim=0))
+
+    messages = runner._outbox.sent
+    assert messages[-1].data.ndim == 1
+    assert torch.equal(messages[-1].data, seen[-1])
+    if steps > 1:
+        assert torch.equal(messages[0].data, torch.stack(seen[:-1]))
     assert not requests[0].data.pending_codec_rows
-
-
-def test_stop_finish_at_threshold_never_leaks_eos_into_chunk() -> None:
-    n, k = 1, 3
-    runner = _runner(_fake_model(n, 4, 2), coalesce=k)
-    requests, batch = _requests(n), _sched_batch(n)
-    seen = _run_steps(runner, requests, batch, steps=k + 1)
-    requests[0].data.finish_reason = "stop"
     runner.on_request_finished("r0", requests[0].data)
-    assert len(runner._outbox.sent) == 1
-    assert torch.equal(runner._outbox.sent[0].data, torch.stack(seen[:k], dim=0))
-    assert not requests[0].data.pending_codec_rows
+    assert len(messages) == (1 if steps == 1 else 2)
 
 
-def test_length_finish_flushes_tail_unpopped() -> None:
-    n, k = 1, 5
-    runner = _runner(_fake_model(n, 4, 2), coalesce=k)
-    requests, batch = _requests(n), _sched_batch(n)
-    seen = _run_steps(runner, requests, batch, steps=3)
-    requests[0].data.finish_reason = "length"
-    runner.on_request_finished("r0", requests[0].data)
-    assert torch.equal(runner._outbox.sent[0].data, torch.stack(seen, dim=0))
+@pytest.mark.parametrize("finish_reason", ["stop", "length"])
+@pytest.mark.parametrize("last_is_eos", [False, True])
+@pytest.mark.parametrize("enable_output_overlap", [False, True])
+@pytest.mark.parametrize("steps", [1, 3, 4])
+def test_finish_tail_is_filtered_by_vocoder(
+    finish_reason, last_is_eos, enable_output_overlap, steps
+) -> None:
+    runner = _runner(_fake_model(1, 4, 2), coalesce=3)
+    requests, batch = _requests(1), _sched_batch(1)
+    seen = _run_steps(runner, requests, batch, steps=steps)
+    scheduler = _make_scheduler(
+        FakeCode2WavModel(total_upsample=2),
+        enable_output_overlap=enable_output_overlap,
+    )
+    data = requests[0].data
+    if last_is_eos:
+        data.pending_codec_rows[-1][0] = scheduler._codec_eos_token_id
+    data.finish_reason = finish_reason
+    # The sender must never inspect tensor values to decide whether this is EOS.
+    data.pending_codec_rows[:] = [
+        torch.Tensor._make_subclass(_SyncGuardTensor, row)
+        for row in data.pending_codec_rows
+    ]
+    runner.on_request_finished("r0", data)
+
+    state = scheduler.create_stream_state("r0")
+    for message in runner._outbox.sent:
+        scheduler.ingest("r0", state, message.data.as_subclass(torch.Tensor))
+    scheduler.decode_delta("r0", state, is_final=True)
+    expected = seen[:-1] if last_is_eos else seen
+    assert len(state.chunks) == len(expected)
+    assert all(
+        torch.equal(actual, wanted) for actual, wanted in zip(state.chunks, expected)
+    )
 
 
 def test_first_flush_uses_smaller_threshold_then_steady_state() -> None:

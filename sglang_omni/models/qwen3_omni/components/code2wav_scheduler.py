@@ -282,7 +282,7 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         if _get_event_recorder().is_active():
             profile = self._start_ingest_profile(state)
         if codes.ndim == 2:
-            # Note (wenyao): Talker already stripped EOS from coalesced rows; marking them
+            # Note (wenyao): Talker only coalesces known non-EOS rows; marking them
             # checked avoids #1237's serial scan and its extra D2H sync per frame.
             state.chunks.extend(codes.unbind(0))
             state.checked = len(state.chunks)

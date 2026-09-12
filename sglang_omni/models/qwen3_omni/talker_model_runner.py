@@ -215,10 +215,14 @@ class QwenTalkerModelRunner(ModelRunner):
         )
 
     def on_request_finished(self, request_id: str, req_data: Any) -> None:
-        # Note (wenyao): Codec EOS must be removed before the non-EOS tail flush;
-        # this hook runs before the terminal payload enters the same FIFO outbox.
-        if req_data.finish_reason == "stop" and req_data.pending_codec_rows:
-            req_data.pending_codec_rows.pop()
+        pending = req_data.pending_codec_rows
+        if not pending:
+            return
+        # Only preceding rows are known to be non-EOS. Send the uncertain last
+        # row through Code2Wav's 1-D EOS scan without synchronizing on the sender.
+        last_row = pending.pop()
+        self._flush_codec_rows(request_id, req_data)
+        pending.append(last_row)
         self._flush_codec_rows(request_id, req_data)
 
     def sample_before_post_prefill(
