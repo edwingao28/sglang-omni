@@ -1,24 +1,22 @@
 # Qwen3-Omni robustness follow-up
 
-This proposal collects Richard's feedback on Qwen3-Omni serving. The goal is
-to make performance more consistent when users change machines, launch settings,
-or inputs. The observations below are reported feedback, not new benchmark
-results. This document does not change runtime defaults.
+This plan covers CPU defaults, streaming playback, workload coverage, and
+runtime logging for Qwen3-Omni. The goal is to make performance more consistent
+when users change machines, launch settings, or inputs.
 
 ## 1. Make the default launch work well
 
-Richard reported up to 8x worse p95 time to first text token (TTFT) on a
-192-core machine without CPU binding. Setting `OMP_NUM_THREADS=8` or binding
+On a 192-core machine, p95 time to first text token (TTFT) was up to 8x worse
+without CPU binding. Setting `OMP_NUM_THREADS=8` or binding
 processes to CPUs reduced latency substantially. The same changes had a much
-smaller effect on vLLM-Omni in his comparison of the two public main branches.
+smaller effect on vLLM-Omni in a comparison of the two public main branches.
 
 First reproduce that case with exact commits, launch commands, CPU topology,
 and absolute latency values. Compare the default launch, a thread limit, CPU
 binding, and both changes together, on the same inputs and hardware.
 
-Too many threads, delays in the scheduler, and cross-socket memory access are
-possible causes. Low GPU utilization alone does not tell us which one is
-responsible. Also check whether requests are waiting for KV-cache capacity.
+Check thread counts, scheduler delays, cross-socket memory access, and waits
+for KV-cache capacity.
 
 Use the result to choose sensible thread and preprocessing-concurrency defaults.
 Respect the CPUs available to the process or container and preserve explicit
@@ -26,14 +24,14 @@ user settings. Log the settings that actually take effect. Check the candidate
 on a smaller CPU allocation too, so a fix for a large host does not become a
 problem on a smaller one.
 
-**Done when:** the reported slowdown is explained by a repeatable comparison,
+**Done when:** the slowdown is explained by a repeatable comparison,
 and the chosen default improves that case without harming the smaller setup.
 Document any CPU binding that still needs to be configured by the user.
 
 ## 2. Check smooth playback as well as the first packet
 
-Richard reported stalls with a two-frame first audio chunk at concurrency 32
-and above, and suggested four frames as the default.
+A two-frame first audio chunk can stall playback at concurrency 32 and above.
+Evaluate four frames as the default.
 
 Compare two and four frames at concurrency 32 and 64, with a low-concurrency
 control. Keep the player's initial buffering policy fixed. Measure how soon
