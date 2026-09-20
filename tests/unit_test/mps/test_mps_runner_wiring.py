@@ -521,6 +521,7 @@ async def test_mps_watchdog_fails_serving_before_launcher_cleanup(
         probe_gate=probe_gate,
     )
     _patch_runner(monkeypatch, events, group, fake_mps)
+    monkeypatch.setattr(mp_runner, "_MONITOR_INTERVAL_S", 0.01)
     runner = mp_runner.MultiProcessPipelineRunner(_make_config(short_base))
     await runner.start()
 
@@ -537,7 +538,39 @@ async def test_mps_watchdog_fails_serving_before_launcher_cleanup(
     assert "MPS teardown incomplete: dirty state persisted" in caplog.text
     assert FAKE_GPU_UUID in str(exc_info.value)
     assert "daemon identity changed" in str(exc_info.value)
+    assert "3 consecutive times" in str(exc_info.value)
     assert exc_info.value.__cause__ is dirty
+
+
+@pytest.mark.asyncio
+async def test_mps_watchdog_tolerates_transient_probe_failures(
+    short_base,
+    monkeypatch,
+    caplog,
+):
+    events: list[str] = []
+    group = _FakeGroup(events)
+    fake_mps = _FakeMps(events)
+    _patch_runner(monkeypatch, events, group, fake_mps)
+    monkeypatch.setattr(mp_runner, "_MONITOR_INTERVAL_S", 0.01)
+    probes = 0
+
+    async def flaky_probe() -> dict[str, str]:
+        nonlocal probes
+        probes += 1
+        if probes < mp_runner._MPS_PROBE_FAILURE_TOLERANCE:
+            return {FAKE_GPU_UUID: "control query failed transiently"}
+        return {}
+
+    monkeypatch.setattr(fake_mps, "probe_failures", flaky_probe)
+    runner = mp_runner.MultiProcessPipelineRunner(_make_config(short_base))
+    await runner.start()
+    while probes < mp_runner._MPS_PROBE_FAILURE_TOLERANCE + 2:
+        await asyncio.sleep(0.01)
+    assert runner._fatal_error is None
+    assert "MPS health probe failed (1/3 consecutive)" in caplog.text
+    assert "MPS health check failed" not in caplog.text
+    await runner.stop()
 
 
 @pytest.mark.asyncio
