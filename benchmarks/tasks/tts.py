@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import time
+import uuid
 import wave
 from typing import AsyncIterator, Protocol
 
@@ -1294,8 +1295,13 @@ def make_tts_send_fn(
             **gen_kwargs,
         )
         start_time = time.perf_counter()
+        result.request_start_ns = time.time_ns()
         try:
-            async with session.post(api_url, json=payload) as response:
+            async with session.post(
+                api_url, json=payload, headers={"X-Request-ID": str(uuid.uuid4())}
+            ) as response:
+                result.server_request_id = response.headers.get("X-Request-ID")
+                result.worker_id = response.headers.get("X-SGLang-Omni-Worker")
                 if response.status != 200:
                     result.error = f"HTTP {response.status}: {await response.text()}"
                 elif stream:
@@ -1310,6 +1316,7 @@ def make_tts_send_fn(
             result.error = str(exc)
         finally:
             result.latency_s = time.perf_counter() - start_time
+            result.request_end_ns = time.time_ns()
         return result
 
     return send_fn

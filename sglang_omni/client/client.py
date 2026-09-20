@@ -31,6 +31,7 @@ from sglang_omni.client.types import (
     UsageInfo,
 )
 from sglang_omni.pipeline.coordinator import Coordinator
+from sglang_omni.profiler.event_recorder import emit, get_recorder, host_phase
 from sglang_omni.proto import OmniRequest, RequestState, StreamMessage
 
 
@@ -254,9 +255,29 @@ class Client:
         if sample_rate is not None:
             encode_kwargs["sample_rate"] = sample_rate
 
-        audio_bytes, mime_type = await asyncio.to_thread(
-            encode_audio, audio_data, **encode_kwargs
-        )
+        if get_recorder().is_active():
+
+            def encode_profiled():
+                with host_phase(request_id, "api", "audio_encode_service"):
+                    return encode_audio(audio_data, **encode_kwargs)
+
+            emit(
+                request_id=request_id,
+                stage="api",
+                event_name="host_audio_encode_submit",
+            )
+            try:
+                audio_bytes, mime_type = await asyncio.to_thread(encode_profiled)
+            finally:
+                emit(
+                    request_id=request_id,
+                    stage="api",
+                    event_name="host_audio_encode_resumed",
+                )
+        else:
+            audio_bytes, mime_type = await asyncio.to_thread(
+                encode_audio, audio_data, **encode_kwargs
+            )
 
         # Derive actual format from MIME type (encode_audio may fall back
         # to WAV if the requested codec is unavailable).

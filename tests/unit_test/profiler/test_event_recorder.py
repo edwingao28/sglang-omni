@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -62,6 +63,35 @@ def test_inactive_recorder_is_silent(tmp_path: Path) -> None:
     rec = RequestEventRecorder()
     rec.emit(request_id="r1", stage="s", event_name="anything")
     assert rec.is_active() is False
+
+
+def test_nvtx_events_require_opt_in_and_active_recording(tmp_path, monkeypatch):
+    from torch.cuda import nvtx
+
+    marks = []
+    monkeypatch.setattr(nvtx, "mark", marks.append)
+    monkeypatch.setenv("SGLANG_OMNI_PROFILE_NVTX", "1")
+    rec = RequestEventRecorder()
+    rec.emit(request_id="inactive", stage="s", event_name="start")
+    assert marks == []
+    path = rec.start("run", str(tmp_path), "s")
+    rec.emit(request_id="r1", stage="s", event_name="start", timestamp_ns=123)
+    rec.stop()
+    assert len(marks) == 1
+    mark = json.loads(marks[0].removeprefix("omni_event|"))
+    event = _read_events(path)[0]
+    assert mark["request_id"] == event["request_id"] == "r1"
+    assert mark["event_timestamp_ns"] == event["timestamp_ns"] == 123
+    assert mark["anchor_wall_ns"] > 123
+    assert event["pid"] == os.getpid()
+    assert event["thread_id"] == threading.get_native_id()
+    assert event["thread_cpu_ns"] >= 0
+
+    monkeypatch.delenv("SGLANG_OMNI_PROFILE_NVTX")
+    rec.start("without-nvtx", str(tmp_path), "s")
+    rec.emit(request_id="r2", stage="s", event_name="end")
+    rec.stop()
+    assert len(marks) == 1
 
 
 def test_start_writes_jsonl_per_pid_stage(tmp_path: Path) -> None:

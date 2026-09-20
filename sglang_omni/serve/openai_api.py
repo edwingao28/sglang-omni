@@ -68,6 +68,15 @@ from sglang_omni.http.admin_auth import (
     resolve_admin_api_key,
 )
 from sglang_omni.http.favicon import register_favicon
+from sglang_omni.profiler.event_recorder import (
+    emit as _host_emit,
+)
+from sglang_omni.profiler.event_recorder import (
+    get_recorder as _host_recorder,
+)
+from sglang_omni.profiler.event_recorder import (
+    host_phase,
+)
 from sglang_omni.serve.generation_params import (
     record_explicit_generation_params as _record_explicit_generation_params,
 )
@@ -1275,18 +1284,52 @@ def _speech_generation_failure_response(
     return speech_error_response(mapped)
 
 
+def _speech_request_id(request: Request) -> str:
+    value = request.headers.get("x-sglang-omni-request-id") or request.headers.get(
+        "x-request-id"
+    )
+    if value:
+        try:
+            uuid.UUID(value)
+        except ValueError:
+            pass
+        else:
+            return value
+    return f"speech-{uuid.uuid4()}"
+
+
 def _register_speech(app: FastAPI) -> None:
     @app.post("/v1/audio/speech")
     async def create_speech(request: Request) -> Response:
         client: Client = app.state.client
         speech_service: SpeechRequestValidator = app.state.speech_service
 
-        request_id = f"speech-{uuid.uuid4()}"
+        request_id = _speech_request_id(request)
         try:
             payload = await request.json()
-            prepared = await asyncio.to_thread(
-                speech_service.parse_generation_request, payload
-            )
+            if _host_recorder().is_active():
+
+                def parse_profiled():
+                    with host_phase(request_id, "api", "speech_parse_service"):
+                        return speech_service.parse_generation_request(payload)
+
+                _host_emit(
+                    request_id=request_id,
+                    stage="api",
+                    event_name="host_speech_parse_submit",
+                )
+                try:
+                    prepared = await asyncio.to_thread(parse_profiled)
+                finally:
+                    _host_emit(
+                        request_id=request_id,
+                        stage="api",
+                        event_name="host_speech_parse_resumed",
+                    )
+            else:
+                prepared = await asyncio.to_thread(
+                    speech_service.parse_generation_request, payload
+                )
             req = prepared.request
             gen_req = speech_service.build_generate_request(
                 req,
@@ -1341,6 +1384,7 @@ def _register_speech(app: FastAPI) -> None:
 
         headers = {
             "Content-Disposition": f'attachment; filename="speech.{result.format}"',
+            "X-Request-ID": request_id,
         }
         if result.finish_reason is not None:
             # note (Junnan Li): the body is binary audio, so the terminal state
@@ -1570,6 +1614,7 @@ async def _speech_audio_response(
         _body(),
         media_type="audio/pcm",
         headers={
+            "X-Request-ID": request_id,
             "X-Sample-Rate": str(stream_sample_rate),
             "X-Channels": "1",
             "X-Bit-Depth": "16",

@@ -15,9 +15,10 @@ import logging
 import os
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,8 @@ class RequestEvent:
     timestamp_ns: int
     run_id: str | None = None
     pid: int | None = None
+    thread_id: int | None = None
+    thread_cpu_ns: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -86,6 +89,7 @@ class RequestEventRecorder:
         self._fp: Any = None
         self._pid: int = os.getpid()
         self._dropped: int = 0
+        self._nvtx_mark: Callable[[str], None] | None = None
 
     # ---- lifecycle -----------------------------------------------------
 
@@ -120,6 +124,10 @@ class RequestEventRecorder:
                 self._close_unlocked()
 
             directory = Path(event_dir).expanduser().resolve()
+            if os.environ.get("SGLANG_OMNI_PROFILE_NVTX") == "1":
+                from torch.cuda import nvtx
+
+                self._nvtx_mark = nvtx.mark
             directory.mkdir(parents=True, exist_ok=True)
             # Filename uses the first stage to join; per-event ``stage``
             # disambiguates owners once others join.
@@ -172,6 +180,7 @@ class RequestEventRecorder:
         self._stage = None
         self._stages = set()
         self._path = None
+        self._nvtx_mark = None
 
     # ---- emit ----------------------------------------------------------
 
@@ -203,9 +212,24 @@ class RequestEventRecorder:
                 timestamp_ns=ts,
                 run_id=self._run_id,
                 pid=self._pid,
+                thread_id=threading.get_native_id(),
+                thread_cpu_ns=time.thread_time_ns(),
                 metadata=dict(metadata) if metadata else {},
             )
             try:
+                if self._nvtx_mark is not None:
+                    self._nvtx_mark(
+                        "omni_event|"
+                        + json.dumps(
+                            {
+                                "request_id": request_id,
+                                "stage": stage,
+                                "event_name": event_name,
+                                "event_timestamp_ns": ts,
+                                "anchor_wall_ns": time.time_ns(),
+                            }
+                        )
+                    )
                 fp.write(json.dumps(event.to_dict(), default=_json_default))
                 fp.write("\n")
             except Exception:
@@ -275,6 +299,40 @@ def emit(
         metadata=metadata,
         timestamp_ns=timestamp_ns,
     )
+
+
+@contextmanager
+def host_phase(
+    request_id: str,
+    stage: str,
+    name: str,
+    metadata: Mapping[str, Any] | None = None,
+) -> Iterator[None]:
+    """Record a host call's actual entry/exit, including exceptional exits.
+
+    These are wall-clock envelopes, not exclusive CPU or GPU service times.
+    Call inside a thread worker to distinguish execution from submission.
+    """
+    if not _RECORDER.is_active():
+        yield
+        return
+    emit(
+        request_id=request_id,
+        stage=stage,
+        event_name=f"host_{name}_enter",
+        metadata=metadata,
+    )
+    status = "error"
+    try:
+        yield
+        status = "success"
+    finally:
+        emit(
+            request_id=request_id,
+            stage=stage,
+            event_name=f"host_{name}_exit",
+            metadata={**(metadata or {}), "status": status},
+        )
 
 
 @functools.cache

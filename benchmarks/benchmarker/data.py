@@ -27,3 +27,7 @@ class RequestResult:
     text_ttft_s: float | None = None
     audio_chunk_count: int = 0
     first_audio_payload_bytes: int = 0
+    server_request_id: str | None = None
+    worker_id: str | None = None
+    request_start_ns: int | None = None
+    request_end_ns: int | None = None

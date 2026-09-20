@@ -12,6 +12,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable
 
+from sglang_omni.profiler.event_recorder import emit, get_active_stage, get_recorder
 from sglang_omni.scheduling.messages import IncomingMessage, OutgoingMessage
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,12 @@ class ThreadedSimpleScheduler:
                     try:
                         if self._consume_reachable_tombstone(request_id):
                             continue
+                        if get_recorder().is_active():
+                            emit(
+                                request_id=request_id,
+                                stage=get_active_stage(),
+                                event_name="host_handler_submit",
+                            )
                         future = self._executor.submit(self._run_one, msg.data)
                         self._pending[request_id] = future
                     finally:

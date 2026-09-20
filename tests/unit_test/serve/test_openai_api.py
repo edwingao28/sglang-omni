@@ -120,12 +120,14 @@ class SuccessfulSpeechClient:
         self.finish_reason = finish_reason
         self.generate_requests: list[GenerateRequest] = []
         self.speech_requests: list[GenerateRequest] = []
+        self.request_ids: list[str] = []
 
     def health(self) -> dict[str, Any]:
         return {"running": True}
 
     async def generate(self, request: Any, request_id: str | None = None):
         self.generate_requests.append(request)
+        self.request_ids.append(request_id)
         yield GenerateChunk(
             request_id=request_id or "speech-1",
             modality="audio",
@@ -145,7 +147,8 @@ class SuccessfulSpeechClient:
     ):
         from sglang_omni.client.types import SpeechResult
 
-        del request_id, speed, allow_format_fallback
+        del speed, allow_format_fallback
+        self.request_ids.append(request_id)
         self.speech_requests.append(request)
         return SpeechResult(
             audio_bytes=b"RIFF",
@@ -723,6 +726,53 @@ def test_speech_endpoint_returns_binary_audio() -> None:
     assert response.headers["x-finish-reason"] == "length"
     assert speech_client.speech_requests[0].model == "tts"
     assert speech_client.speech_requests[0].metadata["tts_params"]["voice"] == "default"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_speech_response_identifies_the_worker_request(stream: bool) -> None:
+    speech_client = SuccessfulSpeechClient()
+    client = TestClient(create_app(speech_client, model_name="tts"))
+    responses = [
+        client.post(
+            "/v1/audio/speech",
+            json={
+                "input": "hello",
+                "stream": stream,
+                "response_format": "pcm" if stream else "wav",
+            },
+        )
+        for _ in range(2)
+    ]
+    assert all(response.status_code == 200 for response in responses)
+    ids = [response.headers["x-request-id"] for response in responses]
+    assert ids == speech_client.request_ids
+    assert len(set(ids)) == 2
+
+
+@pytest.mark.parametrize("header", ["X-Request-ID", "X-SGLang-Omni-Request-ID"])
+def test_speech_preserves_a_propagated_uuid(header: str) -> None:
+    speech_client = SuccessfulSpeechClient()
+    client = TestClient(create_app(speech_client, model_name="tts"))
+    request_id = "d21bd2db-7bc8-4b9b-a9ea-c2fc220217b9"
+    response = client.post(
+        "/v1/audio/speech", json={"input": "hello"}, headers={header: request_id}
+    )
+    assert response.status_code == 200
+    assert response.headers["x-request-id"] == request_id
+    assert speech_client.request_ids == [request_id]
+
+
+def test_speech_replaces_a_malformed_propagated_id() -> None:
+    speech_client = SuccessfulSpeechClient()
+    client = TestClient(create_app(speech_client, model_name="tts"))
+    response = client.post(
+        "/v1/audio/speech",
+        json={"input": "hello"},
+        headers={"X-Request-ID": "malformed"},
+    )
+    assert response.status_code == 200
+    assert response.headers["x-request-id"].startswith("speech-")
+    assert speech_client.request_ids == [response.headers["x-request-id"]]
 
 
 def test_create_app_passes_model_specific_speech_input_limit() -> None:

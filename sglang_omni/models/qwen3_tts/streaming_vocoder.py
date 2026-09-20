@@ -24,6 +24,7 @@ from sglang_omni.models.qwen3_tts.incremental_codec_cuda_graph import (
     Qwen3TTSIncrementalCodecCudaGraphRunner,
 )
 from sglang_omni.models.qwen3_tts.payload_types import Qwen3TTSState
+from sglang_omni.profiler.event_recorder import get_recorder, host_phase
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.messages import OutgoingMessage
 from sglang_omni.scheduling.pipeline_state import build_usage
@@ -2782,6 +2783,20 @@ class Qwen3TTSStreamingVocoderScheduler(
     async def _vocode_payloads(
         self, payloads: list[StagePayload]
     ) -> list[StagePayload]:
+        if not get_recorder().is_active() or not payloads:
+            return await self._vocode_payloads_impl(payloads)
+        # One master event, with all members; never duplicate the GPU duration.
+        metadata = {
+            "batch_id": f"vocoder:{threading.get_native_id()}:{time.monotonic_ns()}",
+            "member_request_ids": [payload.request_id for payload in payloads],
+            "attribution": "shared_decode_batch",
+        }
+        with host_phase(payloads[0].request_id, "vocoder", "vocoder_batch", metadata):
+            return await self._vocode_payloads_impl(payloads)
+
+    async def _vocode_payloads_impl(
+        self, payloads: list[StagePayload]
+    ) -> list[StagePayload]:
         states = [Qwen3TTSState.from_dict(payload.data) for payload in payloads]
         codes = []
         for state in states:
@@ -2825,12 +2840,13 @@ class Qwen3TTSStreamingVocoderScheduler(
             cut = int(state.ref_code_len / max(total_frames, 1) * waveform.shape[0])
             waveform = waveform[cut:]
 
-        data = audio_waveform_payload(
-            waveform,
-            sample_rate=int(sample_rate),
-            modality="audio",
-            source_hint="Qwen3-TTS",
-        )
+        with host_phase(payload.request_id, "vocoder", "waveform_materialize"):
+            data = audio_waveform_payload(
+                waveform,
+                sample_rate=int(sample_rate),
+                modality="audio",
+                source_hint="Qwen3-TTS",
+            )
         usage = build_usage(state)
         if usage is not None:
             data["usage"] = usage
