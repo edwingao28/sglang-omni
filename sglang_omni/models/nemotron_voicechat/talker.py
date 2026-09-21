@@ -251,6 +251,11 @@ class NemotronVoiceChatTalker(nn.Module):
             max_batch, hidden_size, dtype=embed_dtype, device=device
         )
 
+    @property
+    def language_model(self) -> Gemma3ForCausalLM:
+        # Note (wenyao): A property prevents duplicate decoder parameter registration.
+        return self.llm
+
     def get_attention_sliding_window_size(self):
         return self.llm.get_attention_sliding_window_size()
 

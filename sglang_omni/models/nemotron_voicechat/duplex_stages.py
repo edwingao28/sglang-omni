@@ -14,8 +14,16 @@ from sglang_omni.models.nemotron_voicechat.engine_builder import (
     NemotronVoiceChatEngineBuilder,
     NemotronVoiceChatTalkerEngineBuilder,
 )
+from sglang_omni.scheduling.generation_batch_policy import (
+    CudaGraphBackend,
+    build_default_prefill_cuda_graph_bs,
+)
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 from sglang_omni.scheduling.session import SessionScheduler
+
+# Note (wenyao): Bucket 1 avoids eager fallback for native single-token units.
+# Note (wenyao): Cap 48 covers the 38-token opening without unused larger graphs.
+TALKER_PREFILL_CUDA_GRAPH_BS = (1,) + tuple(build_default_prefill_cuda_graph_bs(48))
 
 
 class SessionBuilder:
@@ -69,6 +77,9 @@ class ThinkerBuilder(SessionBuilder, NemotronVoiceChatEngineBuilder):
 
 
 class TalkerBuilder(SessionBuilder, NemotronVoiceChatTalkerEngineBuilder):
+    # Note (wenyao): The hybrid Mamba thinker cannot use this graph backend.
+    supports_breakable_prefill_cuda_graph = True
+
     def generation_defaults(self, *, dtype):
         # EarTTS uses head_dim=72, unsupported by Blackwell's automatic
         # TRTLLM context kernel. Triton supports this dimension and page_size=1.
@@ -76,6 +87,11 @@ class TalkerBuilder(SessionBuilder, NemotronVoiceChatTalkerEngineBuilder):
             **super().generation_defaults(dtype=dtype),
             "attention_backend": "triton",
             "page_size": 1,
+            # Note (wenyao): Decode capture lacks the talker's required fused inputs.
+            "disable_cuda_graph": False,
+            "disable_decode_cuda_graph": True,
+            "cuda_graph_backend_prefill": CudaGraphBackend.BREAKABLE,
+            "cuda_graph_bs_prefill": list(TALKER_PREFILL_CUDA_GRAPH_BS),
         }
 
     def make_model_runner(self, model_worker, output_proc):
