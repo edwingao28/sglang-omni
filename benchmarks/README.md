@@ -197,6 +197,7 @@ python -m benchmarks.eval.benchmark_omni_seedtts \
 | `eval/benchmark_asr_stt_benchmark.py` | ASR concurrency scaling on the Pipecat STT benchmark set (EN) | Qwen3-ASR, Fun-ASR | `/v1/audio/transcriptions` |
 | `eval/benchmark_asr_longform.py` | ASR concurrency scaling on LongLibriHeavy 30/60 s and Meanwhile (EN) | Qwen3-ASR, Fun-ASR | `/v1/audio/transcriptions` |
 | `eval/benchmark_asr_realtime.py` | Realtime ASR streaming latency, protocol invariants, and WER on SeedTTS EN | Qwen3-ASR | `/v1/realtime?intent=transcription` |
+| `eval/benchmark_duplex.py` | Native full-duplex VoiceChat protocol cases (continuous, cancel/resume) | Nemotron VoiceChat | `/v1/realtime` (native) |
 
 See [tts_serving/README.md](tts_serving/README.md) for the TTS serving
 benchmark design, harness contract, scenario matrix, and Docker usage.
@@ -331,6 +332,162 @@ in the result `config`.
 python -m benchmarks.eval.benchmark_asr_realtime \
   --port 8000 --max-samples 50 --concurrencies 1,4,8 --http-baseline
 ```
+
+The CLI also saves input PCM and session observations under `OUTPUT.traces`
+(override with `--trace-dir`). Each concurrency run gets a fresh directory with
+`manifest.json`, numbered trace JSON files, and `input-SHA256.pcm` files containing
+the original mono 16 kHz PCM16 before trailing silence. The manifest lists every
+selected sample. Each trace retains packet send times/sample counts, received
+event payloads/times, client errors, effective client configuration, and recorder
+and grader source hashes. The server revision is explicitly unknown.
+
+Observations are written after the timed collection finishes, before WER or HTTP
+baseline scoring. Client timeouts and transport errors retain their partial
+traces. Abrupt process termination or an unexpected collection exception can
+leave manifest entries without trace files; these are unrecorded attempts, not
+passes. Python callers opt in with `run_asr_realtime_once(..., trace_dir=...)`.
+
+Replay one saved trace without connecting to a server or loading a model:
+
+```bash
+python -m benchmarks.realtime_asr.replay path/to/run/000000.json
+```
+
+Replay recomputes protocol violations and the same client timing metrics; exit
+status is 0 for a clean trace and 1 for protocol/client failures. Failed-trace
+timings are diagnostic only. It does not rerun WER, infer audio, or verify the
+sibling PCM file; the input hash supports separate input verification. Compare
+`recorded_source` and `replay_source` to distinguish reproduction from rescoring
+with a changed grader. Traces contain audio/transcripts and should be handled as
+benchmark data.
+
+The oracle checks required integer event indexes, commit-before-final ordering,
+unique session completion, and no transcription segments after completion.
+Session control events after completion remain legal. The client stops receiving
+at its first completion, so post-completion violations are detected only when
+present in the recorded or injected trace. These checks validate the ASR profile,
+not native duplex interruption or physical audio playback.
+
+## Native duplex (VoiceChat) protocol benchmark
+
+`benchmark_duplex.py` records a native full-duplex VoiceChat session over
+`/v1/realtime` and grades it offline. It runs two sequential cases —
+`continuous` and `cancel_resume` — and is a protocol smoke benchmark, not a
+performance sweep and not a quality evaluation. Two cases do not establish
+product or model readiness.
+
+The native profile is not the transcription profile: PCM16 mono 16 kHz input,
+PCM16 22050 Hz output, 80 ms / 2560-byte native units, `tail_policy=pad`, a
+240 s session limit, and one admitted connection at a time. `benchmark_asr_realtime.py`
+and its oracle do not grade native events, and `benchmarks/duplex/oracle.py`
+does not grade transcription events. The recorded manifest pins the profile as
+`nemotron-voicechat-pr2188`, pinned to target commit
+`e1b9c9c674b1187918593257906ee6e8cc6a13da` from
+[VoiceChat duplex PR #2188](https://github.com/sgl-project/sglang-omni/pull/2188).
+
+This needs **two checkouts**, because neither side contains the other: the
+launcher `examples/run_nemotron_voicechat_duplex.py` exists only in the pinned
+target, and `benchmarks/duplex/` exists only here. Run the server from the
+target checkout and the harness from this one.
+
+```bash
+# Terminal A — in the pinned target checkout: serve the native duplex endpoint
+python examples/run_nemotron_voicechat_duplex.py \
+    --model-path nvidia/NVIDIA-NemotronLabs-VoiceChat-11B \
+    --serve --port 8097
+
+# Terminal B — in this repository: record and grade both cases
+python -m benchmarks.eval.benchmark_duplex \
+    --url ws://127.0.0.1:8097/v1/realtime \
+    --audio caller-16k.wav \
+    --output results/duplex-run-1 \
+    --server-revision e1b9c9c674b1187918593257906ee6e8cc6a13da \
+    --timeout 180
+
+# Terminal B — replay the saved run offline, with no server and no model
+python -m benchmarks.duplex.artifacts results/duplex-run-1
+```
+
+`--server-revision` above is the pinned target commit; pass whichever commit the
+server in terminal A is actually running.
+
+`--audio` must be PCM16 mono 16 kHz. Trailing silence is a property of the
+fixture input — it keeps the last speech burst clear of the stream boundary —
+and is *not* what ends the turn: under this profile the client ends input with
+`sglang.input_audio.end` and waits for `sglang.input_audio.drained`, and the
+oracle requires a `completed`/`stop` terminal for the final epoch. Pick a
+fixture whose PCM byte length is *not* a multiple of 2560,
+otherwise `padding_ms` is always 0 and the tail accounting is never exercised.
+`--output` must not already exist; each run directory is immutable.
+`--server-revision` is operator-supplied and recorded as such — the client
+cannot read the server's commit. `--timeout` is the whole-session deadline: it
+must exceed the paced input duration and stays at or below 230 s so the client
+deadline fires before the server's 240 s session limit.
+
+A run directory holds `manifest.json`, `input.pcm`, one JSONL trace per case,
+and the replay-derived `report.json`. Both CLIs exit 0 only when every selected
+case passes. Traces carry every send and receive event with client
+`time.perf_counter` timestamps, admission denials, and client errors; a failed
+or disconnected case keeps its trace and stays in the denominator rather than
+disappearing from it.
+
+The oracle recomputes verdicts from the raw records: granted capabilities,
+an acceptance receipt for every transmitted append, native unit identity and
+accounting, `accepted/consumed/discarded/padding` consistency, response terminal
+ordering, cancellation epoch fencing, input EOS drain, and the close receipt.
+For an uncancelled run it also checks output conservation,
+`output_samples == ceil(input_samples / 1280) * 1764`.
+
+Replay re-verifies the `input.pcm` digest and re-hashes every transmitted
+append against it, so a changed input PCM, a missing trace file or a
+protocol-invalid trace fails rather than rescores. The trace bytes themselves
+are not hashed: an otherwise-valid edit to recorded server events or timestamps
+is re-graded by the oracle, not detected as tampering. Compare `recorded_source`
+with `replay_source` in the report to tell reproduction from rescoring with a
+changed grader. The append check also fires when a session aborts partway and
+sends only a prefix of the fixture, which is an early-stop signature rather than
+an integrity alarm — read it together with the case's other violations.
+
+`report.json` records metrics per case and aggregates only passing cases into
+`summary.qualified_metrics`; failed and unexercised cases land in
+`diagnostic_metrics`. The timings (`first_audio_packet_s`,
+`audio_packet_gap_max_s`, `cancel_ack_s`, `post_cancel_first_audio_s`,
+`drain_after_eos_s`, `close_ack_s`) are client packet-receipt and protocol
+acknowledgment times. They are not audible speech onset and not acoustic stop
+time.
+
+A case that is healthy but did not exercise its scenario grades
+`not_exercised`, never `pass`: the cancel case requires cancellation after
+observed output and before input ends, plus input and output continuing after
+the acknowledgment. A second concurrent connection is refused with HTTP 503 and
+retried up to three times before any input is sent; that is admission behavior,
+not concurrency support.
+
+Declared limits, also written into `manifest.config`: automatic speech
+interruption, concurrent native sessions, session resume and truncate are
+unsupported by this target; semantic quality, acoustic speech onset and audible
+stop time are unmeasured. The cancel case checks lifecycle, fencing and resumed
+coverage — not cross-fence audio conservation. Partial output loss around a
+cancellation can go undetected; total output loss cannot pass, because coverage
+fails and the case grades `not_exercised`.
+
+The initial H100 campaign (A01) failed both cases on `buffer_overflow` after
+roughly 30 s of paced input. In the later A02 campaign, the same pinned target
+passed both cases after a 10 s profile warmup, but needed about 13 s to drain;
+a supplemental baseline without that warmup passed one case and failed one.
+The separate `fix/nemotron-duplex-realtime` candidate passed both cases twice,
+including EOS and tail accounting, but one case still needed 7.20 s to drain.
+Stable real-time service, graph/eager numerical equivalence and speech quality
+remain unverified. The warmed baseline and candidate used separate boots on the
+same GPU/runtime, while candidate repetitions shared one boot. Two lightweight
+model-info queries overlapped candidate execution; these are observed workload
+timings, not an isolated release benchmark. A01 used a different environment
+and is not pooled with A02 for speedup claims.
+
+The benchmark deliberately does not retry a rejected append. The native protocol
+does permit resending the same sequence, but retrying would measure client-side
+recovery instead of the endpoint's behaviour under real-time pacing, so a
+`buffer_overflow` is recorded as a failure and the client stops driving input.
 
 Both `*_seedtts.py` scripts also support speech quality and similarity evaluation via UTMOS and WavLM speaker verification metrics. Running with `--utmos-only` or `--similarity-only` loads the respective pre-trained predictor and computes scores on the previously generated audio in the output directory without requiring the TTS/ASR servers to be running.
 
