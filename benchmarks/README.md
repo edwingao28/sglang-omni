@@ -198,6 +198,7 @@ python -m benchmarks.eval.benchmark_omni_seedtts \
 | `eval/benchmark_asr_longform.py` | ASR concurrency scaling on LongLibriHeavy 30/60 s and Meanwhile (EN) | Qwen3-ASR, Fun-ASR | `/v1/audio/transcriptions` |
 | `eval/benchmark_asr_realtime.py` | Realtime ASR streaming latency, protocol invariants, and WER on SeedTTS EN | Qwen3-ASR | `/v1/realtime?intent=transcription` |
 | `eval/benchmark_duplex.py` | Native full-duplex VoiceChat protocol cases (continuous, cancel/resume) | Nemotron VoiceChat | `/v1/realtime` (native) |
+| `eval/benchmark_duplex_v15.py` | Full-Duplex-Bench v1.5 paired overlap sessions, event timing and judged behavior | Nemotron VoiceChat | `/v1/realtime` (native) |
 
 See [tts_serving/README.md](tts_serving/README.md) for the TTS serving
 benchmark design, harness contract, scenario matrix, and Docker usage.
@@ -488,6 +489,94 @@ The benchmark deliberately does not retry a rejected append. The native protocol
 does permit resending the same sequence, but retrying would measure client-side
 recovery instead of the endpoint's behaviour under real-time pacing, so a
 `buffer_overflow` is recorded as a failure and the client stops driving input.
+
+## Full-Duplex-Bench v1.5 overlap scenarios (VoiceChat)
+
+`benchmark_duplex_v15.py` runs the four v1.5 overlap subsets
+(`user_interruption`, `user_backchannel`, `talking_to_other`,
+`background_speech`) against the same native endpoint. Each sample is a pair:
+`input.wav` (with the overlapping event) and `clean_input.wav` (without it),
+each sent in a fresh `continuous` session. `response.cancel` is never sent; any
+stop or resume is the model's own behavior. The public [MIT-licensed dataset](https://github.com/DanielLin94144/Full-Duplex-Bench/blob/3e799c45a045256f47d5f1c9cda90157e2d2ec9e/v1_v1.5/dataset/README.md) is
+acquired separately; no audio is vendored here. Scoring is this repository's
+own implementation, not the upstream evaluation code, and it covers core
+timing and behavior only — not the prosody/UTMOS suite.
+
+```bash
+# Record: full dataset by default; --max-per-subset N or repeated --sample-id for a smoke run
+python -m benchmarks.eval.benchmark_duplex_v15 record \
+    --dataset-root data/full-duplex-bench-v1.5 \
+    --url ws://127.0.0.1:8097/v1/realtime \
+    --output results/fdb15-run \
+    --server-revision <full server commit SHA> \
+    --dataset-revision <release or archive digest> \
+    --sample-id user_backchannel/1 --sample-id user_interruption/1
+
+# Optional independent ASR of the generated audio (pip install openai-whisper; local checkpoint only)
+python -m benchmarks.eval.benchmark_duplex_v15 transcribe \
+    --run results/fdb15-run --output results/fdb15-asr \
+    --model-path /models/whisper/large-v3.pt --device cuda
+
+# Score offline (pip install silero-vad, or pass --segments)
+python -m benchmarks.eval.benchmark_duplex_v15 score \
+    --run results/fdb15-run --output results/fdb15-score \
+    --transcripts results/fdb15-asr \
+    [--judgements judgements.jsonl] [--segments results/earlier-score/segments.json]
+```
+
+Each variant records an input pacing map: every append's client send time
+against its source offset `t_start_ms`. A variant whose maximum absolute send
+deviation exceeds 80 ms (one native packet) fails reconstruction and is not
+qualified. This gate bounds input cadence only; it is not total timing
+accuracy — packet granularity, VAD boundaries and network delay add further
+uncertainty to every latency.
+
+`record` prints declared (499) versus available pairs — the released
+backchannel archive holds 98 of the declared 99 — plus selected pairs,
+attempted variants and every non-passing variant. It exits 0 only when every
+selected variant passes. Invalid samples, errors and protocol failures stay in
+the selected denominator and never feed metrics.
+
+Each variant directory keeps the sent `input.pcm`/`input.wav`, the raw
+`continuous.jsonl` trace, `report.json`, the concatenated model audio
+`output-media.wav`, `output-playout.wav` and `transcript.json`.
+`output-playout.wav` is a *simulated* zero-buffer client playout: each audio
+delta starts at the later of its receipt time or the preceding chunk's end,
+so initial delay, gaps and queued playback are kept. It is not
+acoustic timing and not paper-identical latency. `transcript.json` holds the
+server's own generated text deltas and is not ASR.
+
+`score` writes a new directory and never modifies the run. Timing
+(`fdb-v15-event-v1`, an event-anchored metric of its own, not bit-identical to
+the upstream timing script) runs Silero VAD with a frozen, hashed configuration
+(package version recorded) on each qualified variant's input and output, and
+places the stop/response decision on the metadata event window. The clean
+variant is scored on the same window as a no-event reference, without the
+overlap input-speech check. `--timeline simulated_playout` (default) uses
+`output-playout.wav`; `--timeline media` uses `output-media.wav` from session
+start and ignores receipt time. `segments.json` records the segments used, so a
+rescore can pass it back through `--segments`.
+
+Behavior needs four word-timestamped transcripts per pair: the dataset's
+aligned `input.json`/`clean_input.json` and Whisper transcripts of both
+outputs (`language=en`, `word_timestamps=True`, `temperature=0`; the raw
+response and model SHA-256 are kept). `transcribe` never downloads weights.
+Word times are copied verbatim, never clipped. A non-finite, negative,
+reversed or out-of-order word, or one ending more than 1 ms past the audio
+end, makes that variant a recorded transcription error, while the other
+variants continue. Its raw response is kept, and the command exits nonzero.
+Behavior inputs are built only for valid samples whose two variants both
+qualified; every other selected pair is written as unscorable, with a reason.
+`score` writes `judge-inputs.jsonl` with a `ready` or `unscorable` status and
+input hash per sample; labels come from `--judgements` (offline JSONL rows with
+`sample_id`, `input_hash`, `rubric_version`, `label`, `evidence`, `annotator`,
+and `first_new_segment`). The segment cites contiguous output words with
+`text`, `start_s` and `end_s`; only `C_UNKNOWN` permits a null segment.
+Alternatively, `score` invokes an OpenAI-compatible judge when all of
+`--judge-base-url`, `--judge-model` and `--judge-api-key-env` are given. Missing ASR
+or judgements leave behavior unscored while timing is still reported. Results
+are per-category label distributions and scored coverage, with no pass/fail
+mapping.
 
 Both `*_seedtts.py` scripts also support speech quality and similarity evaluation via UTMOS and WavLM speaker verification metrics. Running with `--utmos-only` or `--similarity-only` loads the respective pre-trained predictor and computes scores on the previously generated audio in the output directory without requiring the TTS/ASR servers to be running.
 
