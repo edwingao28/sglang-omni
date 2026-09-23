@@ -322,10 +322,12 @@ def test_qwen3_omni_talker_stage_env_defaults(
         assert _stage(config, "thinker").env == {}
 
 
+@pytest.mark.parametrize("is_rocm", [False, True])
 def test_qwen3_omni_stage_env_config_overrides_talker_default(
     monkeypatch: pytest.MonkeyPatch,
+    is_rocm: bool,
 ) -> None:
-    monkeypatch.setattr(qwen3_omni_config.current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(qwen3_omni_config.current_platform, "is_rocm", lambda: is_rocm)
     manager = ConfigManager(Qwen3OmniSpeechColocatedPipelineConfig(model_path="dummy"))
     config = manager.merge_config(
         {
@@ -335,7 +337,9 @@ def test_qwen3_omni_stage_env_config_overrides_talker_default(
     )
 
     assert _stage(config, "talker_ar").env == {
-        "SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION": "512"
+        "SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION": "512",
+        "SGLANG_FLASHINFER_MOE_FUSED_FINALIZE": "0",
+        **({"SGLANG_DISABLE_AITER_GREEDY_SAMPLE": "1"} if is_rocm else {}),
     }
     assert _stage(config, "thinker").env == {
         "SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION": "32"
