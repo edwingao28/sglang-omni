@@ -63,15 +63,17 @@ def natural_key(name: str) -> tuple[int, int, str]:
     return (0, int(name), name) if name.isdigit() else (1, 0, name)
 
 
-def list_sample_dirs(root: Path) -> tuple[dict[str, list[str]], list[str]]:
+def list_sample_dirs(
+    root: Path, subsets: tuple[str, ...] = SUBSETS
+) -> tuple[dict[str, list[str]], list[str]]:
     """Return sample directory names per subset and every ignored entry."""
     if not root.is_dir():
         raise FileNotFoundError(f"dataset root is not a directory: {root}")
     names: dict[str, list[str]] = {}
     ignored = sorted(
-        entry.name for entry in root.iterdir() if entry.name not in SUBSETS
+        entry.name for entry in root.iterdir() if entry.name not in subsets
     )
-    for subset in SUBSETS:
+    for subset in subsets:
         names[subset] = []
         subset_dir = root / subset
         if subset_dir.is_dir() and not subset_dir.is_symlink():
