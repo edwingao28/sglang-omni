@@ -39,6 +39,7 @@ TIMELINES = {
         "ignoring receipt time",
     },
 }
+RUN_KINDS = ("full-duplex-bench-v1.5-paired", "full-duplex-bench-v1.0")
 EVALUATION_FILES = (
     "benchmarks/duplex/v15_audio.py",
     "benchmarks/eval/benchmark_duplex_v15.py",
@@ -52,13 +53,13 @@ def file_sha256(path: Path) -> str:
     with path.open("rb") as handle:
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
-
+# TODO: move these utils to a separate file
 def load_run(run_dir: Path) -> tuple[dict[str, JsonValue], dict[str, JsonValue], str]:
     """Return the run manifest, run.json and the manifest digest that pins them."""
     manifest_path = run_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    if manifest.get("kind") != "full-duplex-bench-v1.5-paired":
-        raise ValueError(f"{run_dir} is not a paired v1.5 run directory")
+    if manifest.get("kind") not in RUN_KINDS:
+        raise ValueError(f"{run_dir} is not a Full-Duplex-Bench run directory")
     return (
         manifest,
         json.loads((run_dir / "run.json").read_text()),

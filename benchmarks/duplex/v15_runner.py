@@ -8,12 +8,14 @@ import logging
 import re
 from dataclasses import asdict
 from pathlib import Path
+from types import ModuleType
 from typing import Literal
 
 import numpy as np
 import soundfile
 from pydantic import JsonValue
 
+from benchmarks.duplex import v15_dataset
 from benchmarks.duplex.artifacts import replay_run, source_fingerprint
 from benchmarks.duplex.client import PACKET_MS, SAMPLE_RATE, TRANSPORT, run_session
 from benchmarks.duplex.oracle import OUTPUT_SAMPLE_RATE
@@ -23,12 +25,12 @@ from benchmarks.duplex.v15_audio import (
     reconstruct_output,
     write_json,
 )
-from benchmarks.duplex.v15_dataset import discover_samples, inventory
 from benchmarks.eval.benchmark_duplex import MAX_TIMEOUT_S
 
 logger = logging.getLogger(__name__)
 
 VARIANTS = {"overlap": "input", "clean": "clean_input"}
+RUN_KIND = "full-duplex-bench-v1.5-paired"
 RUNNER_FILES = (
     "benchmarks/duplex/v15_audio.py",
     "benchmarks/duplex/v15_dataset.py",
@@ -70,8 +72,15 @@ async def run_pairs(
     timeout_s: float,
     sample_ids: list[str] | None = None,
     max_per_subset: int | None = None,
+    dataset: ModuleType = v15_dataset,
+    variants: dict[str, str] = VARIANTS,
+    kind: str = RUN_KIND,
 ) -> dict[str, JsonValue]:
-    """Run every selected pair; each failure stays in the selected denominator."""
+    """Run every selected sample variant; each failure stays in the selected denominator.
+
+    dataset supplies discover_samples and inventory; variants maps a variant name to
+    the sample path key it sends.
+    """
     if not re.fullmatch(r"[0-9a-f]{40}", server_revision):
         raise ValueError("server_revision must be a full lowercase commit SHA")
     if not dataset_revision:
@@ -79,7 +88,7 @@ async def run_pairs(
     if not 0 < timeout_s <= MAX_TIMEOUT_S:
         raise ValueError(f"timeout_s must be positive and at most {MAX_TIMEOUT_S}")
     dataset_root = dataset_root.resolve()
-    samples = discover_samples(dataset_root, sample_ids, max_per_subset)
+    samples = dataset.discover_samples(dataset_root, sample_ids, max_per_subset)
     if not samples:
         raise ValueError("no samples selected")
     output.mkdir(parents=True, exist_ok=False)
@@ -97,8 +106,8 @@ async def run_pairs(
     for sample in samples:
         # Note (wenyao): run.json is rewritten per variant; omit bulky transcripts.
         entry = {**asdict(sample), "variants": {}}
-        del entry["transcripts"]
-        for variant, key in VARIANTS.items():
+        entry.pop("transcripts", None)
+        for variant, key in variants.items():
             entry["variants"][variant] = {
                 "directory": str(Path("samples") / sample.directory / variant),
                 "status": "invalid" if sample.errors else "pending",
@@ -122,14 +131,14 @@ async def run_pairs(
         output / "manifest.json",
         {
             "schema_version": 1,
-            "kind": "full-duplex-bench-v1.5-paired",
+            "kind": kind,
             "profile": PROFILE,
             "source": source,
             "server": server,
             "dataset": {
                 "root": str(dataset_root),
                 "revision": dataset_revision,
-                "inventory": inventory(dataset_root),
+                "inventory": dataset.inventory(dataset_root),
                 "selection": {
                     "sample_ids": sample_ids,
                     "max_per_subset": max_per_subset,
@@ -137,7 +146,7 @@ async def run_pairs(
             },
             "config": {
                 "scenario": "continuous",
-                "variants": VARIANTS,
+                "variants": variants,
                 "timeout_s": timeout_s,
                 "packet_ms": PACKET_MS,
                 "pacing_tolerance_s": PACING_TOLERANCE_S,
@@ -172,7 +181,7 @@ async def run_pairs(
 
     save("preparing")
     for sample, entry in zip(samples, entries):
-        for variant, key in VARIANTS.items():
+        for variant, key in variants.items():
             state = entry["variants"][variant]
             if state["status"] != "pending":
                 continue
