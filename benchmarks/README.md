@@ -199,6 +199,7 @@ python -m benchmarks.eval.benchmark_omni_seedtts \
 | `eval/benchmark_asr_realtime.py` | Realtime ASR streaming latency, protocol invariants, and WER on SeedTTS EN | Qwen3-ASR | `/v1/realtime?intent=transcription` |
 | `eval/benchmark_duplex.py` | Native full-duplex VoiceChat protocol cases (continuous, cancel/resume) | Nemotron VoiceChat | `/v1/realtime` (native) |
 | `eval/benchmark_duplex_v15.py` | Full-Duplex-Bench v1.5 paired overlap sessions, event timing and judged behavior | Nemotron VoiceChat | `/v1/realtime` (native) |
+| `eval/benchmark_duplex_v10.py` | Full-Duplex-Bench v1.0 pause, turn-taking, interruption and backchannel takeover/latency | Nemotron VoiceChat | `/v1/realtime` (native) |
 
 See [tts_serving/README.md](tts_serving/README.md) for the TTS serving
 benchmark design, harness contract, scenario matrix, and Docker usage.
@@ -585,6 +586,67 @@ Alternatively, `score` invokes an OpenAI-compatible judge when all of
 or judgements leave behavior unscored while timing is still reported. Results
 are per-category label distributions and scored coverage, with no pass/fail
 mapping.
+
+## Full-Duplex-Bench v1.0 turn-taking tasks (VoiceChat)
+
+`benchmark_duplex_v10.py` runs the five v1.0 subsets against the same native
+endpoint, one `continuous` session per sample (no clean variant):
+
+| Subset | Task | Annotation |
+|---|---|---|
+| `synthetic_pause_handling`, `candor_pause_handling` | pause handling | `pause.json` (one or more pauses) |
+| `candor_turn_taking` | turn taking | `turn_taking.json` (one span; its start is the user turn end) |
+| `synthetic_user_interruption` | user interruption | `interrupt.json` (span plus `context`/`interrupt` text) |
+| `icc_backchannel` | backchannel | none |
+
+It reuses the v1.5 runner, pacing gate, output reconstruction and Whisper
+`transcribe` step, so recording, qualification and the selected-denominator
+rules above apply unchanged. The dataset is acquired separately.
+
+```bash
+python -m benchmarks.eval.benchmark_duplex_v10 record \
+    --dataset-root data/full-duplex-bench-v1.0 \
+    --url ws://127.0.0.1:8097/v1/realtime \
+    --output results/fdb10-run \
+    --server-revision <full server commit SHA> \
+    --model <served model path or ID> \
+    --dataset-revision <release or archive digest> \
+    --max-per-subset 2
+
+python -m benchmarks.eval.benchmark_duplex_v10 transcribe \
+    --run results/fdb10-run --output results/fdb10-asr \
+    --model-path /models/whisper/large-v3.pt --device cuda
+
+python -m benchmarks.eval.benchmark_duplex_v10 score \
+    --run results/fdb10-run --output results/fdb10-score \
+    --transcripts results/fdb10-asr \
+    [--backchannel-reference icc_gt_distribution.json]
+```
+
+`score` (`fdb-v10-synthetic-v1`) reports per-task takeover rate and latency
+from the Whisper word timestamps. A takeover is output lasting at least 1 s or
+more than 3 words, as upstream.
+
+- Pause handling crops output to the input duration; any takeover is a failure.
+- Turn taking and user interruption only count words starting after the user
+  turn or interruption ends; latency is the first such word's start minus that
+  end, reported only for takeovers. An interruption is `not_exercised` when
+  Silero VAD finds no model speech at its onset.
+- Backchannel runs Silero VAD on the output. It reports backchannel rate and,
+  with `--backchannel-reference` (upstream `icc_gt_distribution.json`), the
+  Jensen-Shannon distance of 0.2 s binned backchannel timing to the human
+  reference; 1 when the model produced none. Without the reference, timing is
+  unscored.
+
+Selected samples without a record count as `missing`; invalid, unqualified or
+untranscribed samples are listed with an `unscored_reason`. This is not the
+upstream evaluation code. The backchannel classifier differs from upstream
+`eval_backchannel.py`: segments after the input end are ignored and others are
+clipped to it, any takeover segment marks the sample (upstream keeps the last
+segment's verdict and stops at the first segment over 3 s), and a segment of 1 s
+or longer with at most 2 words stays a backchannel (upstream counts every
+segment of 1 s or longer as a takeover). Interruption relevance (the upstream
+GPT-4 rating) is not scored.
 
 Both `*_seedtts.py` scripts also support speech quality and similarity evaluation via UTMOS and WavLM speaker verification metrics. Running with `--utmos-only` or `--similarity-only` loads the respective pre-trained predictor and computes scores on the previously generated audio in the output directory without requiring the TTS/ASR servers to be running.
 
