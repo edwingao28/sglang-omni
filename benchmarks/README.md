@@ -642,11 +642,9 @@ Selected samples without a record count as `missing`; invalid, unqualified or
 untranscribed samples are listed with an `unscored_reason`. This is not the
 upstream evaluation code. The backchannel classifier differs from upstream
 `eval_backchannel.py`: segments after the input end are ignored and others are
-clipped to it, any takeover segment marks the sample (upstream keeps the last
-segment's verdict and stops at the first segment over 3 s), and a segment of 1 s
-or longer with at most 2 words stays a backchannel (upstream counts every
-segment of 1 s or longer as a takeover). Interruption relevance (the upstream
-GPT-4 rating) is not scored.
+clipped to it, and any takeover segment marks the sample (upstream keeps the
+last segment's verdict and stops at the first segment over 3 s). Interruption
+relevance (the upstream GPT-4 rating) is not scored.
 
 Both `*_seedtts.py` scripts also support speech quality and similarity evaluation via UTMOS and WavLM speaker verification metrics. Running with `--utmos-only` or `--similarity-only` loads the respective pre-trained predictor and computes scores on the previously generated audio in the output directory without requiring the TTS/ASR servers to be running.
 

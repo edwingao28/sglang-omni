@@ -20,8 +20,7 @@ TAKEOVER_MAX_DURATION_S = 1.0
 TAKEOVER_MAX_WORDS = 3
 # Note (Jeffro): Upstream backchannel rule; a speech segment this long is a full turn.
 BACKCHANNEL_MAX_SEGMENT_S = 3.0
-BACKCHANNEL_MAX_WORDS = 3
-BACKCHANNEL_SHORT_MAX_WORDS = 2
+BACKCHANNEL_MAX_WORDS = 2
 BACKCHANNEL_WINDOW_S = 0.2
 BACKCHANNEL_EPSILON = 1e-10
 SCORING_CONFIG = {
@@ -32,8 +31,8 @@ SCORING_CONFIG = {
     "user_interruption": "output after the interruption end only; takeover is success",
     "latency": "first word starting at or after the event end, minus that end",
     "coverage": "interruption scored only when the model spoke at the interruption onset",
-    "backchannel": "VAD segment over 3 s, more than 3 words, or 1 s+ with more than 2 "
-    "words is a takeover; shorter segments are backchannels",
+    "backchannel": "VAD segment of 1 s or longer, or with more than 2 words, is a "
+    "takeover; a segment over 3 s is a full turn and not a backchannel",
     "backchannel_timing": "backchannels binned at 0.2 s over the input; Jensen-Shannon "
     "distance to the human reference resampled to the same bins, 1 when none",
 }
@@ -115,9 +114,9 @@ def score_backchannel(
             for chunk in chunks
             if chunk["timestamp"][0] < end_s and chunk["timestamp"][1] > start_s
         ]
-        if len(words) > BACKCHANNEL_MAX_WORDS or (
+        if (
             end_s - start_s >= TAKEOVER_MAX_DURATION_S
-            and len(words) > BACKCHANNEL_SHORT_MAX_WORDS
+            or len(words) > BACKCHANNEL_MAX_WORDS
         ):
             takeover = True
         backchannels.append([start_s, end_s])

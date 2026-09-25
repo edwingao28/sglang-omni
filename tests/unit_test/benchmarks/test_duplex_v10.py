@@ -223,6 +223,9 @@ def test_backchannel_takeover_rate_and_timing() -> None:
     wordy = v10_scoring.score_backchannel(
         chunks=[chunk(0.1, 0.2)] * 4, output_segments=[[0.1, 0.5]], **common
     )
+    drawn_out = v10_scoring.score_backchannel(
+        chunks=[chunk(0.1, 1.4, "hmm")], output_segments=[[0.1, 1.5]], **common
+    )
     silent = v10_scoring.score_backchannel(chunks=[], output_segments=[], **common)
     unreferenced = v10_scoring.score_backchannel(
         chunks=[], output_segments=[[0.1, 0.4]], **{**common, "reference": None}
@@ -234,6 +237,7 @@ def test_backchannel_takeover_rate_and_timing() -> None:
     assert 0 < record["timing_jsd"] < 1
     assert long["takeover"] is True and long["backchannels"] == [[0.0, 1.9]]
     assert wordy["takeover"] is True
+    assert drawn_out["takeover"] is True and drawn_out["backchannels"] == [[0.1, 1.5]]
     assert silent["timing_jsd"] == 1.0 and silent["backchannels"] == []
     assert unreferenced["timing_jsd"] is None
 
