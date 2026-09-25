@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 
 from benchmarks.duplex import v10_dataset
+from benchmarks.duplex.artifacts import add_server_identity_args, server_identity
 from benchmarks.duplex.v10_evaluation import RUN_KIND, score_run
 from benchmarks.duplex.v15_evaluation import TIMELINES, accounting, load_run
 from benchmarks.duplex.v15_runner import run_pairs
@@ -24,7 +25,13 @@ def record(args: argparse.Namespace) -> int:
             args.dataset_root,
             url=args.url,
             output=args.output,
-            server_revision=args.server_revision,
+            server=server_identity(
+                args.url,
+                revision=args.server_revision,
+                model=args.model,
+                model_revision=args.model_revision,
+                runtime=args.runtime,
+            ),
             dataset_revision=args.dataset_revision,
             timeout_s=args.timeout,
             sample_ids=args.sample_id,
@@ -101,9 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     record_parser.add_argument(
         "--output", type=Path, required=True, help="New immutable run directory"
     )
-    record_parser.add_argument(
-        "--server-revision", required=True, help="Operator-supplied full commit SHA"
-    )
+    add_server_identity_args(record_parser)
     record_parser.add_argument(
         "--dataset-revision", required=True, help="Dataset release or archive digest"
     )

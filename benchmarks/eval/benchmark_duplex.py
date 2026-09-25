@@ -7,11 +7,15 @@ import argparse
 import asyncio
 import hashlib
 import json
-import re
 import wave
 from pathlib import Path
 
-from benchmarks.duplex.artifacts import replay_run, source_fingerprint
+from benchmarks.duplex.artifacts import (
+    add_server_identity_args,
+    replay_run,
+    server_identity,
+    source_fingerprint,
+)
 from benchmarks.duplex.client import PACKET_MS, SAMPLE_RATE, TRANSPORT, run_session
 
 # Note (wenyao): Leave drain/close time before the server's 240 s deadline.
@@ -20,7 +24,7 @@ DRAIN_MARGIN_S = 10.0
 MAX_TIMEOUT_S = SESSION_LIMIT_S - DRAIN_MARGIN_S
 
 
-async def run(args: argparse.Namespace, pcm: bytes) -> dict:
+async def run(args: argparse.Namespace, pcm: bytes, server: dict) -> dict:
     args.output.mkdir(parents=True, exist_ok=False)
     (args.output / "input.pcm").write_bytes(pcm)
     cases = [
@@ -39,10 +43,7 @@ async def run(args: argparse.Namespace, pcm: bytes) -> dict:
         "schema_version": 1,
         "profile": "nemotron-voicechat-pr2188",
         "source": source_fingerprint(),
-        "server": {
-            "revision": args.server_revision,
-            "revision_source": "operator_supplied",
-        },
+        "server": server,
         "config": {
             "packet_ms": PACKET_MS,
             "paced": True,
@@ -100,17 +101,11 @@ def main() -> None:
     parser.add_argument(
         "--output", type=Path, required=True, help="New immutable run directory"
     )
-    parser.add_argument(
-        "--server-revision",
-        required=True,
-        help="Operator-supplied full server commit SHA",
-    )
+    add_server_identity_args(parser)
     parser.add_argument(
         "--timeout", type=float, default=90.0, help="Whole-session deadline in seconds"
     )
     args = parser.parse_args()
-    if not re.fullmatch(r"[0-9a-f]{40}", args.server_revision):
-        parser.error("--server-revision must be a full lowercase commit SHA")
     if not 0 < args.timeout <= MAX_TIMEOUT_S:
         parser.error(f"--timeout must be positive and at most {MAX_TIMEOUT_S} seconds")
     try:
@@ -133,7 +128,17 @@ def main() -> None:
         parser.error(
             f"--timeout must exceed the {duration_s:.2f} second paced input duration"
         )
-    report = asyncio.run(run(args, pcm))
+    try:
+        server = server_identity(
+            args.url,
+            revision=args.server_revision,
+            model=args.model,
+            model_revision=args.model_revision,
+            runtime=args.runtime,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    report = asyncio.run(run(args, pcm, server))
     print(json.dumps(report["summary"], indent=2, allow_nan=False))
     raise SystemExit(
         0 if report["summary"]["passed"] == report["summary"]["selected"] else 1

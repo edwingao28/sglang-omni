@@ -4,6 +4,8 @@ import base64
 import hashlib
 import json
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -433,3 +435,68 @@ def test_cli_reports_unreadable_manifest_as_failed_run(
         artifacts.main()
     assert stopped.value.code == 1
     assert json.loads(capsys.readouterr().out)["status"] == "fail"
+
+
+REVISION = "e1b9c9c674b1187918593257906ee6e8cc6a13da"
+
+
+def test_server_identity_records_claims_and_served_models() -> None:
+    class Models(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            body = json.dumps({"data": [{"id": "nemotron-voicechat"}]}).encode()
+            self.send_response(200 if self.path == "/v1/models" else 404)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Models)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        port = server.server_address[1]
+        identity = artifacts.server_identity(
+            f"ws://127.0.0.1:{port}/v1/realtime?intent=x",
+            revision=REVISION,
+            model="nvidia/NVIDIA-NemotronLabs-VoiceChat-11B",
+            model_revision="0" * 40,
+            runtime="sha256:abc",
+        )
+    finally:
+        server.shutdown()
+    assert identity == {
+        "revision": REVISION,
+        "revision_source": "operator_supplied",
+        "model": "nvidia/NVIDIA-NemotronLabs-VoiceChat-11B",
+        "model_revision": "0" * 40,
+        "runtime": "sha256:abc",
+        "identity_source": "operator_supplied",
+        "served_models": {
+            "url": f"http://127.0.0.1:{port}/v1/models",
+            "ids": ["nemotron-voicechat"],
+        },
+    }
+
+
+def test_server_identity_records_unreachable_models_endpoint() -> None:
+    identity = artifacts.server_identity(
+        "wss://127.0.0.1:1/v1/realtime", revision=REVISION, model="m"
+    )
+    assert identity["served_models"]["url"] == "https://127.0.0.1:1/v1/models"
+    assert identity["served_models"]["error"]
+    assert identity["model_revision"] is None
+    assert identity["runtime"] is None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"revision": "main", "model": "m"}, "server revision"),
+        ({"revision": REVISION, "model": ""}, "model must be nonempty"),
+        ({"revision": REVISION, "model": "m", "model_revision": "v1"}, "model rev"),
+    ],
+)
+def test_server_identity_rejects_unpinned_claims(kwargs: dict, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        artifacts.server_identity("ws://127.0.0.1:1/v1/realtime", **kwargs)

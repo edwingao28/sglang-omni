@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import re
 from dataclasses import asdict
 from pathlib import Path
 from types import ModuleType
@@ -67,7 +66,7 @@ async def run_pairs(
     *,
     url: str,
     output: Path,
-    server_revision: str,
+    server: dict[str, JsonValue],
     dataset_revision: str,
     timeout_s: float,
     sample_ids: list[str] | None = None,
@@ -81,8 +80,6 @@ async def run_pairs(
     dataset supplies discover_samples and inventory; variants maps a variant name to
     the sample path key it sends.
     """
-    if not re.fullmatch(r"[0-9a-f]{40}", server_revision):
-        raise ValueError("server_revision must be a full lowercase commit SHA")
     if not dataset_revision:
         raise ValueError("dataset_revision must be nonempty")
     if not 0 < timeout_s <= MAX_TIMEOUT_S:
@@ -101,7 +98,6 @@ async def run_pairs(
             for path in RUNNER_FILES
         }
     )
-    server = {"revision": server_revision, "revision_source": "operator_supplied"}
     entries = []
     for sample in samples:
         # Note (wenyao): run.json is rewritten per variant; omit bulky transcripts.

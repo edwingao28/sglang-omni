@@ -22,6 +22,11 @@ from benchmarks.duplex.v15_runner import run_pairs
 from tests.unit_test.benchmarks.test_duplex_client import FIXTURE_PCM, DuplexPeer
 
 SERVER_REVISION = "e1b9c9c674b1187918593257906ee6e8cc6a13da"
+SERVER = {
+    "revision": SERVER_REVISION,
+    "revision_source": "operator_supplied",
+    "model": "nvidia/NVIDIA-NemotronLabs-VoiceChat-11B",
+}
 FIXTURE_SAMPLES = np.frombuffer(FIXTURE_PCM, dtype="<i2")
 EXTRA_TEXT = {
     "user_interruption": {"current_turn_text": "wait, actually"},
@@ -309,7 +314,7 @@ async def serve_pairs(handler, dataset: Path, output: Path, **kwargs) -> dict:
             dataset,
             url=f"ws://127.0.0.1:{port}/v1/realtime",
             output=output,
-            server_revision=SERVER_REVISION,
+            server=SERVER,
             dataset_revision="fixture",
             timeout_s=5.0,
             **kwargs,
@@ -537,7 +542,7 @@ def test_run_pairs_accounts_inputs_the_deadline_cannot_meet(tmp_path: Path) -> N
             dataset,
             url="ws://127.0.0.1:1/v1/realtime",
             output=output,
-            server_revision=SERVER_REVISION,
+            server=SERVER,
             dataset_revision="fixture",
             timeout_s=0.5,
             max_per_subset=1,
@@ -552,7 +557,7 @@ def test_run_pairs_accounts_inputs_the_deadline_cannot_meet(tmp_path: Path) -> N
                 dataset,
                 url="ws://127.0.0.1:1/v1/realtime",
                 output=tmp_path / "never",
-                server_revision=SERVER_REVISION,
+                server=SERVER,
                 dataset_revision="fixture",
                 timeout_s=5.0,
                 sample_ids=["user_interruption/404"],

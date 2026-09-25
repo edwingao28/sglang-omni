@@ -744,6 +744,8 @@ async def serve_cli(handler, run_dir: Path, wav_path: Path, timeout: str) -> tup
             str(run_dir),
             "--server-revision",
             "e1b9c9c674b1187918593257906ee6e8cc6a13da",
+            "--model",
+            "nvidia/NVIDIA-NemotronLabs-VoiceChat-11B",
             "--timeout",
             timeout,
         )
@@ -773,6 +775,10 @@ def test_benchmark_cli_records_replays_and_rejects_tampered_audio(
     assert (run_dir / manifest["input"]["file"]).read_bytes() == FIXTURE_PCM
     assert manifest["input"]["sha256"] == hashlib.sha256(FIXTURE_PCM).hexdigest()
     assert manifest["config"]["transport"]["keepalive_ping"] is False
+    assert manifest["server"]["model"] == "nvidia/NVIDIA-NemotronLabs-VoiceChat-11B"
+    assert manifest["server"]["model_revision"] is None
+    assert "error" in manifest["server"]["served_models"]
+    assert manifest["source"]["packages"]["websockets"] == websockets.__version__
     assert manifest["config"]["input_duration_s"] == pytest.approx(
         FIXTURE_PACKETS * PACKET_MS / 1000
     )
@@ -854,6 +860,8 @@ def test_benchmark_cli_rejects_a_deadline_the_input_cannot_meet(
             str(run_dir),
             "--server-revision",
             "e1b9c9c674b1187918593257906ee6e8cc6a13da",
+            "--model",
+            "nvidia/NVIDIA-NemotronLabs-VoiceChat-11B",
             "--timeout",
             "0.5",
         )

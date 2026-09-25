@@ -6,11 +6,16 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import importlib.metadata
 import json
 import math
 import platform
+import re
 import statistics
 import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Literal
@@ -48,6 +53,72 @@ class RunManifest(BaseModel):
     cases: list[CaseArtifact] = Field(min_length=1)
 
 
+HARNESS_PACKAGES = ("websockets", "numpy", "pydantic", "soundfile")
+SHA_PATTERN = r"[0-9a-f]{40}"
+
+
+def package_version(name: str) -> str | None:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def add_server_identity_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--server-revision",
+        required=True,
+        help="Operator-supplied full server commit SHA",
+    )
+    parser.add_argument(
+        "--model", required=True, help="Operator-supplied served model path or ID"
+    )
+    parser.add_argument(
+        "--model-revision", help="Operator-supplied full model commit SHA, if known"
+    )
+    parser.add_argument(
+        "--runtime", help="Operator-supplied server runtime, e.g. container digest"
+    )
+
+
+def served_models(url: str) -> dict[str, Any]:
+    parts = urllib.parse.urlsplit(url)
+    scheme = {"ws": "http", "wss": "https"}.get(parts.scheme, parts.scheme)
+    models_url = urllib.parse.urlunsplit((scheme, parts.netloc, "/v1/models", "", ""))
+    # Note (wenyao): A failed probe is recorded; it must not block the benchmark.
+    try:
+        with urllib.request.urlopen(models_url, timeout=5) as response:
+            body = json.load(response)
+        return {"url": models_url, "ids": [card["id"] for card in body["data"]]}
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return {"url": models_url, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def server_identity(
+    url: str,
+    *,
+    revision: str,
+    model: str,
+    model_revision: str | None = None,
+    runtime: str | None = None,
+) -> dict[str, Any]:
+    if not re.fullmatch(SHA_PATTERN, revision):
+        raise ValueError("server revision must be a full lowercase commit SHA")
+    if not model:
+        raise ValueError("model must be nonempty")
+    if model_revision is not None and not re.fullmatch(SHA_PATTERN, model_revision):
+        raise ValueError("model revision must be a full lowercase commit SHA")
+    return {
+        "revision": revision,
+        "revision_source": "operator_supplied",
+        "model": model,
+        "model_revision": model_revision,
+        "runtime": runtime,
+        "identity_source": "operator_supplied",
+        "served_models": served_models(url),
+    }
+
+
 def source_fingerprint() -> dict[str, Any]:
     """Identify the actual recorder and evaluator, including uncommitted edits."""
     root = Path(__file__).resolve().parents[2]
@@ -77,6 +148,7 @@ def source_fingerprint() -> dict[str, Any]:
         },
         "missing_files": [path for path in paths if not (root / path).is_file()],
         "python": platform.python_version(),
+        "packages": {name: package_version(name) for name in HARNESS_PACKAGES},
         "clock": "client time.perf_counter; seconds; one process clock domain",
     }
 

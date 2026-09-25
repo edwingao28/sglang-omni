@@ -403,6 +403,7 @@ python -m benchmarks.eval.benchmark_duplex \
     --audio caller-16k.wav \
     --output results/duplex-run-1 \
     --server-revision e1b9c9c674b1187918593257906ee6e8cc6a13da \
+    --model nvidia/NVIDIA-NemotronLabs-VoiceChat-11B \
     --timeout 180
 
 # Terminal B — replay the saved run offline, with no server and no model
@@ -420,8 +421,14 @@ oracle requires a `completed`/`stop` terminal for the final epoch. Pick a
 fixture whose PCM byte length is *not* a multiple of 2560,
 otherwise `padding_ms` is always 0 and the tail accounting is never exercised.
 `--output` must not already exist; each run directory is immutable.
-`--server-revision` is operator-supplied and recorded as such — the client
-cannot read the server's commit. `--timeout` is the whole-session deadline: it
+`--server-revision` and `--model` are required, and `--model-revision` (full
+model commit SHA) and `--runtime` (for example a container image digest) are
+optional. All four are operator-supplied and recorded as such — the client
+cannot read the server's commit, weights or runtime. Before the first session,
+the client also records the model IDs the server reports at `/v1/models`, or the
+probe error, under `server.served_models`. The IDs cross-check the operator's
+claim; they do not identify weights. `source.packages` pins the harness's own
+`websockets`, `numpy`, `pydantic` and `soundfile` versions. `--timeout` is the whole-session deadline: it
 must exceed the paced input duration and stays at or below 230 s so the client
 deadline fires before the server's 240 s session limit.
 
@@ -509,6 +516,7 @@ python -m benchmarks.eval.benchmark_duplex_v15 record \
     --url ws://127.0.0.1:8097/v1/realtime \
     --output results/fdb15-run \
     --server-revision <full server commit SHA> \
+    --model <served model path or ID> \
     --dataset-revision <release or archive digest> \
     --sample-id user_backchannel/1 --sample-id user_interruption/1
 

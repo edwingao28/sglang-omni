@@ -110,6 +110,7 @@ def recorded(tmp_path_factory: pytest.TempPathFactory) -> dict:
         code, summary = run_cli(
             ["record", "--dataset-root", str(dataset), "--url", url]
             + ["--output", str(run), "--server-revision", SERVER_REVISION]
+            + ["--model", "nvidia/NVIDIA-NemotronLabs-VoiceChat-11B"]
             + ["--dataset-revision", "fixture", "--timeout", "5"]
             + [arg for sample_id in SELECTED for arg in ("--sample-id", sample_id)]
         )
