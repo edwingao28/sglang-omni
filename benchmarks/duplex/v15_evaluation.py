@@ -53,6 +53,7 @@ def file_sha256(path: Path) -> str:
     with path.open("rb") as handle:
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
+
 # TODO: move these utils to a separate file
 def load_run(run_dir: Path) -> tuple[dict[str, JsonValue], dict[str, JsonValue], str]:
     """Return the run manifest, run.json and the manifest digest that pins them."""
