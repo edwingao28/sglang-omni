@@ -67,7 +67,7 @@ def recorded_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             "".join(json.dumps(record) + "\n" for record in records)
         )
 
-    def evaluate(records: list[dict], scenario: str) -> dict:
+    def evaluate(records: list[dict], scenario: str, profile: str) -> dict:
         return {
             "status": "pass",
             "violations": [],
@@ -177,7 +177,7 @@ def test_partial_send_preserves_client_failure_and_identity_diagnostic(
     monkeypatch.setattr(
         artifacts,
         "evaluate_trace",
-        lambda records, scenario: {
+        lambda records, scenario, profile: {
             "status": "fail",
             "violations": ["client error: connection timeout"],
             "coverage": {"input_output_overlap": False},
@@ -241,7 +241,7 @@ def test_not_exercised_is_not_pass_or_qualified_timing(
     records[-1]["time_s"] = 2.0
     path.write_text("".join(json.dumps(record) + "\n" for record in records))
 
-    def evaluate(records: list[dict], scenario: str) -> dict:
+    def evaluate(records: list[dict], scenario: str, profile: str) -> dict:
         unexercised = records[-1]["time_s"] == 2.0
         return {
             "status": "not_exercised" if unexercised else "pass",
@@ -417,7 +417,7 @@ def test_cli_succeeds_only_when_every_case_passes(
     monkeypatch.setattr(
         artifacts,
         "evaluate_trace",
-        lambda records, scenario: {
+        lambda records, scenario, profile: {
             "status": status,
             "violations": [],
             "coverage": {},

@@ -16,7 +16,7 @@ from pydantic import JsonValue
 from scipy.signal import resample_poly
 
 from benchmarks.duplex.artifacts import source_fingerprint
-from benchmarks.duplex.oracle import OUTPUT_SAMPLE_RATE
+from benchmarks.duplex.profiles import PROFILES
 from benchmarks.duplex.v15_audio import write_json
 from benchmarks.duplex.v15_evaluation import (
     TIMELINES,
@@ -91,10 +91,11 @@ def transcribe_run(
     timeline: Timeline,
 ) -> dict[str, JsonValue]:
     """Transcribe every qualified variant; per-variant failures are recorded, not fatal."""
-    _, run, manifest_sha256 = load_run(run_dir)
+    manifest, run, manifest_sha256 = load_run(run_dir)
+    output_sample_rate = PROFILES[manifest["profile"]].output_sample_rate
     create_output(output, run_dir)
     options = {**WHISPER_OPTIONS, "fp16": device.startswith("cuda")}
-    divisor = math.gcd(OUTPUT_SAMPLE_RATE, WHISPER_SAMPLE_RATE)
+    divisor = math.gcd(output_sample_rate, WHISPER_SAMPLE_RATE)
     source = source_fingerprint()
     repo = Path(__file__).resolve().parents[2]
     source["files_sha256"].update(
@@ -140,13 +141,13 @@ def transcribe_run(
         raw_file = Path("raw") / f"{audio_path.parent}.json"
         try:
             audio, sample_rate = load_mono(run_dir / audio_path)
-            if sample_rate != OUTPUT_SAMPLE_RATE:
+            if sample_rate != output_sample_rate:
                 raise ValueError(f"{audio_path} is {sample_rate} Hz")
             duration_s = len(audio) / sample_rate
             resampled = resample_poly(
                 audio,
                 WHISPER_SAMPLE_RATE // divisor,
-                OUTPUT_SAMPLE_RATE // divisor,
+                output_sample_rate // divisor,
             ).astype(np.float32)
             raw = model.transcribe(resampled, **options)
             (output / raw_file).parent.mkdir(parents=True, exist_ok=True)

@@ -23,6 +23,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from benchmarks.duplex.oracle import TraceRecord, evaluate_trace
+from benchmarks.duplex.profiles import ProfileName
 
 
 class InputArtifact(BaseModel):
@@ -45,7 +46,7 @@ class RunManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     schema_version: Literal[1]
-    profile: Literal["nemotron-voicechat-pr2188"]
+    profile: ProfileName
     source: dict[str, Any]
     server: dict[str, Any]
     config: dict[str, Any]
@@ -125,6 +126,7 @@ def source_fingerprint() -> dict[str, Any]:
     paths = (
         "benchmarks/duplex/client.py",
         "benchmarks/duplex/oracle.py",
+        "benchmarks/duplex/profiles.py",
         "benchmarks/duplex/artifacts.py",
         "benchmarks/eval/benchmark_duplex.py",
     )
@@ -240,7 +242,9 @@ def replay_run(run_dir: Path) -> dict[str, Any]:
                     errors.append("sent audio contains invalid base64")
         if sent_digest.hexdigest() != manifest.input.sha256:
             errors.append("sent audio does not match persisted input PCM")
-        verdict = evaluate_trace(records, scenario=case.scenario)
+        verdict = evaluate_trace(
+            records, scenario=case.scenario, profile=manifest.profile
+        )
         cases.append(
             {
                 "id": case.id,

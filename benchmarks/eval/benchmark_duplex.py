@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Run a replayable continuous VoiceChat protocol case against a pinned endpoint."""
+"""Run a replayable continuous native session protocol case against a pinned endpoint."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from benchmarks.duplex.artifacts import (
     source_fingerprint,
 )
 from benchmarks.duplex.client import PACKET_MS, SAMPLE_RATE, TRANSPORT, run_session
+from benchmarks.duplex.profiles import DEFAULT_PROFILE, PROFILES
 
 # Note (wenyao): Leave drain/close time before the server's 240 s deadline.
 SESSION_LIMIT_S = 240.0
@@ -36,7 +37,7 @@ async def run(args: argparse.Namespace, pcm: bytes, server: dict) -> dict:
     ]
     manifest = {
         "schema_version": 1,
-        "profile": "nemotron-voicechat-pr2188",
+        "profile": args.profile,
         "source": source_fingerprint(),
         "server": server,
         "config": {
@@ -47,12 +48,12 @@ async def run(args: argparse.Namespace, pcm: bytes, server: dict) -> dict:
             "transport": TRANSPORT,
             "unsupported": [
                 "response_cancel",
-                "automatic_speech_interruption",
-                "concurrent_native_sessions",
                 "session_resume",
                 "truncate",
             ],
             "unmeasured": [
+                "automatic_speech_interruption",
+                "concurrent_native_sessions",
                 "semantic_quality",
                 "acoustic_speech_onset",
                 "audible_stop_time",
@@ -76,6 +77,7 @@ async def run(args: argparse.Namespace, pcm: bytes, server: dict) -> dict:
             scenario=case["scenario"],
             trace_path=args.output / case["trace_file"],
             timeout_s=args.timeout,
+            profile=args.profile,
         )
     report = replay_run(args.output)
     (args.output / "report.json").write_text(
@@ -99,6 +101,7 @@ def main() -> None:
         "--output", type=Path, required=True, help="New immutable run directory"
     )
     add_server_identity_args(parser)
+    parser.add_argument("--profile", choices=PROFILES, default=DEFAULT_PROFILE)
     parser.add_argument(
         "--timeout", type=float, default=90.0, help="Whole-session deadline in seconds"
     )

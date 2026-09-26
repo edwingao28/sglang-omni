@@ -17,7 +17,7 @@ from pydantic import JsonValue
 from scipy.signal import resample_poly
 
 from benchmarks.duplex.client import PACKET_MS, SAMPLE_RATE
-from benchmarks.duplex.oracle import OUTPUT_SAMPLE_RATE
+from benchmarks.duplex.profiles import DEFAULT_PROFILE, PROFILES, ProfileName
 
 PLAYOUT_CAVEATS = [
     "physical_acoustics",
@@ -87,8 +87,12 @@ def normalize_audio(path: Path) -> tuple[bytes, dict[str, JsonValue]]:
     return pcm, record
 
 
-def reconstruct_output(variant_dir: Path) -> dict[str, JsonValue]:
+def reconstruct_output(
+    variant_dir: Path, *, profile: ProfileName = DEFAULT_PROFILE
+) -> dict[str, JsonValue]:
     """Rebuild model audio and a SIMULATED zero-buffer client playout from a trace."""
+    contract = PROFILES[profile]
+    output_sample_rate = contract.output_sample_rate
     errors: list[str] = []
     records = []
     with (variant_dir / "continuous.jsonl").open(encoding="utf-8") as handle:
@@ -154,7 +158,7 @@ def reconstruct_output(variant_dir: Path) -> dict[str, JsonValue]:
             if not pcm or len(pcm) % 2:
                 errors.append(f"trace line {line_number}: truncated PCM16 audio delta")
                 continue
-            receive_sample = round(elapsed_s * OUTPUT_SAMPLE_RATE)
+            receive_sample = round(elapsed_s * output_sample_rate)
             playout_start = max(len(playout) // 2, receive_sample)
             chunks.append(
                 {
@@ -171,7 +175,7 @@ def reconstruct_output(variant_dir: Path) -> dict[str, JsonValue]:
             playout.extend(bytes(2 * (playout_start - len(playout) // 2)))
             playout.extend(pcm)
             media.extend(pcm)
-    if origin_s is not None and not media:
+    if origin_s is not None and not media and contract.continuous_output:
         errors.append("no model output audio")
     worst = max(appends, key=lambda item: abs(item["send_deviation_s"]), default=None)
     input_timing = {
@@ -190,13 +194,22 @@ def reconstruct_output(variant_dir: Path) -> dict[str, JsonValue]:
             f"{worst['index']} (trace line {worst['trace_line']}) exceeds "
             f"{PACING_TOLERANCE_S}s"
         )
+    if not media and not contract.continuous_output and appends:
+        accepted = [
+            r["event"]["accepted_end_ms"]
+            for _, r in records
+            if r["direction"] == "receive"
+            and r["event"].get("type") == "sglang.input_audio.accepted"
+        ]
+        if accepted:
+            playout.extend(bytes(round(max(accepted) * output_sample_rate / 1000) * 2))
     pcm_sha256 = {}
     for name, pcm in (("output-media.wav", media), ("output-playout.wav", playout)):
-        if pcm:
+        if pcm or not contract.continuous_output:
             soundfile.write(
                 str(variant_dir / name),
                 np.frombuffer(bytes(pcm), dtype="<i2"),
-                OUTPUT_SAMPLE_RATE,
+                output_sample_rate,
                 subtype="PCM_16",
             )
             pcm_sha256[name] = hashlib.sha256(pcm).hexdigest()
@@ -215,12 +228,12 @@ def reconstruct_output(variant_dir: Path) -> dict[str, JsonValue]:
     summary = {
         "kind": "simulated_zero_buffer_client_playout",
         "not": PLAYOUT_CAVEATS,
-        "sample_rate": OUTPUT_SAMPLE_RATE,
+        "sample_rate": output_sample_rate,
         "origin": "first input_audio_buffer.append send time",
         "media_samples": len(media) // 2,
         "playout_samples": len(playout) // 2,
         "initial_delay_s": (
-            chunks[0]["playout_start_sample"] / OUTPUT_SAMPLE_RATE if chunks else None
+            chunks[0]["playout_start_sample"] / output_sample_rate if chunks else None
         ),
         "pcm_sha256": pcm_sha256,
         "input_timing": input_timing,

@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 
 from benchmarks.duplex.artifacts import add_server_identity_args, server_identity
+from benchmarks.duplex.profiles import DEFAULT_PROFILE, PROFILES
 from benchmarks.duplex.v15_evaluation import TIMELINES, accounting, load_run, score_run
 from benchmarks.duplex.v15_runner import run_pairs
 from benchmarks.duplex.v15_transcribe import transcribe_run
@@ -30,6 +31,7 @@ def record(args: argparse.Namespace) -> int:
             ),
             dataset_revision=args.dataset_revision,
             timeout_s=args.timeout,
+            profile=args.profile,
             sample_ids=args.sample_id,
             max_per_subset=args.max_per_subset,
         )
@@ -133,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
         "--output", type=Path, required=True, help="New immutable run directory"
     )
     add_server_identity_args(record_parser)
+    record_parser.add_argument("--profile", choices=PROFILES, default=DEFAULT_PROFILE)
     record_parser.add_argument(
         "--dataset-revision", required=True, help="Dataset release or archive digest"
     )

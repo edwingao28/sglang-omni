@@ -15,7 +15,6 @@ from pydantic import JsonValue
 
 from benchmarks.duplex import v15_behavior, v15_scoring
 from benchmarks.duplex.artifacts import source_fingerprint
-from benchmarks.duplex.oracle import OUTPUT_SAMPLE_RATE
 from benchmarks.duplex.v15_audio import write_json
 
 Timeline = Literal["simulated_playout", "media"]
@@ -157,7 +156,7 @@ def observed_end_s(variant_dir: Path, timeline: Timeline) -> float:
     """Length of the observed output window on the chosen timeline."""
     playout = json.loads((variant_dir / "playout.json").read_text())
     if timeline == "media":
-        return playout["media_samples"] / OUTPUT_SAMPLE_RATE
+        return playout["media_samples"] / playout["sample_rate"]
     else:
         origin_s, last_s = None, 0.0
         with (variant_dir / "continuous.jsonl").open(encoding="utf-8") as handle:
@@ -171,7 +170,9 @@ def observed_end_s(variant_dir: Path, timeline: Timeline) -> float:
                 ):
                     origin_s = record["time_s"]
         # Note (wenyao): Queued playout can outlast the last received event.
-        return max(last_s - origin_s, playout["playout_samples"] / OUTPUT_SAMPLE_RATE)
+        return max(
+            last_s - origin_s, playout["playout_samples"] / playout["sample_rate"]
+        )
 
 
 def score_run(

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Record the native VoiceChat session protocol over a real WebSocket."""
+"""Record the native full-duplex session protocol over a real WebSocket."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ from typing import Any
 
 import websockets
 
+from benchmarks.duplex.profiles import DEFAULT_PROFILE, PROFILES, ProfileName
+
 SAMPLE_RATE = 16000
 PACKET_MS = 80
 PACKET_BYTES = SAMPLE_RATE * PACKET_MS // 1000 * 2
@@ -23,6 +25,7 @@ FRAME_EXCERPT_CHARS = 200
 ADMISSION_DENIED_STATUS = 503
 ADMISSION_RETRIES = 3
 ADMISSION_BACKOFF_S = 0.25
+SEND_RECEIPTS_FILE = "input-send-receipts.json"
 # Note (wenyao): Keepalive and compression would perturb packet timing.
 TRANSPORT = {
     "max_message_bytes": MAX_MESSAGE_BYTES,
@@ -31,6 +34,8 @@ TRANSPORT = {
     "post_close_s": POST_CLOSE_SECONDS,
     "admission_retries": ADMISSION_RETRIES,
     "admission_backoff_s": ADMISSION_BACKOFF_S,
+    "input_end": "first append send start + unpadded input duration",
+    "input_send_receipts": SEND_RECEIPTS_FILE,
 }
 
 
@@ -41,6 +46,7 @@ async def run_session(
     scenario: str,
     trace_path: Path,
     timeout_s: float = 90.0,
+    profile: ProfileName = DEFAULT_PROFILE,
 ) -> None:
     """Save observations and failures; classification belongs to offline replay."""
     if scenario != "continuous":
@@ -48,20 +54,23 @@ async def run_session(
     if not pcm or len(pcm) % 2:
         raise ValueError("Input must be nonempty PCM16")
 
+    receipts: list[dict[str, Any]] = []
     with trace_path.open("x", encoding="utf-8", buffering=1) as trace_file:
 
-        def record(direction: str, event: dict[str, Any]) -> None:
+        def record(direction: str, event: dict[str, Any]) -> float:
+            now = time.perf_counter()
             trace_file.write(
                 json.dumps(
                     {
                         "direction": direction,
-                        "time_s": time.perf_counter(),
+                        "time_s": now,
                         "event": event,
                     },
                     allow_nan=False,
                 )
                 + "\n"
             )
+            return now
 
         async def admit() -> websockets.ClientConnection:
             attempt = 0
@@ -105,8 +114,17 @@ async def run_session(
                         "event_id": uuid.uuid4().hex,
                         **payload,
                     }
-                    record("send", event)
+                    started = record("send", event)
                     await ws.send(json.dumps(event))
+                    if event_type == "input_audio_buffer.append":
+                        receipts.append(
+                            {
+                                "event_id": event["event_id"],
+                                "seq": event["sglang"]["seq"],
+                                "start_s": started,
+                                "completed_s": time.perf_counter(),
+                            }
+                        )
 
                 async def settle(event_type: str) -> bool:
                     receipt = seen.setdefault(event_type, asyncio.Event())
@@ -154,7 +172,12 @@ async def run_session(
                     streamed = False
                     if await settle("session.created"):
                         await send(
-                            "session.update", session={"output_modalities": ["audio"]}
+                            "session.update",
+                            session={
+                                "output_modalities": list(
+                                    PROFILES[profile].output_modalities
+                                )
+                            },
                         )
                     if await settle("session.updated"):
                         streamed = True
@@ -182,8 +205,17 @@ async def run_session(
                                 },
                             )
                     if streamed:
-                        await send("sglang.input_audio.end")
-                        await settle("sglang.input_audio.drained")
+                        await asyncio.sleep(
+                            max(
+                                0.0,
+                                receipts[0]["start_s"]
+                                + len(pcm) / (2 * SAMPLE_RATE)
+                                - time.perf_counter(),
+                            )
+                        )
+                        if not aborted.is_set():
+                            await send("sglang.input_audio.end")
+                            await settle("sglang.input_audio.drained")
                     closed = seen.setdefault("session.closed", asyncio.Event())
                     if not fatal and not closed.is_set():
                         await send("session.close")
@@ -227,3 +259,8 @@ async def run_session(
             RuntimeError,
         ) as exc:
             record("error", {"message": f"{type(exc).__name__}: {exc}"})
+        finally:
+            trace_path.with_name(SEND_RECEIPTS_FILE).write_text(
+                json.dumps({"appends": receipts}, indent=2, allow_nan=False) + "\n",
+                encoding="utf-8",
+            )

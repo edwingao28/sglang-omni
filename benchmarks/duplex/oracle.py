@@ -9,19 +9,14 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
+from benchmarks.duplex.profiles import DEFAULT_PROFILE, PROFILES, ProfileName
+
 Identifier = Annotated[str, Field(min_length=1)]
 Nonnegative = Annotated[float, Field(ge=0)]
 
 INPUT_SAMPLE_RATE = 16000
-OUTPUT_SAMPLE_RATE = 22050
 INPUT_BYTES_PER_MS = INPUT_SAMPLE_RATE * 2 / 1000
 INPUT_BYTES_PER_S = INPUT_SAMPLE_RATE * 2
-OUTPUT_BYTES_PER_S = OUTPUT_SAMPLE_RATE * 2
-NATIVE_UNIT_MS = 80
-UNIT_INPUT_BYTES = INPUT_SAMPLE_RATE * NATIVE_UNIT_MS // 1000 * 2
-
-# Note (wenyao): VoiceChat emits one 80 ms code frame per native input unit.
-OUTPUT_SAMPLES_PER_UNIT = OUTPUT_SAMPLE_RATE * NATIVE_UNIT_MS // 1000
 MAX_ADMISSION_ATTEMPTS = 3
 SESSION_TIMEOUT_S = 240
 
@@ -29,9 +24,6 @@ REQUIRED_CAPABILITIES = {
     "interaction": "native",
     "native_full_duplex": True,
     "input_audio_format": {"type": "audio/pcm", "rate": INPUT_SAMPLE_RATE},
-    "output_audio_format": {"type": "audio/pcm", "rate": OUTPUT_SAMPLE_RATE},
-    "output_modalities": ["audio"],
-    "native_unit_ms": NATIVE_UNIT_MS,
     "tail_policy": "pad",
     "microturn_ms": None,
     "client_commit": False,
@@ -43,7 +35,6 @@ REQUIRED_CAPABILITIES = {
     "supports_truncate": False,
 }
 
-# Note (wenyao): Only input EOS produces native completion; close is cleanup.
 TERMINAL_REASONS = {
     "stop": ("completed", "sglang.input_audio.end"),
     "client_closed": ("cancelled", "session.close"),
@@ -154,10 +145,23 @@ def evaluate_trace(
     records: list[dict[str, JsonValue]],
     *,
     scenario: Literal["continuous"],
+    profile: ProfileName = DEFAULT_PROFILE,
 ) -> dict[str, JsonValue]:
     """Report protocol failures separately from an unexercised duplex scenario."""
     if scenario != "continuous":
         raise ValueError(f"unsupported scenario: {scenario}")
+    contract = PROFILES[profile]
+    unit_ms = contract.native_unit_ms
+    unit_input_bytes = INPUT_SAMPLE_RATE * unit_ms // 1000 * 2
+    required_capabilities = {
+        **REQUIRED_CAPABILITIES,
+        "native_unit_ms": unit_ms,
+        "output_audio_format": {
+            "type": "audio/pcm",
+            "rate": contract.output_sample_rate,
+        },
+        "output_modalities": list(contract.output_modalities),
+    }
     violations: list[str] = []
 
     def check(condition: bool, message: str) -> None:
@@ -280,7 +284,7 @@ def evaluate_trace(
                 )
                 check(isinstance(grant, dict), "missing granted capabilities")
                 if isinstance(grant, dict):
-                    for key, expected in REQUIRED_CAPABILITIES.items():
+                    for key, expected in required_capabilities.items():
                         check(
                             type(grant.get(key)) is type(expected)
                             and grant.get(key) == expected,
@@ -323,8 +327,7 @@ def evaluate_trace(
                 )
                 check(event.discarded_ms == 0, "accepted input was discarded")
                 expected_padding = (
-                    math.ceil(expected_ms / NATIVE_UNIT_MS) * NATIVE_UNIT_MS
-                    - expected_ms
+                    math.ceil(expected_ms / unit_ms) * unit_ms - expected_ms
                 )
                 check(event.padding_ms == expected_padding, "drained padding mismatch")
                 drained = True
@@ -344,7 +347,7 @@ def evaluate_trace(
                         "native unit receipts are not increasing",
                     )
                     check(
-                        media.t_start_ms == unit * NATIVE_UNIT_MS,
+                        media.t_start_ms == unit * unit_ms,
                         "native unit media time is not unit-aligned",
                     )
                     units.append((unit, media.duration_ms))
@@ -390,10 +393,11 @@ def evaluate_trace(
                                 status == expected_status,
                                 f"terminal status {status} contradicts reason {reason}",
                             )
-                            check(
-                                bool(counts["send", command]),
-                                f"terminal reason {reason} without its client command",
-                            )
+                            if reason != "stop" or contract.stop_requires_eos:
+                                check(
+                                    bool(counts["send", command]),
+                                    f"terminal reason {reason} without its client command",
+                                )
                         # Note (wenyao): The pump consumes EOS before enqueueing drain.
                         check(
                             reason != "stop" or not drained,
@@ -464,7 +468,7 @@ def evaluate_trace(
         check(counts[direction, typ] == 1, f"expected exactly one {direction} {typ}")
     check(bool(input_times), "missing audio input")
     input_ms = input_bytes / INPUT_BYTES_PER_MS
-    expected_units = math.ceil(input_bytes / UNIT_INPUT_BYTES)
+    expected_units = math.ceil(input_bytes / unit_input_bytes)
     # Note (wenyao): Only unit-aligned input produces an extra empty EOS unit.
     nonempty = [duration for _, duration in units if duration]
     check(
@@ -481,7 +485,7 @@ def evaluate_trace(
         or (
             len(units) == len(nonempty) + 1
             and not units[-1][1]
-            and not input_bytes % UNIT_INPUT_BYTES
+            and not input_bytes % unit_input_bytes
         ),
         "an empty EOS unit requires exactly unit-aligned input",
     )
@@ -489,12 +493,15 @@ def evaluate_trace(
         sum(duration for _, duration in units) == input_ms,
         "native unit durations do not account for the accepted input",
     )
-    expected_output = expected_units * OUTPUT_SAMPLES_PER_UNIT * 2
-    check(
-        output_bytes == expected_output,
-        f"output audio is not conserved: {output_bytes} of "
-        f"{expected_output} bytes for {expected_units} units",
-    )
+    if contract.continuous_output:
+        expected_output = (
+            expected_units * contract.output_sample_rate * unit_ms // 1000 * 2
+        )
+        check(
+            output_bytes == expected_output,
+            f"output audio is not conserved: {output_bytes} of "
+            f"{expected_output} bytes for {expected_units} units",
+        )
     for event_id, sent_command in sent.items():
         if sent_command.event.type == "input_audio_buffer.append":
             check(
@@ -513,7 +520,7 @@ def evaluate_trace(
     }
     metrics = {
         "input_audio_s": input_bytes / INPUT_BYTES_PER_S,
-        "output_audio_s": output_bytes / OUTPUT_BYTES_PER_S,
+        "output_audio_s": output_bytes / (contract.output_sample_rate * 2),
         "admission_denials": admissions,
         "first_audio_packet_s": (
             audio_times[0] - input_times[0] if audio_times and input_times else None
@@ -530,7 +537,11 @@ def evaluate_trace(
         "status": (
             "fail"
             if violations
-            else "pass" if all(coverage.values()) else "not_exercised"
+            else (
+                "pass"
+                if not contract.continuous_output or all(coverage.values())
+                else "not_exercised"
+            )
         ),
         "violations": violations,
         "coverage": coverage,

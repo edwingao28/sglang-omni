@@ -501,7 +501,49 @@ does permit resending the same sequence, but retrying would measure client-side
 recovery instead of the endpoint's behaviour under real-time pacing, so a
 `buffer_overflow` is recorded as a failure and the client stops driving input.
 
-## Full-Duplex-Bench v1.5 overlap scenarios (VoiceChat)
+## Native duplex model profiles
+
+Both `benchmark_duplex.py` and `benchmark_duplex_v15.py record` accept
+`--profile`. The default remains `nemotron-voicechat-pr2188`; saved manifests
+select the same profile during offline replay.
+
+| Profile | Native unit | Output PCM16 | Response completion | Output length |
+| --- | --- | --- | --- | --- |
+| `nemotron-voicechat-pr2188` | 80 ms | 22,050 Hz, audio | After input EOS | Fixed samples per input unit |
+| `minicpmo-native-pr2377` | 1,000 ms | 24,000 Hz, audio and text | Natural turn end or input EOS | Variable; silence is valid |
+
+Both profiles check the declared capabilities, causal receipts, complete input
+accounting, native units, terminal ordering, EOS drain and session closure.
+Only VoiceChat requires continuous output and fixed output-sample conservation.
+For MiniCPM-o, `input_output_overlap` remains an observation, not a requirement
+that every sample elicit speech. A protocol pass does not establish correct
+conversational behavior. WAV reconstruction, duration accounting and optional
+Whisper resampling use the selected profile's output rate.
+The recorder also saves append-send completion receipts in
+`input-send-receipts.json` and waits until the complete input duration has
+elapsed before sending EOS, so offline analysis can verify the input window.
+
+Start a compatible MiniCPM-o server using its full-duplex example configuration,
+then record all v1.5 pairs:
+
+```bash
+python -m benchmarks.eval.benchmark_duplex_v15 record \
+    --profile minicpmo-native-pr2377 \
+    --dataset-root data/full-duplex-bench-v1.5 \
+    --dataset-revision "$DATASET_REVISION" \
+    --url ws://127.0.0.1:8097/v1/realtime \
+    --server-revision "$MINICPMO_SERVER_REVISION" \
+    --model openbmb/MiniCPM-o-4_5 \
+    --model-revision "$MODEL_REVISION" \
+    --output results/minicpmo-v15 --timeout 90
+```
+
+Pin the server and model revisions separately. Sending 80 ms transport packets
+does not change MiniCPM-o's one-second native processing unit. The v1.5 scoring
+commands below retain their documented measurement scope; adding a model
+profile does not change their definitions or imply paper-identical evaluation.
+
+## Full-Duplex-Bench v1.5 overlap scenarios
 
 `benchmark_duplex_v15.py` runs the four v1.5 overlap subsets
 (`user_interruption`, `user_backchannel`, `talking_to_other`,

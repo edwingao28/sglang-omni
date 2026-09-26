@@ -17,7 +17,7 @@ from pydantic import JsonValue
 from benchmarks.duplex import v15_dataset
 from benchmarks.duplex.artifacts import replay_run, source_fingerprint
 from benchmarks.duplex.client import PACKET_MS, SAMPLE_RATE, TRANSPORT, run_session
-from benchmarks.duplex.oracle import OUTPUT_SAMPLE_RATE
+from benchmarks.duplex.profiles import DEFAULT_PROFILE, ProfileName
 from benchmarks.duplex.v15_audio import (
     PACING_TOLERANCE_S,
     normalize_audio,
@@ -35,7 +35,6 @@ RUNNER_FILES = (
     "benchmarks/duplex/v15_dataset.py",
     "benchmarks/duplex/v15_runner.py",
 )
-PROFILE = "nemotron-voicechat-pr2188"
 VARIANT_STATUSES = ("pending", "invalid", "error", "fail", "not_exercised", "pass")
 
 
@@ -74,6 +73,7 @@ async def run_pairs(
     dataset: ModuleType = v15_dataset,
     variants: dict[str, str] = VARIANTS,
     kind: str = RUN_KIND,
+    profile: ProfileName = DEFAULT_PROFILE,
 ) -> dict[str, JsonValue]:
     """Run every selected sample variant; each failure stays in the selected denominator.
 
@@ -128,7 +128,7 @@ async def run_pairs(
         {
             "schema_version": 1,
             "kind": kind,
-            "profile": PROFILE,
+            "profile": profile,
             "source": source,
             "server": server,
             "dataset": {
@@ -209,7 +209,7 @@ async def run_pairs(
                     variant_dir / "manifest.json",
                     {
                         "schema_version": 1,
-                        "profile": PROFILE,
+                        "profile": profile,
                         "source": source,
                         "server": server,
                         "config": {
@@ -256,11 +256,12 @@ async def run_pairs(
                     scenario="continuous",
                     trace_path=variant_dir / "continuous.jsonl",
                     timeout_s=timeout_s,
+                    profile=profile,
                 )
                 report = replay_run(variant_dir)
                 write_json(variant_dir / "report.json", report)
                 (case,) = report["cases"]
-                playout = reconstruct_output(variant_dir)
+                playout = reconstruct_output(variant_dir, profile=profile)
             except Exception as exc:
                 logger.exception(f"variant {entry['id']}/{variant} failed")
                 state["status"] = "error"
@@ -274,9 +275,10 @@ async def run_pairs(
                 state["input_timing"] = playout["input_timing"]
                 state["output"] = {
                     "media_pcm_sha256": playout["pcm_sha256"].get("output-media.wav"),
-                    "media_duration_s": playout["media_samples"] / OUTPUT_SAMPLE_RATE,
+                    "media_duration_s": playout["media_samples"]
+                    / playout["sample_rate"],
                     "playout_duration_s": playout["playout_samples"]
-                    / OUTPUT_SAMPLE_RATE,
+                    / playout["sample_rate"],
                     "initial_delay_s": playout["initial_delay_s"],
                 }
             state["files"] = {
