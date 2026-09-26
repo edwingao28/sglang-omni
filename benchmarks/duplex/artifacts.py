@@ -37,7 +37,7 @@ class CaseArtifact(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     id: str = Field(min_length=1)
-    scenario: Literal["continuous", "cancel_resume"]
+    scenario: Literal["continuous"]
     trace_file: str
 
 

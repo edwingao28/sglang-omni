@@ -29,15 +29,11 @@ from benchmarks.duplex.oracle import evaluate_trace
 
 FIXTURE_PCM = b"\x02\x00" * 10240
 FIXTURE_PACKETS = 8
-# Note (wenyao): Codec history and its held-back tail survive cancellation.
 UNIT_BYTES = 2560
 SAMPLES_PER_FRAME = 1764
 TAIL_HOLDBACK_SAMPLES = 256
 # Note (wenyao): Adapter teardown can delay close beyond the observation window.
 FATAL_CLOSE_DELAY_S = POST_CLOSE_SECONDS * 3
-# Note (wenyao): Cancellation waits for the in-flight unit under a command lock.
-CANCEL_ACK_CADENCES = 2
-CANCEL_ACK_DELAY_S = CANCEL_ACK_CADENCES * PACKET_MS / 1000
 PeerMode = Literal[
     "healthy",
     "server_error",
@@ -66,7 +62,6 @@ GRANTED = {
     "microturn_ms": None,
     "tail_policy": "pad",
     "supports_server_interrupt": False,
-    "cancel_is_noop": False,
     "supports_truncate": False,
     "supports_resume": False,
     "partial_style": "append_only",
@@ -93,7 +88,6 @@ class DuplexPeer:
         self.received: list[dict] = []
         self.sent: list[dict] = []
         self.pcm = bytearray()
-        self.epoch = 0
         self.chunk_seq = 0
         self.frames = 0
         self.emitted = 0
@@ -114,7 +108,7 @@ class DuplexPeer:
                 {
                     "type": "response.created",
                     "response": {
-                        "id": f"response_{self.epoch}",
+                        "id": "response_0",
                         "object": "realtime.response",
                         "status": "in_progress",
                         "output": [],
@@ -130,8 +124,8 @@ class DuplexPeer:
             websocket,
             {
                 "type": "response.output_audio.delta",
-                "response_id": f"response_{self.epoch}",
-                "item_id": f"item_{self.epoch}",
+                "response_id": "response_0",
+                "item_id": "item_0",
                 "output_index": 0,
                 "content_index": 0,
                 "delta": base64.b64encode(b"\x01\x00" * samples).decode(),
@@ -168,14 +162,12 @@ class DuplexPeer:
     async def close_session(
         self, websocket: ServerConnection, reason: str, client_event_id: str | None
     ) -> None:
-        self.epoch += 1
         await self.send(
             websocket,
             {
                 "type": "session.closed",
                 "reason": reason,
                 "client_event_id": client_event_id,
-                "held": {"kv_tokens": 0, "slots": {}, "bytes": 0},
             },
         )
 
@@ -199,7 +191,6 @@ class DuplexPeer:
 
     async def send(self, websocket: ServerConnection, event: dict) -> None:
         event["event_id"] = f"server_{len(self.sent)}"
-        event.setdefault("sglang", {})["epoch"] = self.epoch
         self.sent.append(event)
         await websocket.send(json.dumps(event))
 
@@ -210,8 +201,8 @@ class DuplexPeer:
             websocket,
             {
                 "type": "response.output_audio.done",
-                "response_id": f"response_{self.epoch}",
-                "item_id": f"item_{self.epoch}",
+                "response_id": "response_0",
+                "item_id": "item_0",
                 "output_index": 0,
                 "content_index": 0,
             },
@@ -221,13 +212,13 @@ class DuplexPeer:
             {
                 "type": "response.done",
                 "response": {
-                    "id": f"response_{self.epoch}",
+                    "id": "response_0",
                     "object": "realtime.response",
                     "status": status,
                     "status_details": {"reason": reason},
                     "output": [
                         {
-                            "id": f"item_{self.epoch}",
+                            "id": "item_0",
                             "object": "realtime.item",
                             "type": "message",
                             "role": "assistant",
@@ -303,7 +294,7 @@ class DuplexPeer:
                 elif self.mode == "nonfinite":
                     await websocket.send(
                         '{"type":"sglang.unit.done","event_id":"server_nan",'
-                        '"unit_id":"unit_0","sglang":{"epoch":0,"backlog_ms":NaN}}'
+                        '"unit_id":"unit_0","sglang":{"backlog_ms":NaN}}'
                     )
                     await websocket.wait_closed()
                     return
@@ -330,22 +321,6 @@ class DuplexPeer:
                             unit,
                         )
                         await self.emit_unit_done(websocket, unit, PACKET_MS)
-            elif kind == "response.cancel":
-                await asyncio.sleep(CANCEL_ACK_DELAY_S)
-                await self.finish_response(websocket, "cancelled", "client_cancelled")
-                old_epoch = self.epoch
-                self.epoch += 1
-                await self.send(
-                    websocket,
-                    {
-                        "type": "sglang.response.cancelled",
-                        "old_epoch": old_epoch,
-                        "epoch": self.epoch,
-                        "response_ids": [f"response_{old_epoch}"],
-                        "client_event_id": event["event_id"],
-                        "input_policy": "preserve",
-                    },
-                )
             elif kind == "sglang.input_audio.end":
                 accepted_ms = len(self.pcm) / 32
                 units = -(-len(self.pcm) // UNIT_BYTES)
@@ -427,11 +402,10 @@ def output_samples(records: list[dict]) -> int:
     )
 
 
-@pytest.mark.parametrize("scenario", ["continuous", "cancel_resume"])
-def test_client_records_complete_native_session(tmp_path: Path, scenario: str) -> None:
+def test_client_records_complete_native_session(tmp_path: Path) -> None:
     peer = DuplexPeer()
-    records = asyncio.run(capture(peer, scenario, tmp_path / "trace.jsonl"))
-    result = evaluate_trace(records, scenario=scenario)
+    records = asyncio.run(capture(peer, "continuous", tmp_path / "trace.jsonl"))
+    result = evaluate_trace(records, scenario="continuous")
 
     assert result["status"] == "pass", result
     assert bytes(peer.pcm) == FIXTURE_PCM
@@ -450,49 +424,32 @@ def test_client_records_complete_native_session(tmp_path: Path, scenario: str) -
     # Note (wenyao): Absolute pacing permits catch-up packets, so measure total span.
     paced_s = (FIXTURE_PACKETS - 1) * PACKET_MS / 1000
     span_s = appends[-1]["time_s"] - appends[0]["time_s"]
-    assert paced_s * 0.8 <= span_s <= paced_s + CANCEL_ACK_DELAY_S + 1.0, span_s
+    assert paced_s * 0.8 <= span_s <= paced_s + 1.0, span_s
 
-    # Note (wenyao): This peer keeps codec history and loses no output on cancel.
     units = -(-len(FIXTURE_PCM) // UNIT_BYTES)
     assert output_samples(records) == units * SAMPLES_PER_FRAME
     assert result["metrics"]["output_audio_s"] == pytest.approx(
         units * SAMPLES_PER_FRAME / 22050
     )
 
-    if scenario == "cancel_resume":
-        cancel = next(
-            index
-            for index, record in enumerate(records)
-            if record["direction"] == "send"
-            and record["event"]["type"] == "response.cancel"
+    assert all("epoch" not in event.get("sglang", {}) for event in peer.sent)
+    assert "held" not in peer.sent[-1]
+    assert "cancel_is_noop" not in GRANTED
+    assert "response.cancel" not in [event["type"] for event in peer.received]
+
+
+def test_removed_cancel_scenario_is_rejected_before_connection(tmp_path: Path) -> None:
+    path = tmp_path / "trace.jsonl"
+    with pytest.raises(ValueError, match="unsupported scenario: cancel_resume"):
+        asyncio.run(
+            run_session(
+                "ws://127.0.0.1:1/v1/realtime",
+                FIXTURE_PCM,
+                scenario="cancel_resume",
+                trace_path=path,
+            )
         )
-        ack = next(
-            index
-            for index, record in enumerate(records)
-            if record["event"]["type"] == "sglang.response.cancelled"
-        )
-        assert any(
-            record["direction"] == "receive"
-            and record["event"]["type"] == "response.output_audio.delta"
-            for record in records[:cancel]
-        )
-        assert [r for r in appends if records.index(r) > cancel]
-        ack_lag_s = records[ack]["time_s"] - records[cancel]["time_s"]
-        assert ack_lag_s >= CANCEL_ACK_DELAY_S * 0.9, ack_lag_s
-        assert result["metrics"]["cancel_ack_s"] == pytest.approx(ack_lag_s, abs=1e-6)
-        assert not [r for r in appends if cancel < records.index(r) < ack]
-        resumed = [r for r in appends if records.index(r) > ack]
-        assert len(resumed) > CANCEL_ACK_CADENCES
-        resumed_paced_s = (len(resumed) - 1) * PACKET_MS / 1000
-        resumed_span_s = resumed[-1]["time_s"] - resumed[0]["time_s"]
-        assert (
-            resumed_paced_s * 0.8 <= resumed_span_s <= resumed_paced_s + 1.0
-        ), resumed_span_s
-        assert any(
-            r["event"]["type"] == "response.output_audio.delta"
-            and r["event"]["sglang"]["epoch"] == 1
-            for r in records[ack + 1 :]
-        )
+    assert not path.exists()
 
 
 @pytest.mark.parametrize(
@@ -766,8 +723,8 @@ def test_benchmark_cli_records_replays_and_rejects_tampered_audio(
     report = json.loads((run_dir / "report.json").read_text())
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert json.loads(stdout) == report["summary"]
-    assert report["summary"]["selected"] == 2
-    assert report["summary"]["passed"] == 2
+    assert report["summary"]["selected"] == 1
+    assert report["summary"]["passed"] == 1
     assert report["summary"]["failed"] == 0
     assert report["summary"]["not_exercised"] == 0
     assert report["summary"]["qualified_metrics"]
@@ -782,7 +739,9 @@ def test_benchmark_cli_records_replays_and_rejects_tampered_audio(
     assert manifest["config"]["input_duration_s"] == pytest.approx(
         FIXTURE_PACKETS * PACKET_MS / 1000
     )
-    assert len(manifest["cases"]) == 2
+    assert len(manifest["cases"]) == 1
+    assert "response_cancel" in manifest["config"]["unsupported"]
+    assert "server_resource_release" in manifest["config"]["unmeasured"]
     for case in manifest["cases"]:
         assert (run_dir / case["trace_file"]).stat().st_size > 0
 
@@ -804,9 +763,9 @@ def test_benchmark_cli_records_replays_and_rejects_tampered_audio(
     )
     assert code == 1, (stdout, stderr)
     corrupted_report = json.loads(stdout)
-    assert corrupted_report["summary"]["selected"] == 2
+    assert corrupted_report["summary"]["selected"] == 1
     assert corrupted_report["summary"]["passed"] == 0
-    assert corrupted_report["summary"]["failed"] == 2
+    assert corrupted_report["summary"]["failed"] == 1
     assert corrupted_report["summary"]["qualified_metrics"] == {}
     assert all(
         "input PCM SHA256 mismatch" in case["artifact_errors"]
@@ -814,32 +773,26 @@ def test_benchmark_cli_records_replays_and_rejects_tampered_audio(
     )
 
 
-def test_benchmark_cli_reports_every_case_when_one_attempt_fails(
-    tmp_path: Path,
-) -> None:
+def test_benchmark_cli_retains_failed_attempt(tmp_path: Path) -> None:
     wav_path = tmp_path / "input.wav"
     run_dir = tmp_path / "run"
     write_fixture_wav(wav_path)
-    connections = itertools.count()
 
     async def handler(websocket: ServerConnection) -> None:
-        mode = "healthy" if next(connections) == 0 else "disconnect"
-        await DuplexPeer(mode).handler(websocket)
+        await DuplexPeer("disconnect").handler(websocket)
 
     code, stdout, stderr = asyncio.run(serve_cli(handler, run_dir, wav_path, "5"))
     assert code == 1, (stdout, stderr)
     report = json.loads((run_dir / "report.json").read_text())
     assert json.loads(stdout) == report["summary"]
-    assert report["summary"]["selected"] == 2
-    assert report["summary"]["passed"] == 1
+    assert report["summary"]["selected"] == 1
+    assert report["summary"]["passed"] == 0
     assert report["summary"]["failed"] == 1
-    assert [case["id"] for case in report["cases"]] == ["continuous", "cancel-resume"]
-    assert report["cases"][0]["status"] == "pass"
-    assert report["cases"][1]["status"] == "fail"
-    assert report["summary"]["qualified_metrics"]
+    assert report["cases"][0]["id"] == "continuous"
+    assert report["cases"][0]["status"] == "fail"
+    assert report["summary"]["qualified_metrics"] == {}
     assert report["summary"]["diagnostic_metrics"]
-    for case in report["cases"]:
-        assert (run_dir / f"{case['id'].replace('_', '-')}.jsonl").stat().st_size > 0
+    assert (run_dir / "continuous.jsonl").stat().st_size > 0
 
 
 def test_benchmark_cli_rejects_a_deadline_the_input_cannot_meet(

@@ -43,8 +43,8 @@ async def run_session(
     timeout_s: float = 90.0,
 ) -> None:
     """Save observations and failures; classification belongs to offline replay."""
-    if scenario not in {"continuous", "cancel_resume"}:
-        raise ValueError(f"Unknown scenario: {scenario}")
+    if scenario != "continuous":
+        raise ValueError(f"unsupported scenario: {scenario}")
     if not pcm or len(pcm) % 2:
         raise ValueError("Input must be nonempty PCM16")
 
@@ -157,10 +157,6 @@ async def run_session(
                             "session.update", session={"output_modalities": ["audio"]}
                         )
                     if await settle("session.updated"):
-                        first_output = seen.setdefault(
-                            "response.output_audio.delta", asyncio.Event()
-                        )
-                        cancelled = False
                         streamed = True
                         start_s = time.perf_counter()
                         for seq, offset in enumerate(range(0, len(pcm), PACKET_BYTES)):
@@ -175,19 +171,6 @@ async def run_session(
                             if aborted.is_set():
                                 streamed = False
                                 break
-                            if (
-                                scenario == "cancel_resume"
-                                and not cancelled
-                                and offset >= len(pcm) // 2
-                                and first_output.is_set()
-                            ):
-                                await send("response.cancel")
-                                # Note (wenyao): Cancel blocks reads; stale pacing bursts.
-                                if not await settle("sglang.response.cancelled"):
-                                    streamed = False
-                                    break
-                                start_s = time.perf_counter() - seq * PACKET_MS / 1000
-                                cancelled = True
                             await send(
                                 "input_audio_buffer.append",
                                 audio=base64.b64encode(

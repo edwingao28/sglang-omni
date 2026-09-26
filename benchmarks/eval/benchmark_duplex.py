@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Run two replayable native VoiceChat protocol cases against a pinned endpoint."""
+"""Run a replayable continuous VoiceChat protocol case against a pinned endpoint."""
 
 from __future__ import annotations
 
@@ -33,11 +33,6 @@ async def run(args: argparse.Namespace, pcm: bytes, server: dict) -> dict:
             "scenario": "continuous",
             "trace_file": "continuous.jsonl",
         },
-        {
-            "id": "cancel-resume",
-            "scenario": "cancel_resume",
-            "trace_file": "cancel-resume.jsonl",
-        },
     ]
     manifest = {
         "schema_version": 1,
@@ -51,6 +46,7 @@ async def run(args: argparse.Namespace, pcm: bytes, server: dict) -> dict:
             "input_duration_s": len(pcm) / (SAMPLE_RATE * 2),
             "transport": TRANSPORT,
             "unsupported": [
+                "response_cancel",
                 "automatic_speech_interruption",
                 "concurrent_native_sessions",
                 "session_resume",
@@ -60,6 +56,7 @@ async def run(args: argparse.Namespace, pcm: bytes, server: dict) -> dict:
                 "semantic_quality",
                 "acoustic_speech_onset",
                 "audible_stop_time",
+                "server_resource_release",
             ],
         },
         "input": {

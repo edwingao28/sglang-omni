@@ -44,9 +44,9 @@ def recorded_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
                 "trace_file": "continuous.jsonl",
             },
             {
-                "id": "cancel-resume",
-                "scenario": "cancel_resume",
-                "trace_file": "cancel-resume.jsonl",
+                "id": "continuous-repeat",
+                "scenario": "continuous",
+                "trace_file": "continuous-repeat.jsonl",
             },
         ],
     }
@@ -100,7 +100,7 @@ def test_replay_accounts_for_every_selected_case(recorded_run: Path) -> None:
 def test_bad_trace_retains_selected_denominator(
     recorded_run: Path, defect: str
 ) -> None:
-    path = recorded_run / "cancel-resume.jsonl"
+    path = recorded_run / "continuous-repeat.jsonl"
     if defect == "missing":
         path.unlink()
     elif defect == "truncated":
@@ -236,13 +236,18 @@ def test_duplicate_selected_identity_fails_without_dropping_cases(
 def test_not_exercised_is_not_pass_or_qualified_timing(
     recorded_run: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    path = recorded_run / "continuous-repeat.jsonl"
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    records[-1]["time_s"] = 2.0
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+
     def evaluate(records: list[dict], scenario: str) -> dict:
-        cancelling = scenario == "cancel_resume"
+        unexercised = records[-1]["time_s"] == 2.0
         return {
-            "status": "not_exercised" if cancelling else "pass",
+            "status": "not_exercised" if unexercised else "pass",
             "violations": [],
-            "coverage": {"input_output_overlap": not cancelling},
-            "metrics": {"first_audio_packet_s": 0.4 if cancelling else 0.2},
+            "coverage": {"input_output_overlap": not unexercised},
+            "metrics": {"first_audio_packet_s": 0.4 if unexercised else 0.2},
         }
 
     monkeypatch.setattr(artifacts, "evaluate_trace", evaluate)
@@ -267,9 +272,9 @@ def test_replay_grades_real_traces_with_the_real_oracle(tmp_path: Path) -> None:
             "trace_file": "continuous.jsonl",
         },
         {
-            "id": "cancel-resume",
-            "scenario": "cancel_resume",
-            "trace_file": "cancel-resume.jsonl",
+            "id": "continuous-repeat",
+            "scenario": "continuous",
+            "trace_file": "continuous-repeat.jsonl",
         },
     ]
     (tmp_path / "manifest.json").write_text(
@@ -293,8 +298,8 @@ def test_replay_grades_real_traces_with_the_real_oracle(tmp_path: Path) -> None:
         )
     )
     for case in cases:
-        records = trace_fixture(case["scenario"] == "cancel_resume")
-        if case["scenario"] == "cancel_resume":
+        records = trace_fixture()
+        if case["id"] == "continuous-repeat":
             records.insert(
                 0,
                 {
@@ -316,7 +321,7 @@ def test_replay_grades_real_traces_with_the_real_oracle(tmp_path: Path) -> None:
     assert result["cases"][1]["metrics"]["admission_denials"] == 1
     assert [case["violations"] for case in result["cases"]] == [[], []]
     assert result["cases"][0]["coverage"] == {"input_output_overlap": True}
-    assert result["cases"][1]["coverage"]["output_after_cancel"] is True
+    assert result["cases"][1]["coverage"] == {"input_output_overlap": True}
     assert result["summary"]["qualified_metrics"]["input_audio_s"] == {
         "n": 2,
         "mean": pytest.approx(0.16),
@@ -326,7 +331,7 @@ def test_replay_grades_real_traces_with_the_real_oracle(tmp_path: Path) -> None:
     assert result["summary"]["diagnostic_metrics"] == {}
 
 
-def test_replay_counts_healthy_case_beside_malformed_epoch(
+def test_replay_counts_healthy_case_beside_uncorrelated_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
     pcm = b"\x00\x00" * 2560
@@ -338,9 +343,9 @@ def test_replay_counts_healthy_case_beside_malformed_epoch(
             "trace_file": "continuous.jsonl",
         },
         {
-            "id": "cancel-resume",
-            "scenario": "cancel_resume",
-            "trace_file": "cancel-resume.jsonl",
+            "id": "continuous-repeat",
+            "scenario": "continuous",
+            "trace_file": "continuous-repeat.jsonl",
         },
     ]
     (tmp_path / "manifest.json").write_text(
@@ -364,13 +369,13 @@ def test_replay_counts_healthy_case_beside_malformed_epoch(
         )
     )
     for case in cases:
-        records = trace_fixture(case["scenario"] == "cancel_resume")
-        if case["scenario"] == "cancel_resume":
+        records = trace_fixture()
+        if case["id"] == "continuous-repeat":
             next(
                 record["event"]
                 for record in records
                 if record["event"]["type"] == "sglang.input_audio.accepted"
-            )["sglang"].pop("epoch")
+            ).pop("client_event_id")
         (tmp_path / case["trace_file"]).write_text(
             "".join(json.dumps(record) + "\n" for record in records)
         )
@@ -384,7 +389,7 @@ def test_replay_counts_healthy_case_beside_malformed_epoch(
     assert report["summary"]["failed"] == 1
     assert report["cases"][0]["status"] == "pass"
     assert (
-        "sglang.input_audio.accepted: missing output epoch"
+        "sglang.input_audio.accepted: missing matching prior client event"
         in report["cases"][1]["violations"]
     )
     assert report["summary"]["qualified_metrics"]["input_audio_s"]["n"] == 1
@@ -500,3 +505,14 @@ def test_server_identity_records_unreachable_models_endpoint() -> None:
 def test_server_identity_rejects_unpinned_claims(kwargs: dict, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         artifacts.server_identity("ws://127.0.0.1:1/v1/realtime", **kwargs)
+
+
+def test_legacy_cancel_manifest_requires_its_recorded_harness(
+    recorded_run: Path,
+) -> None:
+    path = recorded_run / "manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["cases"][1]["scenario"] = "cancel_resume"
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(ValidationError, match="scenario"):
+        artifacts.replay_run(recorded_run)

@@ -161,7 +161,6 @@ def reconstruct_output(variant_dir: Path) -> dict[str, JsonValue]:
                     "index": len(chunks),
                     "trace_line": line_number,
                     "response_id": event.get("response_id"),
-                    "epoch": event.get("sglang", {}).get("epoch"),
                     "receipt_s": elapsed_s,
                     "receive_sample": receive_sample,
                     "samples": len(pcm) // 2,

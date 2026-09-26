@@ -216,7 +216,6 @@ def audio_delta(time_s: float, samples: int, value: int) -> dict:
             "delta": base64.b64encode(
                 np.full(samples, value, "<i2").tobytes()
             ).decode(),
-            "sglang": {"epoch": 0},
         },
     }
 
@@ -268,6 +267,7 @@ def test_playout_keeps_initial_delay_and_mid_stream_gap(tmp_path: Path) -> None:
     playout = json.loads((tmp_path / "playout.json").read_text())
     assert summary["errors"] == []
     assert playout["kind"] == "simulated_zero_buffer_client_playout"
+    assert all("epoch" not in chunk for chunk in playout["chunks"])
     assert [c["receive_sample"] for c in playout["chunks"]] == [11025, 12128, 33075]
     assert [c["media_start_sample"] for c in playout["chunks"]] == [0, 2205, 4410]
     assert [c["playout_start_sample"] for c in playout["chunks"]] == [

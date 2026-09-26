@@ -34,7 +34,6 @@ REQUIRED_CAPABILITIES = {
     "native_unit_ms": NATIVE_UNIT_MS,
     "tail_policy": "pad",
     "microturn_ms": None,
-    "cancel_is_noop": False,
     "client_commit": False,
     "proactive_output": False,
     "pressure_policy": "reject",
@@ -47,7 +46,6 @@ REQUIRED_CAPABILITIES = {
 # Note (wenyao): Only input EOS produces native completion; close is cleanup.
 TERMINAL_REASONS = {
     "stop": ("completed", "sglang.input_audio.end"),
-    "client_cancelled": ("cancelled", "response.cancel"),
     "client_closed": ("cancelled", "session.close"),
 }
 
@@ -82,7 +80,6 @@ class MediaTime(BaseModel):
 
 class Metadata(BaseModel):
     model_config = ConfigDict(strict=True, extra="allow")
-    epoch: Annotated[int, Field(ge=0)] | None = None
     seq: Annotated[int, Field(ge=0)] | None = None
     t_start_ms: Nonnegative | None = None
     media_time: MediaTime | None = None
@@ -122,11 +119,7 @@ class WireEvent(BaseModel):
     consumed_ms: Nonnegative | None = None
     discarded_ms: Nonnegative | None = None
     padding_ms: Nonnegative | None = None
-    old_epoch: int | None = None
-    epoch: int | None = None
-    response_ids: list[Identifier] | None = None
-    input_policy: str | None = None
-    held: dict[str, JsonValue] | None = None
+    reason: str | None = None
     error: dict[str, JsonValue] | None = None
 
 
@@ -139,7 +132,6 @@ class SentCommand:
 
 @dataclass
 class ResponseState:
-    epoch: int | None
     terminal: str | None = None
     reason: str | None = None
     audio_done: bool = False
@@ -161,10 +153,10 @@ def pcm_bytes(value: str | None) -> bytes:
 def evaluate_trace(
     records: list[dict[str, JsonValue]],
     *,
-    scenario: Literal["continuous", "cancel_resume"],
+    scenario: Literal["continuous"],
 ) -> dict[str, JsonValue]:
     """Report protocol failures separately from an unexercised duplex scenario."""
-    if scenario not in ("continuous", "cancel_resume"):
+    if scenario != "continuous":
         raise ValueError(f"unsupported scenario: {scenario}")
     violations: list[str] = []
 
@@ -178,21 +170,18 @@ def evaluate_trace(
     acknowledged: set[tuple[str, str | None]] = set()
     responses: dict[str, ResponseState] = {}
     input_times: list[float] = []
-    audio_times: list[tuple[float, int | None]] = []
+    audio_times: list[float] = []
     units: list[tuple[int, float]] = []
-    input_bytes = output_bytes = next_seq = epoch = admissions = 0
+    input_bytes = output_bytes = next_seq = admissions = 0
     session_id = None
     updated = ended = drained = closed = False
     previous_time = -math.inf
-    cancel_time = cancel_ack_s = drain_after_eos_s = close_ack_s = None
-    cancelled_visible_response = False
-    cancel_after_output = cancel_before_input_end = False
+    drain_after_eos_s = close_ack_s = None
     acknowledgments = {
         "session.updated": "session.update",
         "sglang.input_audio.accepted": "input_audio_buffer.append",
         "sglang.input_audio.ended": "sglang.input_audio.end",
         "sglang.input_audio.drained": "sglang.input_audio.end",
-        "sglang.response.cancelled": "response.cancel",
         "session.closed": "session.close",
     }
 
@@ -250,12 +239,6 @@ def evaluate_trace(
                     input_bytes += len(pcm_bytes(event.audio))
                     next_seq += 1
                     input_times.append(now)
-                elif typ == "response.cancel":
-                    check(updated, "cancel before session.updated")
-                    cancel_after_output = bool(audio_times)
-                    cancel_before_input_end = not counts[
-                        "send", "sglang.input_audio.end"
-                    ]
                 elif typ == "sglang.input_audio.end":
                     check(updated, "EOS before session.updated")
                 elif typ == "session.close":
@@ -267,8 +250,6 @@ def evaluate_trace(
                 )
                 continue
 
-            server_epoch = event.sglang.epoch
-            check(server_epoch is not None, f"{typ}: missing output epoch")
             cause = sent.get(event.client_event_id)
             if typ in acknowledgments:
                 check(
@@ -287,9 +268,7 @@ def evaluate_trace(
                     isinstance(session_id, str) and bool(session_id),
                     "missing session ID",
                 )
-                check(server_epoch == 0, "session must start at epoch zero")
             elif typ == "session.updated":
-                check(server_epoch == 0, "session.updated outside epoch zero")
                 session = event.session or {}
                 check(
                     session_id is not None and session.get("id") == session_id,
@@ -315,11 +294,6 @@ def evaluate_trace(
                     )
                 updated = True
             elif typ == "sglang.input_audio.accepted":
-                # Note (wenyao): Queued control receipts survive an epoch fence.
-                check(
-                    server_epoch is not None and server_epoch <= epoch,
-                    "accepted receipt from a future epoch",
-                )
                 if cause is not None:
                     check(
                         event.seq == cause.event.sglang.seq,
@@ -330,7 +304,6 @@ def evaluate_trace(
                         "accepted input duration mismatch",
                     )
             elif typ == "sglang.input_audio.ended":
-                check(server_epoch == epoch, "ended receipt epoch mismatch")
                 check(
                     event.accepted_end_ms == input_bytes / INPUT_BYTES_PER_MS,
                     "ended input duration mismatch",
@@ -338,7 +311,6 @@ def evaluate_trace(
                 check(event.tail_policy == "pad", "ended tail policy mismatch")
                 ended = True
             elif typ == "sglang.input_audio.drained":
-                check(server_epoch == epoch, "drained receipt epoch mismatch")
                 check(ended, "input drained before ended receipt")
                 expected_ms = input_bytes / INPUT_BYTES_PER_MS
                 check(
@@ -359,7 +331,6 @@ def evaluate_trace(
                 if cause is not None:
                     drain_after_eos_s = now - cause.time_s
             elif typ == "sglang.unit.done":
-                check(server_epoch == epoch, "unit receipt from a fenced epoch")
                 prefix, _, number = (event.unit_id or "").partition("_")
                 media = event.sglang.media_time
                 if prefix != "unit" or not number.isdigit():
@@ -377,23 +348,6 @@ def evaluate_trace(
                         "native unit media time is not unit-aligned",
                     )
                     units.append((unit, media.duration_ms))
-            elif typ == "sglang.response.cancelled":
-                check(event.old_epoch == epoch, "cancel old epoch mismatch")
-                check(event.epoch == epoch + 1, "cancel did not advance epoch")
-                check(server_epoch == event.epoch, "cancel envelope epoch mismatch")
-                check(event.input_policy == "preserve", "cancel did not preserve input")
-                check(event.response_ids is not None, "cancel missing response IDs")
-                for response_id in event.response_ids or []:
-                    state = responses.get(response_id)
-                    check(
-                        state is not None and state.terminal == "cancelled",
-                        "cancel missing response terminal",
-                    )
-                cancelled_visible_response = bool(event.response_ids)
-                epoch += 1
-                cancel_time = now
-                if cause is not None:
-                    cancel_ack_s = now - cause.time_s
             elif typ == "response.created":
                 check(updated, "response before session.updated")
                 if event.response is None:
@@ -406,13 +360,9 @@ def evaluate_trace(
                         event.response.status == "in_progress",
                         "invalid created response status",
                     )
-                    check(server_epoch == epoch, "response created in stale epoch")
-                    responses[event.response.id] = ResponseState(server_epoch)
+                    responses[event.response.id] = ResponseState()
             elif typ.startswith("response."):
-                # Note (wenyao): Only cancel/close synthesize terminals after drain.
-                forced = (
-                    counts["send", "response.cancel"] or counts["send", "session.close"]
-                )
+                forced = counts["send", "session.close"]
                 check(
                     not drained or (typ not in MEDIA_DELTAS and bool(forced)),
                     f"{typ} after drain",
@@ -423,10 +373,6 @@ def evaluate_trace(
                 if state is not None:
                     check(
                         state.terminal is None, f"{typ}: output after response terminal"
-                    )
-                    check(
-                        server_epoch == state.epoch,
-                        f"{typ}: response epoch mismatch",
                     )
                     if typ == "response.done":
                         status = event.response.status if event.response else None
@@ -459,7 +405,6 @@ def evaluate_trace(
                         )
                         state.terminal, state.reason = status, reason
                     elif typ == "response.output_audio.delta":
-                        check(server_epoch == epoch, "audio from cancelled epoch")
                         check(not state.audio_done, "audio after output_audio.done")
                         check(event.item_id is not None, "audio missing item ID")
                         check(
@@ -471,7 +416,7 @@ def evaluate_trace(
                             "invalid audio indexes",
                         )
                         output_bytes += len(pcm_bytes(event.delta))
-                        audio_times.append((now, server_epoch))
+                        audio_times.append(now)
                         state.audio_seen = True
                         state.item_id = event.item_id
                     elif typ == "response.output_audio.done":
@@ -481,7 +426,6 @@ def evaluate_trace(
                         "response.output_audio_transcript.delta",
                         "response.output_text.delta",
                     ):
-                        check(server_epoch == epoch, "text from cancelled epoch")
                         check(event.delta is not None, "text delta missing content")
                     elif typ not in (
                         "response.output_audio_transcript.done",
@@ -489,11 +433,9 @@ def evaluate_trace(
                     ):
                         violations.append(f"unsupported server event: {typ}")
             elif typ == "session.closed":
-                check(server_epoch == epoch + 1, "closed receipt must advance epoch")
                 check(drained, "session.closed before input drained")
                 check(
-                    event.held == {"kv_tokens": 0, "slots": {}, "bytes": 0},
-                    "session closed with held resources",
+                    event.reason == "client_closed", "unexpected session close reason"
                 )
                 closed = True
                 if cause is not None:
@@ -523,42 +465,36 @@ def evaluate_trace(
     check(bool(input_times), "missing audio input")
     input_ms = input_bytes / INPUT_BYTES_PER_MS
     expected_units = math.ceil(input_bytes / UNIT_INPUT_BYTES)
-    if scenario == "continuous":
-        # Note (wenyao): Only unit-aligned input produces an extra empty EOS unit.
-        nonempty = [duration for _, duration in units if duration]
-        check(
-            [unit for unit, _ in units] == list(range(len(units))),
-            "native unit receipts are not contiguous from zero",
-        )
-        check(
-            len(nonempty) == expected_units,
-            f"expected {expected_units} nonempty native units, "
-            f"observed {len(nonempty)}",
-        )
-        check(
-            len(units) == len(nonempty)
-            or (
-                len(units) == len(nonempty) + 1
-                and not units[-1][1]
-                and not input_bytes % UNIT_INPUT_BYTES
-            ),
-            "an empty EOS unit requires exactly unit-aligned input",
-        )
-        check(
-            sum(duration for _, duration in units) == input_ms,
-            "native unit durations do not account for the accepted input",
-        )
-        expected_output = expected_units * OUTPUT_SAMPLES_PER_UNIT * 2
-        check(
-            output_bytes == expected_output,
-            f"output audio is not conserved: {output_bytes} of "
-            f"{expected_output} bytes for {expected_units} units",
-        )
-    else:
-        check(
-            all(unit <= expected_units for unit, _ in units),
-            "more native units completed than accepted input",
-        )
+    # Note (wenyao): Only unit-aligned input produces an extra empty EOS unit.
+    nonempty = [duration for _, duration in units if duration]
+    check(
+        [unit for unit, _ in units] == list(range(len(units))),
+        "native unit receipts are not contiguous from zero",
+    )
+    check(
+        len(nonempty) == expected_units,
+        f"expected {expected_units} nonempty native units, "
+        f"observed {len(nonempty)}",
+    )
+    check(
+        len(units) == len(nonempty)
+        or (
+            len(units) == len(nonempty) + 1
+            and not units[-1][1]
+            and not input_bytes % UNIT_INPUT_BYTES
+        ),
+        "an empty EOS unit requires exactly unit-aligned input",
+    )
+    check(
+        sum(duration for _, duration in units) == input_ms,
+        "native unit durations do not account for the accepted input",
+    )
+    expected_output = expected_units * OUTPUT_SAMPLES_PER_UNIT * 2
+    check(
+        output_bytes == expected_output,
+        f"output audio is not conserved: {output_bytes} of "
+        f"{expected_output} bytes for {expected_units} units",
+    )
     for event_id, sent_command in sent.items():
         if sent_command.event.type == "input_audio_buffer.append":
             check(
@@ -566,62 +502,27 @@ def evaluate_trace(
                 "missing input acceptance receipt",
             )
     for response_id, state in responses.items():
-        expected = (
-            ("completed", "stop") if state.epoch == epoch else ("cancelled", None)
-        )
         check(
-            state.terminal == expected[0]
-            and (expected[1] is None or state.reason == expected[1]),
-            f"response {response_id} in epoch {state.epoch} ended "
-            f"{state.terminal}/{state.reason}, expected {expected[0]}",
+            state.terminal == "completed" and state.reason == "stop",
+            f"response {response_id} ended {state.terminal}/{state.reason}, "
+            "expected completed/stop",
         )
-    cancel_count = counts["send", "response.cancel"]
-    check(
-        cancel_count <= int(scenario == "cancel_resume"),
-        "unexpected cancel command count",
-    )
-    check(
-        counts["receive", "sglang.response.cancelled"] == cancel_count,
-        "unexpected cancel acknowledgment count",
-    )
-    audio_receipts = [now for now, _ in audio_times]
     coverage = {
-        "input_output_overlap": bool(audio_receipts)
-        and any(audio_receipts[0] < now < audio_receipts[-1] for now in input_times)
+        "input_output_overlap": bool(audio_times)
+        and any(audio_times[0] < now < audio_times[-1] for now in input_times)
     }
-    resumed_audio = [
-        now
-        for now, output_epoch in audio_times
-        if cancel_time is not None and now > cancel_time and output_epoch == epoch
-    ]
-    if scenario == "cancel_resume":
-        coverage.update(
-            cancel_after_output=cancel_after_output,
-            cancel_before_input_end=cancel_before_input_end,
-            cancelled_visible_response=cancelled_visible_response,
-            input_after_cancel=any(
-                cancel_time is not None and now > cancel_time for now in input_times
-            ),
-            output_after_cancel=bool(resumed_audio),
-        )
     metrics = {
         "input_audio_s": input_bytes / INPUT_BYTES_PER_S,
         "output_audio_s": output_bytes / OUTPUT_BYTES_PER_S,
         "admission_denials": admissions,
         "first_audio_packet_s": (
-            audio_receipts[0] - input_times[0]
-            if audio_receipts and input_times
-            else None
+            audio_times[0] - input_times[0] if audio_times and input_times else None
         ),
         "audio_packet_gap_max_s": max(
-            (right - left for left, right in zip(audio_receipts, audio_receipts[1:])),
+            (right - left for left, right in zip(audio_times, audio_times[1:])),
             default=None,
         ),
         "input_output_overlap": coverage["input_output_overlap"],
-        "cancel_ack_s": cancel_ack_s,
-        "post_cancel_first_audio_s": (
-            resumed_audio[0] - cancel_time if resumed_audio else None
-        ),
         "drain_after_eos_s": drain_after_eos_s,
         "close_ack_s": close_ack_s,
     }

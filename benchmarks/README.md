@@ -197,7 +197,7 @@ python -m benchmarks.eval.benchmark_omni_seedtts \
 | `eval/benchmark_asr_stt_benchmark.py` | ASR concurrency scaling on the Pipecat STT benchmark set (EN) | Qwen3-ASR, Fun-ASR | `/v1/audio/transcriptions` |
 | `eval/benchmark_asr_longform.py` | ASR concurrency scaling on LongLibriHeavy 30/60 s and Meanwhile (EN) | Qwen3-ASR, Fun-ASR | `/v1/audio/transcriptions` |
 | `eval/benchmark_asr_realtime.py` | Realtime ASR streaming latency, protocol invariants, and WER on SeedTTS EN | Qwen3-ASR | `/v1/realtime?intent=transcription` |
-| `eval/benchmark_duplex.py` | Native full-duplex VoiceChat protocol cases (continuous, cancel/resume) | Nemotron VoiceChat | `/v1/realtime` (native) |
+| `eval/benchmark_duplex.py` | Native full-duplex VoiceChat continuous protocol case | Nemotron VoiceChat | `/v1/realtime` (native) |
 | `eval/benchmark_duplex_v15.py` | Full-Duplex-Bench v1.5 paired overlap sessions, event timing and judged behavior | Nemotron VoiceChat | `/v1/realtime` (native) |
 | `eval/benchmark_duplex_v10.py` | Full-Duplex-Bench v1.0 pause, turn-taking, interruption and backchannel takeover/latency | Nemotron VoiceChat | `/v1/realtime` (native) |
 
@@ -373,19 +373,21 @@ not native duplex interruption or physical audio playback.
 ## Native duplex (VoiceChat) protocol benchmark
 
 `benchmark_duplex.py` records a native full-duplex VoiceChat session over
-`/v1/realtime` and grades it offline. It runs two sequential cases —
-`continuous` and `cancel_resume` — and is a protocol smoke benchmark, not a
-performance sweep and not a quality evaluation. Two cases do not establish
-product or model readiness.
+`/v1/realtime` and grades it offline. It runs the `continuous` case and is a
+protocol smoke benchmark, not a performance sweep or quality evaluation.
+A passing case does not establish product or model readiness.
 
 The native profile is not the transcription profile: PCM16 mono 16 kHz input,
 PCM16 22050 Hz output, 80 ms / 2560-byte native units, `tail_policy=pad`, a
 240 s session limit, and one admitted connection at a time. `benchmark_asr_realtime.py`
 and its oracle do not grade native events, and `benchmarks/duplex/oracle.py`
 does not grade transcription events. The recorded manifest pins the profile as
-`nemotron-voicechat-pr2188`, pinned to target commit
-`e1b9c9c674b1187918593257906ee6e8cc6a13da` from
+`nemotron-voicechat-pr2188`, the audio profile from
 [VoiceChat duplex PR #2188](https://github.com/sgl-project/sglang-omni/pull/2188).
+The harness follows the session protocol merged in
+[PR #2070](https://github.com/sgl-project/sglang-omni/pull/2070), which removed
+output epochs, `response.cancel` and the `session.closed.held` resource receipt.
+Use a VoiceChat server that includes this protocol and record its actual revision.
 
 This needs **two checkouts**, because neither side contains the other: the
 launcher `examples/run_nemotron_voicechat_duplex.py` exists only in the pinned
@@ -398,12 +400,12 @@ python examples/run_nemotron_voicechat_duplex.py \
     --model-path nvidia/NVIDIA-NemotronLabs-VoiceChat-11B \
     --serve --port 8097
 
-# Terminal B — in this repository: record and grade both cases
+# Terminal B — in this repository: record and grade the continuous case
 python -m benchmarks.eval.benchmark_duplex \
     --url ws://127.0.0.1:8097/v1/realtime \
     --audio caller-16k.wav \
     --output results/duplex-run-1 \
-    --server-revision e1b9c9c674b1187918593257906ee6e8cc6a13da \
+    --server-revision "$VOICECHAT_SERVER_REVISION" \
     --model nvidia/NVIDIA-NemotronLabs-VoiceChat-11B \
     --timeout 180
 
@@ -411,14 +413,14 @@ python -m benchmarks.eval.benchmark_duplex \
 python -m benchmarks.duplex.artifacts results/duplex-run-1
 ```
 
-`--server-revision` above is the pinned target commit; pass whichever commit the
-server in terminal A is actually running.
+Set `VOICECHAT_SERVER_REVISION` to the full commit SHA the server in terminal A
+is actually running.
 
 `--audio` must be PCM16 mono 16 kHz. Trailing silence is a property of the
 fixture input — it keeps the last speech burst clear of the stream boundary —
 and is *not* what ends the turn: under this profile the client ends input with
 `sglang.input_audio.end` and waits for `sglang.input_audio.drained`, and the
-oracle requires a `completed`/`stop` terminal for the final epoch. Pick a
+oracle requires a `completed`/`stop` terminal for each response. Pick a
 fixture whose PCM byte length is *not* a multiple of 2560,
 otherwise `padding_ms` is always 0 and the tail accounting is never exercised.
 `--output` must not already exist; each run directory is immutable.
@@ -443,8 +445,8 @@ disappearing from it.
 The oracle recomputes verdicts from the raw records: granted capabilities,
 an acceptance receipt for every transmitted append, native unit identity and
 accounting, `accepted/consumed/discarded/padding` consistency, response terminal
-ordering, cancellation epoch fencing, input EOS drain, and the close receipt.
-For an uncancelled run it also checks output conservation,
+ordering, input EOS drain, and the close receipt's client event ID and reason.
+It also checks output conservation,
 `output_samples == ceil(input_samples / 1280) * 1764`.
 
 Replay re-verifies the `input.pcm` digest and re-hashes every transmitted
@@ -456,31 +458,32 @@ with `replay_source` in the report to tell reproduction from rescoring with a
 changed grader. The append check also fires when a session aborts partway and
 sends only a prefix of the fixture, which is an early-stop signature rather than
 an integrity alarm — read it together with the case's other violations.
+Legacy manifests containing `cancel_resume` require their recorded harness
+revision; the current grader rejects that removed scenario. Preserve the original
+traces and reports when comparing historical runs.
 
 `report.json` records metrics per case and aggregates only passing cases into
 `summary.qualified_metrics`; failed and unexercised cases land in
 `diagnostic_metrics`. The timings (`first_audio_packet_s`,
-`audio_packet_gap_max_s`, `cancel_ack_s`, `post_cancel_first_audio_s`,
-`drain_after_eos_s`, `close_ack_s`) are client packet-receipt and protocol
+`audio_packet_gap_max_s`, `drain_after_eos_s`, `close_ack_s`) are client packet-receipt and protocol
 acknowledgment times. They are not audible speech onset and not acoustic stop
 time.
 
 A case that is healthy but did not exercise its scenario grades
-`not_exercised`, never `pass`: the cancel case requires cancellation after
-observed output and before input ends, plus input and output continuing after
-the acknowledgment. A second concurrent connection is refused with HTTP 503 and
+`not_exercised`, never `pass`: continuous duplex requires input sent between
+observed output audio packets. A second concurrent connection is refused with HTTP 503 and
 retried up to three times before any input is sent; that is admission behavior,
 not concurrency support.
 
-Declared limits, also written into `manifest.config`: automatic speech
-interruption, concurrent native sessions, session resume and truncate are
-unsupported by this target; semantic quality, acoustic speech onset and audible
-stop time are unmeasured. The cancel case checks lifecycle, fencing and resumed
-coverage — not cross-fence audio conservation. Partial output loss around a
-cancellation can go undetected; total output loss cannot pass, because coverage
-fails and the case grades `not_exercised`.
+Declared limits, also written into `manifest.config`: explicit response
+cancellation, automatic speech interruption, concurrent native sessions, session
+resume and truncate are unsupported by this target; semantic quality, acoustic
+speech onset, audible stop time and server resource release are unmeasured.
+The close acknowledgment does not prove that GPU or KV resources were released.
 
-The initial H100 campaign (A01) failed both cases on `buffer_overflow` after
+The following historical campaigns used the earlier epoch/cancel protocol and
+do not validate the current session protocol. The initial H100 campaign (A01)
+failed both cases on `buffer_overflow` after
 roughly 30 s of paced input. In the later A02 campaign, the same pinned target
 passed both cases after a 10 s profile warmup, but needed about 13 s to drain;
 a supplemental baseline without that warmup passed one case and failed one.
