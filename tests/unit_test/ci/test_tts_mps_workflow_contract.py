@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from glob import glob
 from pathlib import Path
 
 import pytest
@@ -125,3 +126,56 @@ def test_consistency_inputs_are_uploaded_after_benchmark_failure(
     upload = make_step(make_workflow(TTS_WORKFLOW)["jobs"][job_id], step_name)
     assert upload.get("if") == "always() && !cancelled()"
     assert upload["with"]["if-no-files-found"] == "error"
+
+
+@pytest.mark.parametrize(
+    ("job_id", "mode", "stage_number"),
+    [
+        ("stage-1-non-streaming", "non-streaming", 1),
+        ("stage-2-streaming", "streaming", 2),
+    ],
+)
+def test_consistency_artifacts_exclude_previous_runs_and_attempts(
+    tmp_path: Path, job_id: str, mode: str, stage_number: int
+) -> None:
+    jobs = make_workflow(TTS_WORKFLOW)["jobs"]
+    producer = jobs[job_id]
+    output_root = make_step(producer, f"Run TTS {mode} benchmark stage")["env"][
+        "TTS_STAGE_OUTPUT_ROOT"
+    ]
+    upload = make_step(producer, f"Upload {mode} speed artifact")["with"]
+    assert upload["path"] == f"{output_root}/**/speed_results.json"
+    assert (
+        make_step(producer, "Post-stage cleanup")["with"]["artifact-search-root"]
+        == output_root
+    )
+    consumer = jobs["stage-3-consistency"]
+    download = make_step(consumer, f"Download {mode} speed artifact")["with"]
+    assert download["name"] == upload["name"]
+    assert download["path"] == output_root
+    assert (
+        make_step(consumer, "Run consistency check")["env"][
+            f"TTS_STAGE{stage_number}_SPEED_RESULTS_DIR"
+        ]
+        == download["path"]
+    )
+
+    roots = [
+        Path(
+            output_root.replace("${{ env.OMNI_CI_HOME }}", str(tmp_path))
+            .replace("${{ github.run_id }}", str(run_id))
+            .replace("${{ github.run_attempt }}", str(attempt))
+        )
+        for run_id, attempt in [(100, 2), (101, 1), (101, 2)]
+    ]
+    for stale_root in roots[:2]:
+        stale_result = stale_root / "benchmark" / "speed_results.json"
+        stale_result.parent.mkdir(parents=True, exist_ok=True)
+        stale_result.write_text('{"run": "old"}')
+    current_glob = f"{roots[2]}/**/speed_results.json"
+    assert glob(current_glob, recursive=True) == []
+
+    current_result = roots[2] / "benchmark" / "speed_results.json"
+    current_result.parent.mkdir(parents=True, exist_ok=True)
+    current_result.write_text('{"run": "current"}')
+    assert glob(current_glob, recursive=True) == [str(current_result)]
