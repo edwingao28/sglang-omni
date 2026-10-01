@@ -652,7 +652,7 @@ def test_admission_denials_before_the_session_are_not_failures() -> None:
     [
         ([admission(1), admission(3)], "not contiguous from one"),
         ([admission(2)], "not contiguous from one"),
-        ([admission(1), admission(2), admission(3), admission(4)], "less_than_equal"),
+        ([admission(1), admission(2), admission(3), admission(4)], "must be exhausted"),
         ([admission(1, http_status=500)], "http_status"),
     ],
 )

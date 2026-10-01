@@ -150,6 +150,11 @@ def evaluate_trace(
                     "admission attempts are not contiguous from one",
                 )
                 admissions += 1
+                check(not admission.exhausted, "connection admission exhausted")
+                check(
+                    admission.attempt < MAX_ADMISSION_ATTEMPTS or admission.exhausted,
+                    "final admission denial must be exhausted",
+                )
                 continue
             else:
                 pass

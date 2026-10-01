@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 Identifier = Annotated[str, Field(min_length=1)]
 Nonnegative = Annotated[float, Field(ge=0)]
-MAX_ADMISSION_ATTEMPTS = 3
+MAX_ADMISSION_ATTEMPTS = 4
 
 
 class TraceRecord(BaseModel):
@@ -25,6 +25,7 @@ class AdmissionEvent(BaseModel):
     type: Literal["connection_denied"]
     http_status: Literal[503]
     attempt: Annotated[int, Field(ge=1, le=MAX_ADMISSION_ATTEMPTS)]
+    exhausted: bool = False
 
 
 class MediaTime(BaseModel):

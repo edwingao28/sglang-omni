@@ -413,6 +413,14 @@ at its first completion, so post-completion violations are detected only when
 present in the recorded or injected trace. These checks validate the ASR profile,
 not native duplex interruption or physical audio playback.
 
+## Full-duplex serving and behavioral benchmarks
+
+Use the [combined full-duplex benchmark guide](duplex/README.md) for serving
+concurrency sweeps, the behavioral v1.5 workflow, metric definitions and retained
+results. It covers both VoiceChat and MiniCPM-o, with admission and N/A semantics
+made explicit. Serving timing and behavioral speech intervals measure different
+quantities; the guide documents their scope and validation separately.
+
 ## Native duplex (VoiceChat) protocol benchmark
 
 `benchmark_duplex.py` records a native full-duplex VoiceChat session over
@@ -595,7 +603,7 @@ profile does not change their definitions or imply paper-identical evaluation.
 each sent in a fresh `continuous` session. `response.cancel` is never sent; any
 stop or resume is the model's own behavior. The public [MIT-licensed dataset](https://github.com/DanielLin94144/Full-Duplex-Bench/blob/3e799c45a045256f47d5f1c9cda90157e2d2ec9e/v1_v1.5/dataset/README.md) is
 acquired separately; no audio is vendored here. Use the
-[reference evaluation workflow](duplex/REFERENCE.md) for v1.5 scoring. It uses
+[reference evaluation workflow](duplex/README.md#behavioral-v15-workflow) for v1.5 scoring. It uses
 reference ASR with pinned external timing and behavior code; source and license
 requirements are documented there. Prosody/UTMOS evaluation is outside this workflow.
 
@@ -645,7 +653,7 @@ audio, using a local checkpoint and retaining raw responses and model identity.
 These transcripts are not inputs to reference scoring: that workflow uses
 Parakeet for all four input/output roles across overlap and clean runs.
 
-Follow [reference evaluation](duplex/REFERENCE.md) to export the recording, run
+Follow [reference evaluation](duplex/README.md#behavioral-v15-workflow) to export the recording, run
 ASR and timing, optionally judge behavior, and summarize the results. Each phase
 preserves the selected population, technical exclusions and pending labels.
 The former event-anchored `benchmark_duplex_v15 score` command is removed;

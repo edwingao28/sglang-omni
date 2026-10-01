@@ -568,16 +568,14 @@ def test_client_fails_once_the_admission_budget_is_exhausted(tmp_path: Path) -> 
 
     assert [
         r["event"]["attempt"] for r in records if r["direction"] == "admission"
-    ] == (list(range(1, ADMISSION_RETRIES + 1)))
-    assert records[-1]["direction"] == "error"
-    assert (
-        records[-1]["event"]["message"]
-        == f"RuntimeError: admission denied {ADMISSION_RETRIES + 1} times with HTTP 503"
-    )
+    ] == (list(range(1, ADMISSION_RETRIES + 2)))
+    assert records[-1]["direction"] == "admission"
+    assert records[-1]["event"]["exhausted"] is True
+    assert not [r for r in records if r["direction"] == "error"]
     assert not peer.sent
     result = evaluate_trace(records, scenario="continuous")
     assert result["status"] == "fail", result
-    assert result["metrics"]["admission_denials"] == ADMISSION_RETRIES
+    assert result["metrics"]["admission_denials"] == ADMISSION_RETRIES + 1
 
 
 def test_client_enforces_the_session_deadline(tmp_path: Path) -> None:
