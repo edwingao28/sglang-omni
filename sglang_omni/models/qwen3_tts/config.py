@@ -29,10 +29,8 @@ _QWEN3_TTS_CUSTOM_VARIANT_MARKERS = (
     "voicedesign",
 )
 
-# note (wenyao): the SGLang admitter charges min(max_new_tokens, this) KV per running
-# request. With the 2048 default it held about 37 of 64 slots; 256 codec frames (21 s
-# of audio) fills all 64 at the three-process layout's 0.72 KV fraction. Measured on
-# H100 80GB (#2472).
+# note (wenyao): 256 codec frames (21 s of audio) fill all 64 running slots on the
+# three-process layout; measured on H100 80GB (#2472), see the cookbook admission section.
 ADMISSION_NEW_TOKENS_ESTIMATE_ENV = "SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION"
 TTS_ENGINE_ADMISSION_ESTIMATE_FRAMES = "256"
 

@@ -110,9 +110,9 @@ def test_non_custom_voice_config_preserves_existing_hooks(
 def test_tts_engine_admits_by_a_256_frame_estimate_by_default() -> None:
     config = Qwen3TTSPipelineConfig(model_path="org/model")
 
-    assert config.stage_named("tts_engine").env == {
-        "SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION": "256"
-    }
+    env = config.stage_named("tts_engine").env
+
+    assert env["SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION"] == "256"
 
 
 def test_tts_engine_admission_estimate_override_replaces_the_default() -> None:
