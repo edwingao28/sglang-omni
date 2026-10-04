@@ -107,7 +107,8 @@ else:
     pass
 
 logger = logging.getLogger(__name__)
-# note (wenyao): read per finished request; when unset the receipt costs one getenv.
+# note (wenyao): read per finished request like the other SGLANG_OMNI_* flags, so the
+# toggle stays live without a scheduler field.
 TERMINAL_RECEIPTS_ENV = "SGLANG_OMNI_TERMINAL_RECEIPTS"
 
 
@@ -125,7 +126,7 @@ class TerminalReceipt(TypedDict):
     request_id: str
     stage: str | None
     finish_class: str | None
-    finish_detail: dict[str, object] | None
+    finish_detail: dict[str, str | int | list[int] | None] | None
     output_token_count: int
     last_token_id: int | None
     max_new_tokens: int | None
@@ -2196,7 +2197,8 @@ class OmniScheduler(Generic[RequestDataT]):
         self, request_id: str, request: Req, request_data: ARRequestData
     ) -> None:
         """Log one OMNI_TERMINAL_RECEIPT line per non-aborted finished request,
-        per stage, on the entry rank when SGLANG_OMNI_TERMINAL_RECEIPTS=1."""
+        per stage, on the entry rank when SGLANG_OMNI_TERMINAL_RECEIPTS=1.
+        stage is the thread-bound active stage and null when none is bound."""
         if (os.environ.get(TERMINAL_RECEIPTS_ENV) or "").strip() != "1":
             return
         elif not self.is_entry_rank:

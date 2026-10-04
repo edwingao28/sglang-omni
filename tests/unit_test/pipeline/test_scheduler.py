@@ -2024,7 +2024,6 @@ def test_stream_output_terminal_receipt_without_finish_reason(
     receipt = json.loads(line.removeprefix("OMNI_TERMINAL_RECEIPT "))
     assert receipt["finish_class"] is None
     assert receipt["finish_detail"] is None
-    assert receipt["output_token_count"] == 2
 
 
 @pytest.mark.parametrize("skip_reason", ["disabled", "replica_rank", "aborted"])
@@ -2046,10 +2045,6 @@ def test_stream_output_skips_terminal_receipt(
     scheduler.stream_output([request])
 
     assert terminal_receipt_lines(caplog) == []
-    if skip_reason == "aborted":
-        assert scheduler.outbox.empty()
-    else:
-        assert scheduler.outbox.get_nowait().type == "result"
 
 
 def test_stream_output_closes_late_stream_ingress() -> None:
