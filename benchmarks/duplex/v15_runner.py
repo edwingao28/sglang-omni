@@ -15,7 +15,13 @@ from pydantic import JsonValue
 
 import benchmarks.duplex.v15_dataset as v15_dataset
 from benchmarks.duplex.artifacts import replay_run, source_fingerprint
-from benchmarks.duplex.client import PACKET_MS, SAMPLE_RATE, TRANSPORT, run_session
+from benchmarks.duplex.client import (
+    MAX_TIMEOUT_S,
+    PACKET_MS,
+    SAMPLE_RATE,
+    TRANSPORT,
+    run_session,
+)
 from benchmarks.duplex.profiles import DEFAULT_PROFILE, ProfileName
 from benchmarks.duplex.v10_dataset import Sample as V10Sample
 from benchmarks.duplex.v15_audio import (
@@ -25,7 +31,6 @@ from benchmarks.duplex.v15_audio import (
     write_json,
 )
 from benchmarks.duplex.v15_dataset import Sample as V15Sample
-from benchmarks.eval.benchmark_duplex import MAX_TIMEOUT_S
 
 logger = logging.getLogger(__name__)
 

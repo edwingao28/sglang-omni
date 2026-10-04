@@ -578,3 +578,20 @@ def test_run_samples_accounts_inputs_the_deadline_cannot_meet(tmp_path: Path) ->
             )
         )
     assert not (tmp_path / "never").exists()
+
+
+def test_run_samples_rejects_timeouts_past_the_session_deadline(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="at most 230.0"):
+        asyncio.run(
+            run_samples(
+                tmp_path,
+                url="ws://127.0.0.1:1/v1/realtime",
+                output=tmp_path / "never",
+                server=SERVER,
+                dataset_revision="fixture",
+                timeout_s=230.5,
+            )
+        )
+    assert not (tmp_path / "never").exists()

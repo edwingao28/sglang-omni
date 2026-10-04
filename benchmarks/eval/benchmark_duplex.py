@@ -18,13 +18,14 @@ from benchmarks.duplex.artifacts import (
     server_identity,
     source_fingerprint,
 )
-from benchmarks.duplex.client import PACKET_MS, SAMPLE_RATE, TRANSPORT, run_session
+from benchmarks.duplex.client import (
+    MAX_TIMEOUT_S,
+    PACKET_MS,
+    SAMPLE_RATE,
+    TRANSPORT,
+    run_session,
+)
 from benchmarks.duplex.profiles import DEFAULT_PROFILE, PROFILES
-
-# Note (wenyao): Leave drain/close time before the server's 240 s deadline.
-SESSION_LIMIT_S = 240.0
-DRAIN_MARGIN_S = 10.0
-MAX_TIMEOUT_S = SESSION_LIMIT_S - DRAIN_MARGIN_S
 
 
 async def run(

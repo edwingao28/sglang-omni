@@ -19,6 +19,10 @@ from benchmarks.duplex.profiles import DEFAULT_PROFILE, PROFILES, ProfileName
 SAMPLE_RATE = 16000
 PACKET_MS = 80
 PACKET_BYTES = SAMPLE_RATE * PACKET_MS // 1000 * 2
+# note (wenyao): Leave drain/close time before the server's 240 s deadline.
+SESSION_LIMIT_S = 240.0
+DRAIN_MARGIN_S = 10.0
+MAX_TIMEOUT_S = SESSION_LIMIT_S - DRAIN_MARGIN_S
 MAX_MESSAGE_BYTES = 8 * 1024 * 1024
 POST_CLOSE_SECONDS = 0.2
 FRAME_EXCERPT_CHARS = 200
