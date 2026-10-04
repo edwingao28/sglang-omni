@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import sys
@@ -383,6 +384,18 @@ def test_record_transcribe_and_score_every_task(
     reasons = {row["sample_id"]: row["unscored_reason"] for row in score["samples"]}
     assert reasons["candor_turn_taking/1"] == "invalid_sample"
     assert score["backchannel_reference"]["path"] == str(reference.resolve())
+    scorings = {row["sample_id"]: row["scoring"] for row in score["samples"]}
+    assert "output_vad" not in scorings["synthetic_pause_handling/1"]
+    output_vad = scorings["icc_backchannel/1"]["output_vad"]
+    assert output_vad["audio"] == "samples/icc_backchannel/1/input/output-playout.wav"
+    assert (
+        output_vad["audio_sha256"]
+        == hashlib.sha256((run / output_vad["audio"]).read_bytes()).hexdigest()
+    )
+    assert output_vad["vad"]["package"] == "fixture-nonzero"
+    assert scorings["synthetic_user_interruption/1"]["output_vad"]["audio"] == (
+        "samples/synthetic_user_interruption/1/input/output-playout.wav"
+    )
 
 
 @pytest.mark.parametrize(

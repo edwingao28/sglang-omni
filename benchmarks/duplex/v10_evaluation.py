@@ -42,6 +42,17 @@ def unscored(sample: dict[str, JsonValue], reason: str) -> dict[str, JsonValue]:
     }
 
 
+def vad_evidence(run_dir: Path, output_wav: Path) -> dict[str, JsonValue]:
+    """Silero segments of one output WAV plus the provenance the score record keeps."""
+    detected = v10_scoring.silero_speech_segments(output_wav)
+    return {
+        "audio": str(output_wav.relative_to(run_dir)),
+        "audio_sha256": file_sha256(output_wav),
+        "segments": detected["segments"],
+        "vad": detected["vad"],
+    }
+
+
 def score_run(
     run_dir: Path,
     output: Path,
@@ -65,21 +76,6 @@ def score_run(
     else:
         pass
     create_output(output, run_dir)
-
-    segment_cache: dict[Path, dict[str, JsonValue]] = {}
-
-    def speech_segments(output_wav: Path) -> dict[str, JsonValue]:
-        if output_wav not in segment_cache:
-            detected = v10_scoring.silero_speech_segments(output_wav)
-            segment_cache[output_wav] = {
-                "audio": str(output_wav.relative_to(run_dir)),
-                "audio_sha256": file_sha256(output_wav),
-                "segments": detected["segments"],
-                "vad": detected["vad"],
-            }
-        else:
-            pass
-        return segment_cache[output_wav]
 
     selected: dict[str, Task] = {}
     score_records = []
@@ -110,7 +106,7 @@ def score_run(
         chunks = transcript_evidence["transcript"]["chunks"]
         output_wav = run_dir / variant_state["directory"] / TIMELINES[timeline]["audio"]
         if task == "backchannel":
-            output_vad = speech_segments(output_wav)
+            output_vad = vad_evidence(run_dir, output_wav)
             score_record = v10_scoring.score_backchannel(
                 sample_id=sample["id"],
                 chunks=chunks,
@@ -130,7 +126,7 @@ def score_run(
                 input_duration_s=variant_state["input"]["duration_s"],
             )
         elif task == "turn_taking":
-            output_vad = speech_segments(output_wav)
+            output_vad = vad_evidence(run_dir, output_wav)
             score_record = v10_scoring.score_turn_taking(
                 sample_id=sample["id"],
                 chunks=chunks,
@@ -141,7 +137,7 @@ def score_run(
             score_record["output_vad"] = output_vad
         else:
             interruption_start_s, interruption_end_s = sample["events"][0]
-            output_vad = speech_segments(output_wav)
+            output_vad = vad_evidence(run_dir, output_wav)
             score_record = v10_scoring.score_interruption(
                 sample_id=sample["id"],
                 chunks=chunks,
