@@ -182,9 +182,6 @@ class EngineArgs(BaseModel):
     ADMISSION_NEW_TOKENS_ESTIMATE_ENV: ClassVar[str] = (
         "SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION"
     )
-    DERIVED_ENV_SOURCES: ClassVar[dict[str, str]] = {
-        ADMISSION_NEW_TOKENS_ESTIMATE_ENV: "admission_new_tokens_estimate"
-    }
 
     @field_validator("kv_cache_bytes", mode="before")
     @classmethod
@@ -448,23 +445,22 @@ class StageConfig(BaseModel):
             )
         else:
             pass
-        if self.engine is not None:
-            for (
-                env_name,
-                derived_env_value,
-            ) in self.engine.derived_env_defaults().items():
-                written_env_value = self.env.get(env_name)
-                if written_env_value is not None and (
-                    written_env_value != derived_env_value
-                ):
-                    engine_key = EngineArgs.DERIVED_ENV_SOURCES[env_name]
-                    raise ValueError(
-                        f"Stage {self.name!r}: env.{env_name}={written_env_value!r} "
-                        f"disagrees with engine.{engine_key} ({derived_env_value!r}); "
-                        "set exactly one of the two"
-                    )
-                else:
-                    pass
+        if self.engine is not None and (
+            self.engine.admission_new_tokens_estimate is not None
+        ):
+            env_name = EngineArgs.ADMISSION_NEW_TOKENS_ESTIMATE_ENV
+            written_env_value = self.env.get(env_name)
+            derived_env_value = str(self.engine.admission_new_tokens_estimate)
+            if written_env_value is not None and (
+                written_env_value != derived_env_value
+            ):
+                raise ValueError(
+                    f"Stage {self.name!r}: env.{env_name}={written_env_value!r} "
+                    f"disagrees with engine.admission_new_tokens_estimate "
+                    f"({derived_env_value!r}); set exactly one of the two"
+                )
+            else:
+                pass
         else:
             pass
         if (
@@ -1054,23 +1050,25 @@ class PipelineConfig(BaseModel):
                 )
             else:
                 pass
-            # note (wenyao): SGLang reads a derived env once per process; sharers must agree
-            derived_env_owners: dict[str, tuple[str, str]] = {}
-            engine_stages = [stage for stage in stages if stage.engine is not None]
-            for stage in engine_stages:
-                for (
-                    env_name,
-                    derived_env_value,
-                ) in stage.engine.derived_env_defaults().items():
-                    owner = derived_env_owners.get(env_name)
-                    if owner is not None and owner[1] != derived_env_value:
+            # note (wenyao): one process has one environment, and SGLang reads it once at import
+            env_default_owners: dict[str, tuple[StageConfig, str]] = {}
+            for stage in stages:
+                for env_name, env_value in stage.resolved_env_defaults().items():
+                    owner = env_default_owners.get(env_name)
+                    if owner is not None and owner[1] != env_value:
+                        owner_stage, owner_value = owner
+                        owner_source = (
+                            "written" if env_name in owner_stage.env else "derived"
+                        )
+                        stage_source = "written" if env_name in stage.env else "derived"
                         raise ValueError(
-                            f"Process {process_name!r}: stages {owner[0]!r} and "
-                            f"{stage.name!r} derive different {env_name} values "
-                            f"({owner[1]!r} vs {derived_env_value!r})"
+                            f"Process {process_name!r}: stages {owner_stage.name!r} and "
+                            f"{stage.name!r} resolve different {env_name} defaults "
+                            f"({owner_value!r} {owner_source} vs "
+                            f"{env_value!r} {stage_source})"
                         )
                     else:
-                        derived_env_owners[env_name] = (stage.name, derived_env_value)
+                        env_default_owners[env_name] = (stage, env_value)
         unknown = sorted(set(self.processes) - set(members))
         if unknown:
             raise ValueError(

@@ -270,7 +270,12 @@ def test_engine_stage_default_block_derives_nothing() -> None:
 
 def test_pipeline_rejects_shared_process_stages_with_different_estimates() -> None:
     with pytest.raises(
-        ValueError, match="derive different SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION"
+        ValueError,
+        match=(
+            r"stages 'talker' and 'code2wav' resolve different "
+            r"SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION defaults \('256' derived vs "
+            r"'64' derived\)"
+        ),
     ):
         PipelineConfig(
             model_path="model",
@@ -285,5 +290,28 @@ def test_pipeline_rejects_shared_process_stages_with_different_estimates() -> No
                     name="code2wav",
                     engine=EngineArgs(admission_new_tokens_estimate=64),
                 ),
+            ],
+        )
+
+
+def test_pipeline_rejects_mixed_written_and_derived_estimates_in_one_process() -> None:
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"stages 'talker' and 'code2wav' resolve different "
+            r"SGLANG_CLIP_MAX_NEW_TOKENS_ESTIMATION defaults \('256' derived vs "
+            r"'64' written\)"
+        ),
+    ):
+        PipelineConfig(
+            model_path="model",
+            stages=[
+                engine_stage(
+                    name="talker",
+                    next="code2wav",
+                    terminal=False,
+                    engine=EngineArgs(admission_new_tokens_estimate=256),
+                ),
+                make_stage(name="code2wav", env={ADMISSION_ENV: "64"}),
             ],
         )

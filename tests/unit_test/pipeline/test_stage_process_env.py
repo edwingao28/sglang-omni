@@ -385,7 +385,7 @@ def test_spawn_env_logs_a_shadowed_stage_default_once_per_process(
     assert len(notices) == 1
     assert "SGLANG_TEST_STAGE_ENV='operator' takes precedence" in notices[0].message
     assert "'default'" in notices[0].message
-    assert "'thinker'" in notices[0].message
+    assert "first seen on stage 'thinker'" in notices[0].message
 
 
 def test_spawn_env_stays_quiet_when_environment_matches_stage_default(

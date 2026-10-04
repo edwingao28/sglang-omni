@@ -209,7 +209,7 @@ def patched_spawn_env(
                 logger.info(
                     f"Process {spec.process_name!r}: shell {key}={os.environ[key]!r} "
                     f"takes precedence over stage default {value!r} "
-                    f"({stage_spec.stage_name!r})"
+                    f"(first seen on stage {stage_spec.stage_name!r})"
                 )
             else:
                 pass
