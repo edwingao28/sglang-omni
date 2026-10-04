@@ -786,6 +786,15 @@ class Qwen3TTSStreamingVocoderScheduler(
                 else bool(async_decode)
             )
         )
+        # note (wenyao): a zero first chunk is served at the stride and a stride-wide
+        # chunk is never bumped, so cold graphs cover only widths a stream decodes.
+        bootstrap_chunk_frames = self.default_initial_chunk_frames or self.stream_stride
+        default_cold_frames = (
+            (bootstrap_chunk_frames, bootstrap_chunk_frames + 1)
+            if self.suppress_bootstrap_silence
+            and bootstrap_chunk_frames < self.stream_stride
+            else (bootstrap_chunk_frames,)
+        )
         self.codec_arena = self.build_codec_arena(
             int(codec_state_slots), dtype=codec_state_dtype
         )
@@ -803,11 +812,7 @@ class Qwen3TTSStreamingVocoderScheduler(
             cold_frames=(
                 incremental_codec_cuda_graph_cold_frames
                 if incremental_codec_cuda_graph_cold_frames is not None
-                else (
-                    (int(initial_chunk_frames), int(initial_chunk_frames) + 1)
-                    if self.suppress_bootstrap_silence
-                    else (int(initial_chunk_frames),)
-                )
+                else default_cold_frames
             ),
             window_frames=tuple(
                 (int(frames) for frames in incremental_codec_cuda_graph_window_frames)

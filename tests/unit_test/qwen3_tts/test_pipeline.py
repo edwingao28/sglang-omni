@@ -45,6 +45,7 @@ from sglang_omni.models.qwen3_tts.request_builders import (
 )
 from sglang_omni.models.qwen3_tts.streaming_vocoder import (
     DEFAULT_QWEN3_TTS_STREAM_FOLLOWUP_STRIDE,
+    DEFAULT_QWEN3_TTS_STREAM_STRIDE,
     IncrementalDecodePlan,
     Qwen3TTSDecodePlan,
     Qwen3TTSInitialDecodeGraphs,
@@ -2436,6 +2437,7 @@ def stateful_qwen3_tts_scheduler(
     stream_left_context_frames: int = 1,
     stream_followup_stride: int = DEFAULT_QWEN3_TTS_STREAM_FOLLOWUP_STRIDE,
     stream_chunk_ramp: tuple[int, ...] | None = None,
+    initial_chunk_frames: int | None = None,
 ) -> tuple[Qwen3TTSStreamingVocoderScheduler, FakeIncrementalQwen3TTSDecoder]:
     created = []
 
@@ -2457,6 +2459,7 @@ def stateful_qwen3_tts_scheduler(
         stream_left_context_frames=stream_left_context_frames,
         stream_followup_stride=stream_followup_stride,
         stream_chunk_ramp=stream_chunk_ramp,
+        initial_chunk_frames=initial_chunk_frames,
         enable_stateful_codec_decoder=True,
     )
     return scheduler, created[0]
@@ -2486,6 +2489,26 @@ def test_qwen3_tts_stateful_codec_graph_shapes_follow_chunk_ramp(
     assert (
         scheduler.initial_window_decode_graphs.batch_sizes
         == scheduler.initial_incremental_decode_graphs.batch_sizes
+    )
+
+
+def test_qwen3_tts_stateful_codec_cold_graphs_follow_served_bootstrap_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A zero first chunk is served at the steady stride and a stride-wide first
+    # chunk is never bumped, so neither captures an unserved 0 or +1 width.
+    zero_chunk, _ = stateful_qwen3_tts_scheduler(monkeypatch, initial_chunk_frames=0)
+    at_stride, _ = stateful_qwen3_tts_scheduler(
+        monkeypatch, initial_chunk_frames=DEFAULT_QWEN3_TTS_STREAM_STRIDE
+    )
+
+    assert zero_chunk.initial_incremental_decode_graphs is not None
+    assert zero_chunk.initial_incremental_decode_graphs.fresh_frames == (
+        DEFAULT_QWEN3_TTS_STREAM_STRIDE,
+    )
+    assert at_stride.initial_incremental_decode_graphs is not None
+    assert at_stride.initial_incremental_decode_graphs.fresh_frames == (
+        DEFAULT_QWEN3_TTS_STREAM_STRIDE,
     )
 
 
