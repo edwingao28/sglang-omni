@@ -379,3 +379,4 @@ def test_minicpmo_pair_capture_and_replay(tmp_path: Path) -> None:
     )
     assert samples == [320, 320]
     assert all(v["status"] == "transcribed" for v in result["variants"])
+    assert result["run"]["kind"] == "full-duplex-bench-v1.5-paired"

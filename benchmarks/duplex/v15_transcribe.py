@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Word-timestamped Whisper transcription of recorded v1.5 model output audio."""
+"""Word-timestamped Whisper transcription of recorded Full-Duplex-Bench output audio."""
 
 from __future__ import annotations
 
@@ -30,9 +30,9 @@ from benchmarks.duplex.v15_audio import write_json
 
 logger = logging.getLogger(__name__)
 
+# note (wenyao): Both the v1.0 and v1.5 CLIs run this module; the run manifest says which.
 TRANSCRIBE_FILES = (
     "benchmarks/duplex/v15_audio.py",
-    "benchmarks/eval/benchmark_duplex_v15.py",
     "benchmarks/duplex/run_artifacts.py",
     "benchmarks/duplex/v15_transcribe.py",
 )
@@ -117,9 +117,13 @@ def transcribe_run(
     )
     transcription_result = {
         "schema_version": 1,
-        "kind": "fdb-v15-output-asr",
+        "kind": "fdb-output-asr",
         "source": source,
-        "run": {"path": str(run_dir.resolve()), "manifest_sha256": manifest_sha256},
+        "run": {
+            "path": str(run_dir.resolve()),
+            "manifest_sha256": manifest_sha256,
+            "kind": manifest["kind"],
+        },
         "timeline": timeline,
         "asr": {
             "package": "openai-whisper",

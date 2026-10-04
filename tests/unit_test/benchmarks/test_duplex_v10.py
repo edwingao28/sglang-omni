@@ -371,6 +371,9 @@ def test_record_transcribe_and_score_every_task(
         + ["--model-path", str(model_path), "--device", "cpu"]
     )
     assert code == 0 and counts == {"not_qualified:invalid": 1, "transcribed": 4}
+    transcripts = json.loads((tmp_path / "asr" / "transcripts.json").read_text())
+    assert transcripts["kind"] == "fdb-output-asr"
+    assert transcripts["run"]["kind"] == "full-duplex-bench-v1.0"
 
     monkeypatch.setattr(v10_scoring, "silero_speech_segments", nonzero_segments)
     reference = tmp_path / "icc_gt_distribution.json"
