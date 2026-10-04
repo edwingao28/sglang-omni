@@ -27,8 +27,8 @@ stages:
   code2wav:
     gpu_memory_fraction: 0.02
     factory:
-      # note (wenyao): coalesce ready windows across streams (8 ms wait, 4 to 16 batch entries)
-      # and emit a 2-frame first window; measured with the two blocks above on H100 80GB, #2474.
+      # note (wenyao): batching across streams plus a 2-frame first window cut TTFA p50 42-44% at
+      # req/s -1 to -4% (H100 80GB, #2474); depends on the thinker reserve and talker clip above.
       enable_batching: true
       max_batch_wait_ms: 8
       batch_floor: 4
