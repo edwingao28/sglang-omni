@@ -688,7 +688,7 @@ python -m benchmarks.eval.benchmark_duplex_v10 score \
     [--backchannel-reference icc_gt_distribution.json]
 ```
 
-`score` (`fdb-v10-synthetic-v2`) reports per-task takeover rate and latency
+`score` (`fdb-v10-synthetic-v3`) reports per-task takeover rate and latency
 from the Whisper word timestamps. A takeover is output lasting at least 1 s or
 more than 3 words, as upstream. Every task only counts words starting inside
 the input duration, matching upstream's equal-length `output.wav`.

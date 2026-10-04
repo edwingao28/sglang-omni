@@ -22,7 +22,7 @@ from scipy.spatial.distance import jensenshannon
 
 from benchmarks.duplex.v10_dataset import Task
 
-SCORING_VERSION = "fdb-v10-synthetic-v2"
+SCORING_VERSION = "fdb-v10-synthetic-v3"
 # note (Jeffro): Upstream takeover rule; output this short counts as a backchannel, not a turn.
 TAKEOVER_MAX_DURATION_S = 1.0
 TAKEOVER_MAX_WORDS = 3
@@ -31,13 +31,25 @@ BACKCHANNEL_MAX_SEGMENT_S = 3.0
 BACKCHANNEL_MAX_WORDS = 2
 BACKCHANNEL_WINDOW_S = 0.2
 BACKCHANNEL_EPSILON = 1e-10
+CENSOR_TOLERANCE_S = 0.05
 SCORING_CONFIG = {
     "version": SCORING_VERSION,
+    # note (wenyao): Every number a score depends on is here, so config_hash tracks it.
+    "thresholds": {
+        "takeover_max_duration_s": TAKEOVER_MAX_DURATION_S,
+        "takeover_max_words": TAKEOVER_MAX_WORDS,
+        "backchannel_max_segment_s": BACKCHANNEL_MAX_SEGMENT_S,
+        "backchannel_max_words": BACKCHANNEL_MAX_WORDS,
+        "backchannel_window_s": BACKCHANNEL_WINDOW_S,
+        "backchannel_epsilon": BACKCHANNEL_EPSILON,
+        "censor_tolerance_s": CENSOR_TOLERANCE_S,
+    },
     "input": "a word list with timestamps, transcribed by ASR from "
     "output-playout.wav, where each audio chunk sits at the later of its arrival "
     "time and the end of the previous chunk.",
-    "takeover": "the model took the turn when its output lasts 1 s or longer or has "
-    "more than 3 words, anything shorter counts as a backchannel",
+    "takeover": "the model took the turn when its output lasts takeover_max_duration_s "
+    "or longer or has more than takeover_max_words words, anything shorter counts "
+    "as a backchannel",
     "scoring_window": "only words that start before the input audio ends are "
     "scored, the playout keeps recording while the server drains after EOS, and "
     "that tail is outside the benchmark",
@@ -55,18 +67,19 @@ SCORING_CONFIG = {
     "the sample is not_exercised; if one VAD segment runs from before the onset "
     "to after the interruption end the model never stopped, so the sample is "
     "talked_through; both are excluded from the rate and latency",
-    "right_censored": "flag only: the model's output speech reaches within 50 ms of "
-    "the input end, so the window may have cut a response short; the score still "
-    "counts",
+    "right_censored": "flag only: the model's output speech reaches within "
+    "censor_tolerance_s of the input end, so the window may have cut a response "
+    "short; the score still counts",
     "backchannel": "the user talks for 20-80 s and the model should acknowledge "
     "without taking over; each Silero VAD segment of the output is a takeover when "
-    "it lasts 1 s or longer or has more than 2 words, a segment over 3 s is a full "
-    "turn and never a backchannel, and the remaining short segments are "
+    "it lasts takeover_max_duration_s or longer or has more than "
+    "backchannel_max_words words, a segment over backchannel_max_segment_s is a "
+    "full turn and never a backchannel, and the remaining short segments are "
     "backchannels reported as a rate per second",
-    "backchannel_timing": "backchannel segments are binned at 0.2 s across the "
-    "input and compared with the human timing distribution from upstream "
-    "icc_gt_distribution.json by Jensen-Shannon distance, lower is closer to "
-    "human timing; a sample with no backchannels scores 1",
+    "backchannel_timing": "backchannel segments are binned at backchannel_window_s "
+    "across the input and compared with the human timing distribution from "
+    "upstream icc_gt_distribution.json by Jensen-Shannon distance, lower is closer "
+    "to human timing; a sample with no backchannels scores 1",
 }
 WORD_TASKS: tuple[Task, ...] = ("pause_handling", "turn_taking", "user_interruption")
 TASKS: tuple[Task, ...] = (*WORD_TASKS, "backchannel")
@@ -75,7 +88,6 @@ ScoreStatus = Literal[
     "scored", "spoke_before_turn_end", "not_exercised", "talked_through"
 ]
 SCORED: ScoreStatus = "scored"
-CENSOR_TOLERANCE_S = 0.05
 
 
 # note (wenyao): Float rounding can put segment ends just past the audio duration.

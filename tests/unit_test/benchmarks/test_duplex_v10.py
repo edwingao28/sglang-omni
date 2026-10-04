@@ -177,6 +177,18 @@ def test_takeover_rule_matches_upstream_thresholds(
     assert v10_scoring.takes_turn(chunks) is takeover
 
 
+def test_scoring_config_hash_covers_every_threshold() -> None:
+    assert v10_scoring.SCORING_CONFIG["thresholds"] == {
+        "takeover_max_duration_s": v10_scoring.TAKEOVER_MAX_DURATION_S,
+        "takeover_max_words": v10_scoring.TAKEOVER_MAX_WORDS,
+        "backchannel_max_segment_s": v10_scoring.BACKCHANNEL_MAX_SEGMENT_S,
+        "backchannel_max_words": v10_scoring.BACKCHANNEL_MAX_WORDS,
+        "backchannel_window_s": v10_scoring.BACKCHANNEL_WINDOW_S,
+        "backchannel_epsilon": v10_scoring.BACKCHANNEL_EPSILON,
+        "censor_tolerance_s": v10_scoring.CENSOR_TOLERANCE_S,
+    }
+
+
 def test_pause_handling_only_counts_words_inside_the_input() -> None:
     record = v10_scoring.score_pause_handling(
         sample_id="p/1",
