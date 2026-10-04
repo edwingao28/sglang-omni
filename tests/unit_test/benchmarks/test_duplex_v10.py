@@ -187,6 +187,7 @@ def test_scoring_config_hash_covers_every_threshold() -> None:
         "backchannel_epsilon": v10_scoring.BACKCHANNEL_EPSILON,
         "censor_tolerance_s": v10_scoring.CENSOR_TOLERANCE_S,
     }
+    assert v10_scoring.SCORING_CONFIG["vad"] == v10_scoring.SILERO_VAD_CONFIG
 
 
 def test_pause_handling_only_counts_words_inside_the_input() -> None:

@@ -32,6 +32,14 @@ BACKCHANNEL_MAX_WORDS = 2
 BACKCHANNEL_WINDOW_S = 0.2
 BACKCHANNEL_EPSILON = 1e-10
 CENSOR_TOLERANCE_S = 0.05
+SILERO_VAD_CONFIG = {
+    "sampling_rate": 16000,
+    "threshold": 0.5,
+    "min_speech_duration_ms": 250,
+    "min_silence_duration_ms": 100,
+    "speech_pad_ms": 30,
+    "onnx": True,
+}
 SCORING_CONFIG = {
     "version": SCORING_VERSION,
     # note (wenyao): Every number a score depends on is here, so config_hash tracks it.
@@ -44,6 +52,7 @@ SCORING_CONFIG = {
         "backchannel_epsilon": BACKCHANNEL_EPSILON,
         "censor_tolerance_s": CENSOR_TOLERANCE_S,
     },
+    "vad": SILERO_VAD_CONFIG,
     "input": "a word list with timestamps, transcribed by ASR from "
     "output-playout.wav, where each audio chunk sits at the later of its arrival "
     "time and the end of the previous chunk.",
@@ -92,14 +101,6 @@ SCORED: ScoreStatus = "scored"
 
 # note (wenyao): Float rounding can put segment ends just past the audio duration.
 DURATION_TOLERANCE_S = 1e-3
-SILERO_VAD_CONFIG = {
-    "sampling_rate": 16000,
-    "threshold": 0.5,
-    "min_speech_duration_ms": 250,
-    "min_silence_duration_ms": 100,
-    "speech_pad_ms": 30,
-    "onnx": True,
-}
 
 
 def canonical_hash(value: JsonValue) -> str:
