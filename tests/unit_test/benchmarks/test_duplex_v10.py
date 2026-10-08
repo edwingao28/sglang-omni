@@ -339,6 +339,54 @@ def run_cli(argv: list[str]) -> tuple[int, dict[str, JsonValue]]:
     return code, json.loads(stdout.getvalue())
 
 
+class FakeNemoParakeet:
+    """Stands in for nemo ASRModel: two fixed words, and the 16 kHz WAV it was fed."""
+
+    def __init__(self) -> None:
+        self.restored: list[tuple[str, str]] = []
+        self.sample_rates: list[int] = []
+
+    def eval(self) -> None:
+        pass
+
+    def transcribe(self, audio: list[str], timestamps: bool) -> list:
+        assert timestamps is True and len(audio) == 1
+        self.sample_rates.append(soundfile.info(audio[0]).samplerate)
+        words = [
+            {"word": "hello", "start": 0.1, "end": 0.3},
+            {"word": "there", "start": 0.3, "end": 0.5},
+        ]
+        return [types.SimpleNamespace(timestamp={"word": words})]
+
+
+def install_fake_nemo(
+    monkeypatch: pytest.MonkeyPatch, parakeet: FakeNemoParakeet
+) -> None:
+    def restore_from(restore_path: str, map_location: object) -> FakeNemoParakeet:
+        parakeet.restored.append((restore_path, str(map_location)))
+        return parakeet
+
+    models = types.ModuleType("nemo.collections.asr.models")
+    models.ASRModel = types.SimpleNamespace(restore_from=restore_from)
+    for name in ("nemo", "nemo.collections", "nemo.collections.asr"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "nemo.collections.asr.models", models)
+
+
+def test_parakeet_recognizer_feeds_a_16k_wav_and_returns_whisper_shape() -> None:
+    from benchmarks.duplex.v15_transcribe import ParakeetRecognizer, normalize_words
+
+    parakeet = FakeNemoParakeet()
+    raw = ParakeetRecognizer(parakeet).transcribe(
+        np.zeros(16000, dtype=np.float32), timestamps=True
+    )
+    assert parakeet.sample_rates == [16000]
+    assert normalize_words(raw, 1.0) == [
+        {"text": "hello", "timestamp": [0.1, 0.3]},
+        {"text": "there", "timestamp": [0.3, 0.5]},
+    ]
+
+
 def test_record_transcribe_and_score_every_task(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -368,12 +416,41 @@ def test_record_transcribe_and_score_every_task(
     )
     code, counts = run_cli(
         ["transcribe", "--run", str(run), "--output", str(tmp_path / "asr")]
-        + ["--model-path", str(model_path), "--device", "cpu"]
+        + ["--asr", "whisper", "--model-path", str(model_path), "--device", "cpu"]
     )
     assert code == 0 and counts == {"not_qualified:invalid": 1, "transcribed": 4}
     transcripts = json.loads((tmp_path / "asr" / "transcripts.json").read_text())
     assert transcripts["kind"] == "fdb-output-asr"
     assert transcripts["run"]["kind"] == "full-duplex-bench-v1.0"
+    assert transcripts["asr"]["backend"] == "whisper"
+
+    nemo_path = tmp_path / "parakeet.nemo"
+    nemo_path.write_bytes(b"weights")
+    parakeet = FakeNemoParakeet()
+    install_fake_nemo(monkeypatch, parakeet)
+    code, counts = run_cli(
+        ["transcribe", "--run", str(run), "--output", str(tmp_path / "asr-parakeet")]
+        + ["--model-path", str(nemo_path), "--device", "cpu"]
+    )
+    assert code == 0 and counts == {"not_qualified:invalid": 1, "transcribed": 4}
+    assert parakeet.restored == [(str(nemo_path), "cpu")]
+    parakeet_transcripts = json.loads(
+        (tmp_path / "asr-parakeet" / "transcripts.json").read_text()
+    )
+    assert parakeet_transcripts["asr"]["backend"] == "parakeet"
+    assert parakeet_transcripts["asr"]["options"] == {"timestamps": True}
+    transcribed = [
+        variant
+        for variant in parakeet_transcripts["variants"]
+        if variant["status"] == "transcribed"
+    ]
+    assert transcribed[0]["transcript"] == {
+        "text": "hello there",
+        "chunks": [
+            {"text": "hello", "timestamp": [0.1, 0.3]},
+            {"text": "there", "timestamp": [0.3, 0.5]},
+        ],
+    }
 
     monkeypatch.setattr(v10_scoring, "silero_speech_segments", nonzero_segments)
     reference = tmp_path / "icc_gt_distribution.json"

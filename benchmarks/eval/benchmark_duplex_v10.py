@@ -111,7 +111,8 @@ def main(argv: list[str] | None = None) -> int:
     transcribe_parser = commands.add_parser(
         "transcribe", help="Word-timestamped Whisper ASR of generated output audio"
     )
-    add_transcribe_arguments(transcribe_parser, timeline_help)
+    # note (Jeffro): align with upstream which v1.0 uses Parakeet.
+    add_transcribe_arguments(transcribe_parser, timeline_help, default_asr="parakeet")
 
     score_parser = commands.add_parser(
         "score", help="Offline takeover and latency scores from transcripts"

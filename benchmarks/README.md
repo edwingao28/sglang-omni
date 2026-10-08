@@ -664,9 +664,17 @@ endpoint, one `continuous` session per sample (no clean variant):
 | `synthetic_user_interruption` | user interruption | `interrupt.json` (span plus `context`/`interrupt` text) |
 | `icc_backchannel` | backchannel | none |
 
-It reuses the v1.5 runner, pacing gate, output reconstruction and Whisper
+It reuses the v1.5 runner, pacing gate, output reconstruction and
 `transcribe` step, so recording, qualification and the selected-denominator
 rules above apply unchanged. The dataset is acquired separately.
+
+v1.0 transcribes with Parakeet (`nvidia/parakeet-tdt-0.6b-v2`, the upstream
+ASR) by default. Whisper invents words such as "Thank you." on silent output
+and stretches their timestamps across the whole file, which turns a model that
+correctly stayed quiet into a takeover; pause handling is the task most hurt.
+Parakeet needs NeMo, so run `transcribe` in the reference scoring environment
+described in [duplex/REFERENCE.md](duplex/REFERENCE.md) with a local `.nemo`
+checkpoint. `--asr whisper` remains for diagnostics.
 
 ```bash
 python -m benchmarks.eval.benchmark_duplex_v10 record \
@@ -680,7 +688,7 @@ python -m benchmarks.eval.benchmark_duplex_v10 record \
 
 python -m benchmarks.eval.benchmark_duplex_v10 transcribe \
     --run results/fdb10-run --output results/fdb10-asr \
-    --model-path /models/whisper/large-v3.pt --device cuda
+    --model-path /models/parakeet-tdt-0.6b-v2.nemo --device cuda
 
 python -m benchmarks.eval.benchmark_duplex_v10 score \
     --run results/fdb10-run --output results/fdb10-score \
@@ -688,8 +696,8 @@ python -m benchmarks.eval.benchmark_duplex_v10 score \
     [--backchannel-reference icc_gt_distribution.json]
 ```
 
-`score` (`fdb-v10-synthetic-v3`) reports per-task takeover rate and latency
-from the Whisper word timestamps. A takeover is output lasting at least 1 s or
+`score` (`fdb-v10-synthetic-v4`) reports per-task takeover rate and latency
+from the ASR word timestamps. A takeover is output lasting at least 1 s or
 more than 3 words, as upstream. Every task only counts words starting inside
 the input duration, matching upstream's equal-length `output.wav`.
 

@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Word-timestamped Whisper transcription of recorded Full-Duplex-Bench output audio."""
+"""Word-timestamped Whisper or Parakeet transcription of recorded duplex output audio."""
 
 from __future__ import annotations
 
 import argparse
-import importlib.metadata
 import json
 import logging
 import math
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 import numpy as np
 import soundfile
@@ -17,7 +18,7 @@ from numpy.typing import NDArray
 from pydantic import JsonValue
 from scipy.signal import resample_poly
 
-from benchmarks.duplex.artifacts import source_fingerprint
+from benchmarks.duplex.artifacts import package_version, source_fingerprint
 from benchmarks.duplex.profiles import PROFILES
 from benchmarks.duplex.run_artifacts import (
     TIMELINES,
@@ -36,22 +37,60 @@ TRANSCRIBE_FILES = (
     "benchmarks/duplex/run_artifacts.py",
     "benchmarks/duplex/v15_transcribe.py",
 )
-WHISPER_SAMPLE_RATE = 16000
+ASR_SAMPLE_RATE = 16000
 WHISPER_OPTIONS = {"language": "en", "word_timestamps": True, "temperature": 0.0}
+PARAKEET_OPTIONS = {"timestamps": True}
+ASR_PACKAGES = {"whisper": "openai-whisper", "parakeet": "nemo_toolkit"}
 # note (wenyao): Float rounding only; any larger overrun is an ASR error, never clipped.
 WORD_END_TOLERANCE_S = 1e-3
 
 
+AsrBackend = Literal["whisper", "parakeet"]
+
+
 class SpeechRecognizer(Protocol):
     def transcribe(
-        self,
-        audio: NDArray[np.float32],
-        *,
-        language: str,
-        word_timestamps: bool,
-        temperature: float,
-        fp16: bool,
+        self, audio: NDArray[np.float32], **options: bool | float | str
     ) -> dict[str, JsonValue]: ...
+
+
+class WordHypothesis(Protocol):
+    timestamp: dict[str, list[dict[str, JsonValue]]]
+
+
+class NemoAsrModel(Protocol):
+    def transcribe(
+        self, audio: list[str], timestamps: bool
+    ) -> list[WordHypothesis]: ...
+
+
+@dataclass(frozen=True)
+class ParakeetRecognizer:
+    """Return Parakeet word timestamps in the Whisper result shape normalize_words reads.
+
+    Audio goes through a temporary 16 kHz WAV, as the upstream Full-Duplex-Bench
+    get_transcript/asr.py feeds Parakeet.
+    """
+
+    model: NemoAsrModel
+
+    def transcribe(
+        self, audio: NDArray[np.float32], *, timestamps: bool
+    ) -> dict[str, JsonValue]:
+        with tempfile.TemporaryDirectory() as directory:
+            wav_path = Path(directory) / "audio.wav"
+            soundfile.write(str(wav_path), audio, ASR_SAMPLE_RATE)
+            (hypothesis,) = self.model.transcribe(
+                [str(wav_path)], timestamps=timestamps
+            )
+        words = [
+            {"word": word["word"], "start": word["start"], "end": word["end"]}
+            for word in hypothesis.timestamp["word"]
+        ]
+        return {
+            "text": " ".join(word["word"] for word in words),
+            "segments": [{"words": words}],
+        }
 
 
 def load_mono(path: Path) -> tuple[NDArray[np.float32], int]:
@@ -103,13 +142,17 @@ def transcribe_run(
     model_path: Path,
     device: str,
     timeline: Timeline,
+    asr: AsrBackend = "whisper",
 ) -> dict[str, JsonValue]:
     """Transcribe every qualified variant; per-variant failures are recorded, not fatal."""
     manifest, run, manifest_sha256 = load_run(run_dir)
     output_sample_rate = PROFILES[manifest["profile"]].output_sample_rate
     create_output(output, run_dir)
-    transcription_options = {**WHISPER_OPTIONS, "fp16": device.startswith("cuda")}
-    divisor = math.gcd(output_sample_rate, WHISPER_SAMPLE_RATE)
+    if asr == "parakeet":
+        transcription_options = dict(PARAKEET_OPTIONS)
+    else:
+        transcription_options = {**WHISPER_OPTIONS, "fp16": device.startswith("cuda")}
+    divisor = math.gcd(output_sample_rate, ASR_SAMPLE_RATE)
     source = source_fingerprint()
     repository_root = Path(__file__).resolve().parents[2]
     source["files_sha256"].update(
@@ -126,13 +169,14 @@ def transcribe_run(
         },
         "timeline": timeline,
         "asr": {
-            "package": "openai-whisper",
-            "version": importlib.metadata.version("openai-whisper"),
+            "backend": asr,
+            "package": ASR_PACKAGES[asr],
+            "version": package_version(ASR_PACKAGES[asr]),
             "model_path": str(model_path),
             "model_sha256": file_sha256(model_path),
             "device": device,
             "options": transcription_options,
-            "audio": f"mono float32 resampled to {WHISPER_SAMPLE_RATE} Hz with "
+            "audio": f"mono float32 resampled to {ASR_SAMPLE_RATE} Hz with "
             "scipy.signal.resample_poly",
             "word_end_tolerance_s": WORD_END_TOLERANCE_S,
         },
@@ -168,7 +212,7 @@ def transcribe_run(
             duration_s = len(audio) / sample_rate
             resampled = resample_poly(
                 audio,
-                WHISPER_SAMPLE_RATE // divisor,
+                ASR_SAMPLE_RATE // divisor,
                 output_sample_rate // divisor,
             ).astype(np.float32)
             raw = model.transcribe(resampled, **transcription_options)
@@ -196,41 +240,61 @@ def transcribe_run(
 
 
 def transcribe_command(arguments: argparse.Namespace) -> int:
-    import whisper
-
     if not arguments.model_path.is_file():
         raise FileNotFoundError(
             f"--model-path is not a local checkpoint: {arguments.model_path}"
         )
+    elif arguments.asr == "parakeet":
+        # note (Jeffro): NeMo lives in the separate reference scoring environment.
+        import torch
+        from nemo.collections.asr.models import ASRModel
+
+        nemo_model = ASRModel.restore_from(
+            restore_path=str(arguments.model_path),
+            map_location=torch.device(arguments.device),
+        )
+        nemo_model.eval()
+        model = ParakeetRecognizer(nemo_model)
     else:
+        import whisper
+
         model = whisper.load_model(str(arguments.model_path), device=arguments.device)
-        transcription_result = transcribe_run(
-            arguments.run,
-            arguments.output,
-            model=model,
-            model_path=arguments.model_path,
-            device=arguments.device,
-            timeline=arguments.timeline,
-        )
-        statuses = [
-            variant_record["status"]
-            for variant_record in transcription_result["variants"]
-        ]
-        print(
-            json.dumps(
-                {status: statuses.count(status) for status in sorted(set(statuses))}
-            )
-        )
-        return 1 if "error" in statuses else 0
+    transcription_result = transcribe_run(
+        arguments.run,
+        arguments.output,
+        model=model,
+        model_path=arguments.model_path,
+        device=arguments.device,
+        timeline=arguments.timeline,
+        asr=arguments.asr,
+    )
+    statuses = [
+        variant_record["status"] for variant_record in transcription_result["variants"]
+    ]
+    print(
+        json.dumps({status: statuses.count(status) for status in sorted(set(statuses))})
+    )
+    return 1 if "error" in statuses else 0
 
 
 def add_transcribe_arguments(
-    parser: argparse.ArgumentParser, timeline_help: str
+    parser: argparse.ArgumentParser,
+    timeline_help: str,
+    default_asr: AsrBackend = "whisper",
 ) -> None:
     parser.add_argument("--run", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
-        "--model-path", type=Path, required=True, help="Local Whisper .pt checkpoint"
+        "--asr",
+        choices=("whisper", "parakeet"),
+        default=default_asr,
+        help="parakeet needs NeMo and a local parakeet-tdt-0.6b-v2 .nemo checkpoint",
+    )
+    parser.add_argument(
+        "--model-path",
+        type=Path,
+        required=True,
+        help="Local Whisper .pt or Parakeet .nemo checkpoint",
     )
     parser.add_argument("--device", required=True)
     parser.add_argument(
