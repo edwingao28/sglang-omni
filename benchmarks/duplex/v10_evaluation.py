@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import JsonValue
 
@@ -22,6 +23,9 @@ from benchmarks.duplex.run_artifacts import (
 from benchmarks.duplex.v10_dataset import Task
 from benchmarks.duplex.v10_scoring import TASKS
 from benchmarks.duplex.v15_audio import write_json
+
+if TYPE_CHECKING:
+    from silero_vad.utils_vad import OnnxWrapper
 
 RUN_KIND = "full-duplex-bench-v1.0"
 VARIANT = "input"
@@ -42,9 +46,11 @@ def unscored(sample: dict[str, JsonValue], reason: str) -> dict[str, JsonValue]:
     }
 
 
-def vad_evidence(run_dir: Path, output_wav: Path) -> dict[str, JsonValue]:
+def vad_evidence(
+    run_dir: Path, output_wav: Path, vad_model: "OnnxWrapper"
+) -> dict[str, JsonValue]:
     """Silero segments of one output WAV plus the provenance the score record keeps."""
-    detected = v10_scoring.silero_speech_segments(output_wav)
+    detected = v10_scoring.silero_speech_segments(output_wav, vad_model)
     return {
         "audio": str(output_wav.relative_to(run_dir)),
         "audio_sha256": file_sha256(output_wav),
@@ -80,6 +86,11 @@ def score_run(
     selected: dict[str, Task] = {}
     score_records = []
     sample_scores = []
+    vad_model = (
+        v10_scoring.load_silero_model()
+        if any(sample["task"] != "pause_handling" for sample in run["samples"])
+        else None
+    )
     for sample in run["samples"]:
         task: Task = sample["task"]
         variant_state = sample["variants"][VARIANT]
@@ -106,7 +117,7 @@ def score_run(
         chunks = transcript_evidence["transcript"]["chunks"]
         output_wav = run_dir / variant_state["directory"] / TIMELINES[timeline]["audio"]
         if task == "backchannel":
-            output_vad = vad_evidence(run_dir, output_wav)
+            output_vad = vad_evidence(run_dir, output_wav, vad_model)
             score_record = v10_scoring.score_backchannel(
                 sample_id=sample["id"],
                 chunks=chunks,
@@ -126,7 +137,7 @@ def score_run(
                 input_duration_s=variant_state["input"]["duration_s"],
             )
         elif task == "turn_taking":
-            output_vad = vad_evidence(run_dir, output_wav)
+            output_vad = vad_evidence(run_dir, output_wav, vad_model)
             score_record = v10_scoring.score_turn_taking(
                 sample_id=sample["id"],
                 chunks=chunks,
@@ -137,7 +148,7 @@ def score_run(
             score_record["output_vad"] = output_vad
         else:
             interruption_start_s, interruption_end_s = sample["events"][0]
-            output_vad = vad_evidence(run_dir, output_wav)
+            output_vad = vad_evidence(run_dir, output_wav, vad_model)
             score_record = v10_scoring.score_interruption(
                 sample_id=sample["id"],
                 chunks=chunks,

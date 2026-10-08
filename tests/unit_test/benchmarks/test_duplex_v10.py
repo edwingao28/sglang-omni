@@ -452,7 +452,13 @@ def test_record_transcribe_and_score_every_task(
         ],
     }
 
-    monkeypatch.setattr(v10_scoring, "silero_speech_segments", nonzero_segments)
+    loads = []
+    monkeypatch.setattr(v10_scoring, "load_silero_model", lambda: loads.append(1))
+    monkeypatch.setattr(
+        v10_scoring,
+        "silero_speech_segments",
+        lambda path, vad_model: nonzero_segments(path),
+    )
     reference = tmp_path / "icc_gt_distribution.json"
     reference.write_text(json.dumps({"1": [0.5, 0.5]}))
     code, printed = run_cli(
@@ -462,6 +468,7 @@ def test_record_transcribe_and_score_every_task(
     )
 
     assert code == 0
+    assert loads == [1]
     tasks = printed["tasks"]
     assert {task: tasks[task]["selected"] for task in tasks} == {
         "pause_handling": 2,
@@ -509,7 +516,8 @@ def test_silero_path_records_provenance(tmp_path: Path) -> None:
     pytest.importorskip("silero_vad")
     path = tmp_path / "silence.wav"
     soundfile.write(path, np.zeros(22050, dtype=np.float32), 22050, subtype="PCM_16")
-    result = v10_scoring.silero_speech_segments(path)
+    vad_model = v10_scoring.load_silero_model()
+    result = v10_scoring.silero_speech_segments(path, vad_model)
     assert result["segments"] == []
     assert result["duration_s"] == pytest.approx(1.0)
     assert result["vad"]["config"] == v10_scoring.SILERO_VAD_CONFIG
@@ -518,4 +526,4 @@ def test_silero_path_records_provenance(tmp_path: Path) -> None:
         float_path, np.zeros(16000, dtype=np.float32), 16000, subtype="FLOAT"
     )
     with pytest.raises(ValueError):
-        v10_scoring.silero_speech_segments(float_path)
+        v10_scoring.silero_speech_segments(float_path, vad_model)

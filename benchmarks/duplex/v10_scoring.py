@@ -11,7 +11,7 @@ import statistics
 from collections import Counter
 from math import gcd
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import soundfile
@@ -21,6 +21,9 @@ from scipy.signal import resample_poly
 from scipy.spatial.distance import jensenshannon
 
 from benchmarks.duplex.v10_dataset import Task
+
+if TYPE_CHECKING:
+    from silero_vad.utils_vad import OnnxWrapper
 
 SCORING_VERSION = "fdb-v10-synthetic-v4"
 # note (Jeffro): Upstream takeover rule; output this short counts as a backchannel, not a turn.
@@ -143,11 +146,20 @@ def validate_segments(
     return checked
 
 
-def silero_speech_segments(wav_path: str | Path) -> dict[str, JsonValue]:
-    """Detect speech in a PCM WAV with the frozen Silero VAD configuration."""
+def load_silero_model() -> "OnnxWrapper":
+    """Load Silero VAD once per scoring run; get_speech_timestamps resets its state."""
     # note (wenyao): Word-timestamp scoring and tests do not need torch or Silero.
+    from silero_vad import load_silero_vad
+
+    return load_silero_vad(onnx=SILERO_VAD_CONFIG["onnx"])
+
+
+def silero_speech_segments(
+    wav_path: str | Path, vad_model: "OnnxWrapper"
+) -> dict[str, JsonValue]:
+    """Detect speech in a PCM WAV with the frozen Silero VAD configuration."""
     import torch
-    from silero_vad import get_speech_timestamps, load_silero_vad
+    from silero_vad import get_speech_timestamps
 
     source_audio = soundfile.info(str(wav_path))
     if source_audio.format != "WAV" or not source_audio.subtype.startswith("PCM"):
@@ -167,7 +179,7 @@ def silero_speech_segments(wav_path: str | Path) -> dict[str, JsonValue]:
         pass
     timestamps = get_speech_timestamps(
         torch.from_numpy(np.ascontiguousarray(audio, dtype=np.float32)),
-        load_silero_vad(onnx=SILERO_VAD_CONFIG["onnx"]),
+        vad_model,
         sampling_rate=target_rate,
         threshold=SILERO_VAD_CONFIG["threshold"],
         min_speech_duration_ms=SILERO_VAD_CONFIG["min_speech_duration_ms"],
