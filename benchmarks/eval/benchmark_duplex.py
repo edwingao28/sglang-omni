@@ -79,7 +79,6 @@ async def run(
         await run_session(
             args.url,
             pcm,
-            scenario=case["scenario"],
             trace_path=args.output / case["trace_file"],
             timeout_s=args.timeout,
             profile=args.profile,

@@ -4,7 +4,6 @@ import base64
 import binascii
 import math
 from collections import Counter
-from typing import Literal
 
 from pydantic import JsonValue, ValidationError
 
@@ -84,7 +83,6 @@ def pcm_bytes(value: str | None) -> bytes:
 def evaluate_trace(
     records: list[dict[str, JsonValue]],
     *,
-    scenario: Literal["continuous"],
     profile: ProfileName = DEFAULT_PROFILE,
     max_admission_attempts: int | None = None,
 ) -> dict[str, JsonValue]:
@@ -93,10 +91,6 @@ def evaluate_trace(
     max_admission_attempts is the retry limit the recording client used, read from
     its manifest; None checks only that denials count up from one.
     """
-    if scenario != "continuous":
-        raise ValueError(f"unsupported scenario: {scenario}")
-    else:
-        pass
     profile_contract = PROFILES[profile]
     unit_duration_ms = profile_contract.native_unit_ms
     input_bytes_per_unit = INPUT_SAMPLE_RATE * unit_duration_ms // 1000 * 2

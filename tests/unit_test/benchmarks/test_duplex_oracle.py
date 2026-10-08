@@ -212,7 +212,7 @@ def find_event(
 
 def test_known_good_trace_and_hand_calculated_metrics() -> None:
     trace = trace_fixture()
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["status"] == "pass"
     assert result["violations"] == []
     assert result["coverage"] == {"input_output_overlap": True}
@@ -265,7 +265,7 @@ def test_wire_mutations_fail(
 ) -> None:
     trace = trace_fixture()
     find_event(trace, event_type)[key] = value
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["status"] == "fail"
     assert any(violation in item for item in result["violations"])
 
@@ -285,7 +285,7 @@ def test_native_unit_receipt_identity(unit_id: str, violation: str) -> None:
         if record["event"]["type"] == "sglang.unit.done"
     ][-1]
     last["unit_id"] = unit_id
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["status"] == "fail"
     assert violation in result["violations"]
 
@@ -308,7 +308,7 @@ def test_missing_required_steps_fail(event_type: str) -> None:
     trace = [
         record for record in trace_fixture() if record["event"]["type"] != event_type
     ]
-    assert evaluate_trace(trace, scenario="continuous")["status"] == "fail"
+    assert evaluate_trace(trace)["status"] == "fail"
 
 
 @pytest.mark.parametrize(
@@ -328,7 +328,7 @@ def test_duplicate_receipts_or_terminals_fail(event_type: str) -> None:
     duplicate = copy.deepcopy(trace[index])
     duplicate["event"]["event_id"] = "duplicate_semantics"
     trace.insert(index, duplicate)
-    assert evaluate_trace(trace, scenario="continuous")["status"] == "fail"
+    assert evaluate_trace(trace)["status"] == "fail"
 
 
 @pytest.mark.parametrize("value", [False, 1, "true"])
@@ -337,7 +337,7 @@ def test_native_capability_requires_actual_true(value: JsonValue) -> None:
     find_event(trace, "session.updated")["session"]["sglang"]["granted"][
         "native_full_duplex"
     ] = value
-    assert evaluate_trace(trace, scenario="continuous")["status"] == "fail"
+    assert evaluate_trace(trace)["status"] == "fail"
 
 
 @pytest.mark.parametrize(
@@ -353,7 +353,7 @@ def test_native_capability_requires_actual_true(value: JsonValue) -> None:
 def test_grant_must_match_the_measured_profile(key: str, value: JsonValue) -> None:
     trace = trace_fixture()
     find_event(trace, "session.updated")["session"]["sglang"]["granted"][key] = value
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["status"] == "fail"
     assert f"unsupported capability: {key}" in result["violations"]
 
@@ -400,7 +400,7 @@ def test_invalid_trace_or_execution_errors_fail(mutation: str) -> None:
                 },
             },
         )
-    assert evaluate_trace(trace, scenario="continuous")["status"] == "fail"
+    assert evaluate_trace(trace)["status"] == "fail"
 
 
 @pytest.mark.parametrize("event_type", ["response.output_audio.delta", "response.done"])
@@ -417,7 +417,7 @@ def test_output_after_terminal_fails(event_type: str) -> None:
         if record["event"]["type"] == "sglang.input_audio.drained"
     )
     trace.insert(index, late)
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["status"] == "fail"
     assert any(
         "output after response terminal" in item for item in result["violations"]
@@ -441,7 +441,7 @@ def test_audio_delta_after_drain_fails() -> None:
         if record["event"]["type"] == "session.close"
     )
     trace.insert(index, late)
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["status"] == "fail"
     assert "response.output_audio.delta after drain" in result["violations"]
 
@@ -461,7 +461,7 @@ def test_completed_terminal_before_input_end_fails() -> None:
         elif record["event"]["type"] == "response.done":
             record["time_s"] = 100.155
     trace.sort(key=lambda record: record["time_s"])
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["status"] == "fail"
     assert "terminal reason stop without its client command" in result["violations"]
 
@@ -477,7 +477,7 @@ def test_close_time_cleanup_is_not_native_completion() -> None:
                 status="cancelled", status_details={"reason": "client_closed"}
             )
     trace.sort(key=lambda record: record["time_s"])
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["status"] == "fail"
     assert any(
         "ended cancelled/client_closed, expected completed" in item
@@ -494,7 +494,7 @@ def test_completed_terminal_after_drain_fails() -> None:
         and record["event"]["response"]["status"] == "completed"
     )["time_s"] = 100.285
     trace.sort(key=lambda record: record["time_s"])
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["status"] == "fail"
     assert "native completed terminal after the drain receipt" in result["violations"]
 
@@ -505,7 +505,7 @@ def test_terminal_after_drain_without_session_close_fails() -> None:
         if record["event"]["type"] == "response.done":
             record["time_s"] = 100.275
     trace.sort(key=lambda record: record["time_s"])
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["status"] == "fail"
     assert "response.done after drain" in result["violations"]
 
@@ -519,7 +519,7 @@ def test_continuous_output_must_be_conserved(dropped: int) -> None:
         if record["event"]["type"] == "response.output_audio.delta"
     ]
     trace.remove(deltas[dropped])
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["status"] == "fail"
     assert any(
         "output audio is not conserved: 3528 of 7056 bytes for 2 units" in item
@@ -532,7 +532,7 @@ def test_short_output_frame_fails_conservation() -> None:
     for record in trace:
         if record["event"]["type"] == "response.output_audio.delta":
             record["event"]["delta"] = base64.b64encode(b"\x01\x00" * 320).decode()
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["status"] == "fail"
     assert any("output audio is not conserved" in item for item in result["violations"])
 
@@ -586,7 +586,7 @@ def test_unaligned_tail_conserves_output_and_padding() -> None:
         },
     ]
     trace.sort(key=lambda record: record["time_s"])
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["violations"] == []
     assert result["status"] == "pass"
     assert result["metrics"]["input_audio_s"] == pytest.approx(0.2)
@@ -622,7 +622,7 @@ def test_native_unit_accounting(mutation: str, violation: str) -> None:
         receipts[1]["event"]["sglang"]["media_time"]["t_start_ms"] = 240
     else:
         del receipts[1]["event"]["sglang"]["media_time"]
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["status"] == "fail"
     assert any(violation in item for item in result["violations"])
 
@@ -641,7 +641,7 @@ def admission(attempt: int, http_status: int = 503) -> dict[str, JsonValue]:
 
 def test_admission_denials_before_the_session_are_not_failures() -> None:
     trace = [admission(1), admission(2), admission(3), *trace_fixture()]
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["status"] == "pass"
     assert result["violations"] == []
     assert result["metrics"]["admission_denials"] == 3
@@ -658,7 +658,7 @@ def test_admission_denials_before_the_session_are_not_failures() -> None:
 def test_malformed_admission_diagnostics_fail(
     records: list[dict[str, JsonValue]], violation: str
 ) -> None:
-    result = evaluate_trace([*records, *trace_fixture()], scenario="continuous")
+    result = evaluate_trace([*records, *trace_fixture()])
     assert result["status"] == "fail"
     assert any(violation in item for item in result["violations"])
 
@@ -670,7 +670,6 @@ def test_admission_attempts_are_bounded_by_the_recorded_limit(
     denials = [admission(attempt) for attempt in range(1, 5)]
     result = evaluate_trace(
         [*denials, *trace_fixture()],
-        scenario="continuous",
         max_admission_attempts=limit,
     )
     assert result["status"] == status
@@ -688,7 +687,7 @@ def test_admission_diagnostic_after_session_start_fails() -> None:
     late = admission(1)
     late["time_s"] = 100.05
     trace.insert(3, late)
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["status"] == "fail"
     assert "admission diagnostic after the session started" in result["violations"]
 
@@ -696,7 +695,7 @@ def test_admission_diagnostic_after_session_start_fails() -> None:
 def test_extra_admission_fields_fail() -> None:
     record = admission(1)
     record["event"]["reason"] = "capacity"
-    result = evaluate_trace([record, *trace_fixture()], scenario="continuous")
+    result = evaluate_trace([record, *trace_fixture()])
     assert result["status"] == "fail"
     assert any("Extra inputs" in item for item in result["violations"])
 
@@ -712,7 +711,7 @@ def test_exhausted_admission_without_a_session_fails() -> None:
             "event": {"message": "admission denied after 3 attempts"},
         },
     ]
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["status"] == "fail"
     assert any("admission denied after 3 attempts" in i for i in result["violations"])
     assert "missing audio input" in result["violations"]
@@ -734,7 +733,7 @@ def test_response_terminal_reason_must_match_client_commands(
     find_event(trace, "response.done")["response"].update(
         status=status, status_details={"reason": reason}
     )
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["status"] == "fail"
     assert any(violation in item for item in result["violations"])
 
@@ -742,7 +741,7 @@ def test_response_terminal_reason_must_match_client_commands(
 def test_response_terminal_without_reason_fails() -> None:
     trace = trace_fixture()
     find_event(trace, "response.done")["response"].pop("status_details")
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["status"] == "fail"
     assert "unsupported response terminal reason: None" in result["violations"]
 
@@ -756,7 +755,7 @@ def test_healthy_trace_without_overlap_is_not_exercised() -> None:
         and record["time_s"] > 100.15
     )["time_s"] = 100.105
     trace.sort(key=lambda record: record["time_s"])
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["status"] == "not_exercised"
     assert result["violations"] == []
     assert result["coverage"]["input_output_overlap"] is False
@@ -764,22 +763,17 @@ def test_healthy_trace_without_overlap_is_not_exercised() -> None:
 
 def test_client_clock_translation_preserves_metrics() -> None:
     trace = trace_fixture()
-    before = evaluate_trace(trace, scenario="continuous")
+    before = evaluate_trace(trace)
     for record in trace:
         record["time_s"] += 5000
-    after = evaluate_trace(trace, scenario="continuous")
+    after = evaluate_trace(trace)
     assert after["status"] == before["status"]
     assert after["coverage"] == before["coverage"]
     assert after["metrics"] == pytest.approx(before["metrics"])
 
 
 def test_empty_trace_fails() -> None:
-    assert evaluate_trace([], scenario="continuous")["status"] == "fail"
-
-
-def test_removed_cancel_scenario_is_rejected() -> None:
-    with pytest.raises(ValueError, match="unsupported scenario: cancel_resume"):
-        evaluate_trace(trace_fixture(), scenario="cancel_resume")
+    assert evaluate_trace([])["status"] == "fail"
 
 
 @pytest.mark.parametrize(
@@ -796,6 +790,6 @@ def test_removed_cancel_events_cannot_qualify(direction: str, event_type: str) -
             "event": {"type": event_type, "event_id": "obsolete_cancel"},
         },
     )
-    result = evaluate_trace(trace, scenario="continuous")
+    result = evaluate_trace(trace)
     assert result["status"] == "fail"
     assert any(event_type in violation for violation in result["violations"])

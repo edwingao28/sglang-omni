@@ -286,7 +286,6 @@ async def run_samples(
                 await run_session(
                     url,
                     (variant_dir / "input.pcm").read_bytes(),
-                    scenario="continuous",
                     trace_path=variant_dir / "continuous.jsonl",
                     timeout_s=timeout_s,
                     profile=profile,

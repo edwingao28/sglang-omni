@@ -31,10 +31,7 @@ def test_minicpmo_audio_deployment_without_session_timeout() -> None:
     )
     grant["output_modalities"] = ["audio"]
     grant["limits"].pop("session_timeout_s")
-    assert (
-        evaluate_trace(records, scenario="continuous", profile=MINICPMO)["status"]
-        == "pass"
-    )
+    assert evaluate_trace(records, profile=MINICPMO)["status"] == "pass"
 
 
 def minicpmo_trace() -> list[dict]:
@@ -158,7 +155,7 @@ def minicpmo_trace() -> list[dict]:
 
 
 def test_minicpmo_accepts_natural_turns_and_variable_audio() -> None:
-    result = evaluate_trace(minicpmo_trace(), scenario="continuous", profile=MINICPMO)
+    result = evaluate_trace(minicpmo_trace(), profile=MINICPMO)
     assert result["violations"] == []
     assert result["status"] == "pass"
     assert result["metrics"]["output_audio_s"] == pytest.approx(0.4)
@@ -177,21 +174,18 @@ def test_minicpmo_accepts_natural_turns_and_variable_audio() -> None:
 def test_minicpmo_still_rejects_missing_protocol_receipts(kind: str) -> None:
     trace = minicpmo_trace()
     trace.pop(next(i for i, r in enumerate(trace) if r["event"]["type"] == kind))
-    assert (
-        evaluate_trace(trace, scenario="continuous", profile=MINICPMO)["status"]
-        == "fail"
-    )
+    assert evaluate_trace(trace, profile=MINICPMO)["status"] == "fail"
 
 
 def test_minicpmo_is_not_accepted_as_voicechat() -> None:
-    assert evaluate_trace(minicpmo_trace(), scenario="continuous")["status"] == "fail"
+    assert evaluate_trace(minicpmo_trace())["status"] == "fail"
 
 
 def test_minicpmo_silence_is_a_valid_protocol_observation() -> None:
     trace = [
         r for r in minicpmo_trace() if not r["event"]["type"].startswith("response.")
     ]
-    result = evaluate_trace(trace, scenario="continuous", profile=MINICPMO)
+    result = evaluate_trace(trace, profile=MINICPMO)
     assert result["status"] == "pass"
     assert result["coverage"]["input_output_overlap"] is False
 

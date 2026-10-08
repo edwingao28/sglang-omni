@@ -60,16 +60,11 @@ async def run_session(
     url: str,
     pcm: bytes,
     *,
-    scenario: Literal["continuous"],
     trace_path: Path,
     timeout_s: float = 90.0,
     profile: ProfileName = DEFAULT_PROFILE,
 ) -> None:
     """Save observations and failures; classification belongs to offline replay."""
-    if scenario != "continuous":
-        raise ValueError(f"unsupported scenario: {scenario}")
-    else:
-        pass
     if not pcm or len(pcm) % 2:
         raise ValueError("Input must be nonempty PCM16")
     else:

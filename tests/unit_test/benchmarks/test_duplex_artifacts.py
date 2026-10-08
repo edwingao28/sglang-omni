@@ -69,7 +69,7 @@ def recorded_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         )
 
     def evaluate(
-        records: list[dict], scenario: str, profile: str, max_admission_attempts: int
+        records: list[dict], profile: str, max_admission_attempts: int
     ) -> dict:
         return {
             "status": "pass",
@@ -88,7 +88,7 @@ def test_replay_uses_the_recorded_admission_limit(
     limits = []
 
     def evaluate(
-        records: list[dict], scenario: str, profile: str, max_admission_attempts: int
+        records: list[dict], profile: str, max_admission_attempts: int
     ) -> dict:
         limits.append(max_admission_attempts)
         return {"status": "pass", "violations": [], "coverage": {}, "metrics": {}}
@@ -209,7 +209,7 @@ def test_partial_send_preserves_client_failure_and_identity_diagnostic(
     monkeypatch.setattr(
         artifacts,
         "evaluate_trace",
-        lambda records, scenario, profile, max_admission_attempts: {
+        lambda records, profile, max_admission_attempts: {
             "status": "fail",
             "violations": ["client error: connection timeout"],
             "coverage": {"input_output_overlap": False},
@@ -274,7 +274,7 @@ def test_not_exercised_is_not_pass_or_qualified_timing(
     path.write_text("".join(json.dumps(record) + "\n" for record in records))
 
     def evaluate(
-        records: list[dict], scenario: str, profile: str, max_admission_attempts: int
+        records: list[dict], profile: str, max_admission_attempts: int
     ) -> dict:
         unexercised = records[-1]["time_s"] == 2.0
         return {
@@ -422,7 +422,7 @@ def test_cli_succeeds_only_when_every_case_passes(
     monkeypatch.setattr(
         artifacts,
         "evaluate_trace",
-        lambda records, scenario, profile, max_admission_attempts: {
+        lambda records, profile, max_admission_attempts: {
             "status": status,
             "violations": [],
             "coverage": {},

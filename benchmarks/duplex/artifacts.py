@@ -280,7 +280,6 @@ def replay_run(run_dir: Path) -> dict[str, JsonValue]:
             pass
         verdict = evaluate_trace(
             trace_records,
-            scenario=case_record.scenario,
             profile=manifest.profile,
             max_admission_attempts=admission_retries,
         )

@@ -340,7 +340,6 @@ async def capture_session(
         await run_session(
             f"ws://127.0.0.1:{port}/v1/realtime",
             FIXTURE_PCM,
-            scenario="continuous",
             trace_path=trace_path,
             timeout_s=timeout_s,
         )
@@ -372,7 +371,7 @@ def count_output_samples(records: list[dict[str, JsonValue]]) -> int:
 def test_client_records_complete_native_session(tmp_path: Path) -> None:
     peer = DuplexPeer()
     records = asyncio.run(capture_session(peer, tmp_path / "trace.jsonl"))
-    result = evaluate_trace(records, scenario="continuous")
+    result = evaluate_trace(records)
 
     assert result["status"] == "pass", result
     assert bytes(peer.pcm) == FIXTURE_PCM
@@ -402,20 +401,6 @@ def test_client_records_complete_native_session(tmp_path: Path) -> None:
     assert "response.cancel" not in [event["type"] for event in peer.received]
 
 
-def test_removed_cancel_scenario_is_rejected_before_connection(tmp_path: Path) -> None:
-    path = tmp_path / "trace.jsonl"
-    with pytest.raises(ValueError, match="unsupported scenario: cancel_resume"):
-        asyncio.run(
-            run_session(
-                "ws://127.0.0.1:1/v1/realtime",
-                FIXTURE_PCM,
-                scenario="cancel_resume",
-                trace_path=path,
-            )
-        )
-    assert not path.exists()
-
-
 @pytest.mark.parametrize(
     ("mode", "expected_error"),
     [
@@ -429,7 +414,7 @@ def test_client_retains_failed_attempt(
 ) -> None:
     peer = DuplexPeer(mode)
     records = asyncio.run(capture_session(peer, tmp_path / "trace.jsonl"))
-    result = evaluate_trace(records, scenario="continuous")
+    result = evaluate_trace(records)
 
     assert result["status"] == "fail", result
     assert result["violations"]
@@ -446,7 +431,7 @@ def test_client_keeps_the_close_receipt_after_a_fatal_server_error(
 ) -> None:
     peer = DuplexPeer("server_error")
     records = asyncio.run(capture_session(peer, tmp_path / "trace.jsonl"))
-    result = evaluate_trace(records, scenario="continuous")
+    result = evaluate_trace(records)
 
     assert result["status"] == "fail", result
     assert any(
@@ -467,7 +452,7 @@ def test_client_waits_out_a_late_close_after_a_fatal_error(tmp_path: Path) -> No
         capture_session(peer, tmp_path / "trace.jsonl", timeout_s=10.0)
     )
     elapsed_s = time.perf_counter() - started_s
-    result = evaluate_trace(records, scenario="continuous")
+    result = evaluate_trace(records)
 
     assert FATAL_CLOSE_DELAY_S < elapsed_s < 5.0, elapsed_s
     assert result["status"] == "fail", result
@@ -489,7 +474,7 @@ def test_client_requests_close_after_a_nonfatal_error(tmp_path: Path) -> None:
         capture_session(peer, tmp_path / "trace.jsonl", timeout_s=10.0)
     )
     elapsed_s = time.perf_counter() - started_s
-    result = evaluate_trace(records, scenario="continuous")
+    result = evaluate_trace(records)
 
     assert elapsed_s < 5.0, elapsed_s
     assert result["status"] == "fail", result
@@ -532,7 +517,6 @@ async def capture_with_denials(
         await run_session(
             f"ws://127.0.0.1:{port}/v1/realtime",
             FIXTURE_PCM,
-            scenario="continuous",
             trace_path=trace_path,
             timeout_s=10.0,
         )
@@ -555,7 +539,7 @@ def test_client_retries_a_denied_handshake_and_still_records_a_clean_session(
     assert records[: len(admissions)] == admissions
     assert not [r for r in records if r["direction"] == "error"]
     assert bytes(peer.pcm) == FIXTURE_PCM
-    result = evaluate_trace(records, scenario="continuous")
+    result = evaluate_trace(records)
     assert result["status"] == "pass", result
     assert result["metrics"]["admission_denials"] == ADMISSION_RETRIES
 
@@ -575,7 +559,7 @@ def test_client_fails_once_the_admission_budget_is_exhausted(tmp_path: Path) -> 
         == f"RuntimeError: admission denied {ADMISSION_RETRIES + 1} times with HTTP 503"
     )
     assert not peer.sent
-    result = evaluate_trace(records, scenario="continuous")
+    result = evaluate_trace(records)
     assert result["status"] == "fail", result
     assert result["metrics"]["admission_denials"] == ADMISSION_RETRIES
 
@@ -589,7 +573,7 @@ def test_client_enforces_the_session_deadline(tmp_path: Path) -> None:
     elapsed_s = time.perf_counter() - started_s
 
     assert 0.5 <= elapsed_s < 5.0, elapsed_s
-    assert evaluate_trace(records, scenario="continuous")["status"] == "fail"
+    assert evaluate_trace(records)["status"] == "fail"
     assert any(r["event"]["type"] == "session.created" for r in records)
     assert input_append_records(records)
     assert records[-1]["direction"] == "error"
@@ -606,7 +590,7 @@ def test_client_bounds_observation_after_the_session_closes(tmp_path: Path) -> N
     streamed_s = FIXTURE_PACKETS * PACKET_MS / 1000
 
     assert elapsed_s < streamed_s + POST_CLOSE_SECONDS + 2.0, elapsed_s
-    assert evaluate_trace(records, scenario="continuous")["status"] == "pass"
+    assert evaluate_trace(records)["status"] == "pass"
     assert records[-1]["event"]["type"] == "session.closed"
 
 
@@ -628,7 +612,7 @@ def test_client_abandons_a_driver_the_receive_loop_can_no_longer_serve(
         ("error", None),
     ]
     assert records[-1]["event"]["message"] == "driver stalled after the receive loop"
-    assert evaluate_trace(records, scenario="continuous")["status"] == "fail"
+    assert evaluate_trace(records)["status"] == "fail"
 
 
 async def run_cli(module: str, *arguments: str) -> tuple[int, str, str]:
