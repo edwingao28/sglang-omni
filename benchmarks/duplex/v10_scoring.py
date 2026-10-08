@@ -11,7 +11,7 @@ import statistics
 from collections import Counter
 from math import gcd
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 import numpy as np
 import soundfile
@@ -19,11 +19,9 @@ from pydantic import JsonValue
 from scipy.interpolate import interp1d
 from scipy.signal import resample_poly
 from scipy.spatial.distance import jensenshannon
+from silero_vad.utils_vad import OnnxWrapper
 
 from benchmarks.duplex.v10_dataset import Task
-
-if TYPE_CHECKING:
-    from silero_vad.utils_vad import OnnxWrapper
 
 SCORING_VERSION = "fdb-v10-synthetic-v4"
 # note (Jeffro): Upstream takeover rule; output this short counts as a backchannel, not a turn.
@@ -146,7 +144,7 @@ def validate_segments(
     return checked
 
 
-def load_silero_model() -> "OnnxWrapper":
+def load_silero_model() -> OnnxWrapper:
     """Load Silero VAD once per scoring run; get_speech_timestamps resets its state."""
     # note (wenyao): Word-timestamp scoring and tests do not need torch or Silero.
     from silero_vad import load_silero_vad
@@ -155,7 +153,7 @@ def load_silero_model() -> "OnnxWrapper":
 
 
 def silero_speech_segments(
-    wav_path: str | Path, vad_model: "OnnxWrapper"
+    wav_path: str | Path, vad_model: OnnxWrapper
 ) -> dict[str, JsonValue]:
     """Detect speech in a PCM WAV with the frozen Silero VAD configuration."""
     import torch

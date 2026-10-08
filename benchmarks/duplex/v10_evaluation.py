@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from pydantic import JsonValue
+from silero_vad.utils_vad import OnnxWrapper
 
 import benchmarks.duplex.v10_scoring as v10_scoring
 from benchmarks.duplex.artifacts import source_fingerprint
@@ -23,9 +23,6 @@ from benchmarks.duplex.run_artifacts import (
 from benchmarks.duplex.v10_dataset import Task
 from benchmarks.duplex.v10_scoring import TASKS
 from benchmarks.duplex.v15_audio import write_json
-
-if TYPE_CHECKING:
-    from silero_vad.utils_vad import OnnxWrapper
 
 RUN_KIND = "full-duplex-bench-v1.0"
 VARIANT = "input"
@@ -47,7 +44,7 @@ def unscored(sample: dict[str, JsonValue], reason: str) -> dict[str, JsonValue]:
 
 
 def vad_evidence(
-    run_dir: Path, output_wav: Path, vad_model: "OnnxWrapper"
+    run_dir: Path, output_wav: Path, vad_model: OnnxWrapper
 ) -> dict[str, JsonValue]:
     """Silero segments of one output WAV plus the provenance the score record keeps."""
     detected = v10_scoring.silero_speech_segments(output_wav, vad_model)
