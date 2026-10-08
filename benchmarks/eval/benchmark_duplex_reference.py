@@ -9,6 +9,7 @@ from pathlib import Path
 
 from benchmarks.duplex.reference_asr import run_asr
 from benchmarks.duplex.reference_behavior import run_judge, run_prepare_judge
+from benchmarks.duplex.reference_capture import TraceFormat
 from benchmarks.duplex.reference_core import Engine, HashCache
 from benchmarks.duplex.reference_custom_judge import run_custom
 from benchmarks.duplex.reference_export import export_runs
@@ -35,7 +36,14 @@ def build_parser() -> argparse.ArgumentParser:
     export = commands.add_parser(
         "export", help="Build fixed-window audio from saved runs"
     )
-    export.add_argument("--engine", choices=("sglang", "vllm"), required=True)
+    export.add_argument(
+        "--engine", required=True, help="Engine or cohort label for reports"
+    )
+    export.add_argument(
+        "--trace-format",
+        choices=[trace_format.value for trace_format in TraceFormat],
+        help="Capture encoding (legacy sglang/vllm labels select their existing format)",
+    )
     export.add_argument("--run", type=Path, action="append", required=True)
     export.add_argument("--out", type=Path, required=True)
     export.add_argument("--dataset-root", type=Path)
@@ -137,9 +145,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.phase == "export":
-        result = export_runs(
-            args.run, args.out, args.engine, args.only, args.dataset_root
-        )
+        try:
+            result = export_runs(
+                args.run,
+                args.out,
+                args.engine,
+                args.only,
+                args.dataset_root,
+                trace_format=args.trace_format,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
         print(json.dumps(result["counts"], sort_keys=True))
         return 0
     else:

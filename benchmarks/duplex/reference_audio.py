@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
 import hashlib
 import json
 import math
@@ -16,6 +14,11 @@ from numpy.typing import NDArray
 from pydantic import JsonValue
 from scipy.signal import resample_poly
 
+from benchmarks.duplex.reference_capture import (
+    TraceFormat,
+    parse_float32_trace,
+    parse_pcm16_trace,
+)
 from benchmarks.duplex.v15_audio import PACING_TOLERANCE_S
 
 POLICY_VERSION = 2
@@ -43,78 +46,8 @@ def sha_file(path: Path) -> str:
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
-def decode_b64(value: JsonValue) -> bytes:
-    if not isinstance(value, str):
-        raise ValueError("payload is not a base64 string")
-    else:
-        pass
-    try:
-        return base64.b64decode(value, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise ValueError(f"invalid base64: {exc}") from exc
-
-
 def response_id(event: dict[str, JsonValue]) -> JsonValue:
     return event.get("response_id") or (event.get("response") or {}).get("id")
-
-
-def append_payload(
-    record: dict[str, JsonValue], engine: str, index: int, expected: NDArray[np.int16]
-) -> tuple[float | None, str | None]:
-    """Return (source_start_s, error) after checking one append against input samples."""
-    event = record["event"]
-    if engine == "sglang":
-        source = event.get("sglang") or {}
-        if source.get("seq") != index or type(source.get("t_start_ms")) not in (
-            int,
-            float,
-        ):
-            return None, "append lacks matching sglang seq/t_start_ms"
-        else:
-            pass
-        start = source["t_start_ms"] / 1000
-        pcm = decode_b64(event.get("audio"))
-        if len(pcm) % 2 or not np.array_equal(np.frombuffer(pcm, "<i2"), expected):
-            return start, "serialized PCM16 differs from input.pcm"
-        else:
-            pass
-    else:
-        source = record.get("client_source") or {}
-        valid = len(expected)
-        if (
-            source.get("index"),
-            source.get("valid_samples"),
-            source.get("padded_samples"),
-        ) != (index, valid, PACKET_SAMPLES - valid):
-            return None, "append client_source index/valid/padded mismatch"
-        else:
-            pass
-        if (event.get("format"), event.get("sample_rate_hz")) != ("pcm_f32le", RATE):
-            return None, "append is not pcm_f32le at 16 kHz"
-        else:
-            pass
-        start = source.get("start_s")
-        data = decode_b64(event.get("audio"))
-        if len(data) != 4 * PACKET_SAMPLES:
-            return start, "serialized frame is not 1280 float32 samples"
-        else:
-            pass
-        scaled = np.frombuffer(data, "<f4").astype(np.float64) * 32768
-        if (
-            not np.isfinite(scaled).all()
-            or not np.array_equal(scaled[:valid], expected.astype(np.float64))
-            or np.any(scaled[valid:])
-        ):
-            return start, "serialized float32 frame differs from input.pcm/zero padding"
-        else:
-            pass
-    if type(start) not in (int, float) or not math.isclose(
-        start, index * PACKET_S, abs_tol=1e-9
-    ):
-        return start, "append source start is not index * 80 ms"
-    else:
-        pass
-    return start, None
 
 
 def deadline(t0: float, index: int, window_s: float) -> float:
@@ -242,7 +175,7 @@ def lateness(
 
 def analyze_variant(
     variant_dir: Path,
-    engine: str,
+    trace_format: TraceFormat,
     expected_input_sha: str | None,
     receipts_required: bool = False,
 ) -> tuple[dict[str, JsonValue], bytes | None, NDArray[np.int16] | None]:
@@ -307,27 +240,29 @@ def analyze_variant(
             post_window_events.append({"elapsed_s": at(time_s), "message": message})
 
     with trace_path.open(encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, 1):
-            try:
-                record = json.loads(line)
-                direction, time_s, event = (
-                    record["direction"],
-                    record["time_s"],
-                    record["event"],
-                )
-                kind = event.get("type")
-            except (ValueError, KeyError, TypeError, AttributeError) as exc:
-                reasons.append(
-                    f"trace line {line_number} unreadable: {type(exc).__name__}"
-                )
-                continue
-            if type(time_s) not in (int, float) or not math.isfinite(time_s):
-                reasons.append(
-                    f"trace line {line_number} has malformed clock {time_s!r}"
-                )
+        if trace_format == TraceFormat.PCM16:
+            records = parse_pcm16_trace(handle, samples, packet)
+            receipts_path = variant_dir / SEND_RECEIPTS
+            requires_window_mark = False
+        elif trace_format == TraceFormat.FLOAT32:
+            records = parse_float32_trace(handle, samples, packet, RATE)
+            receipts_path = None
+            requires_window_mark = True
+            receipts_required = False
+        else:
+            raise ValueError(f"Unsupported trace format: {trace_format!r}")
+        for capture in records:
+            line_number = capture.line_number
+            if capture.row is None:
+                reasons.append(capture.read_error)
                 continue
             else:
-                pass
+                direction, time_s, event = (
+                    capture.row.direction,
+                    capture.row.time_s,
+                    capture.row.event,
+                )
+            kind = event.get("type")
             if last_time is not None and time_s < last_time:
                 reasons.append(f"trace clock not monotonic at line {line_number}")
             else:
@@ -347,15 +282,14 @@ def analyze_variant(
                     continue
                 else:
                     pass
-                try:
-                    start, error = append_payload(
-                        record,
-                        engine,
-                        index,
-                        samples[index * packet : (index + 1) * packet],
-                    )
-                except ValueError as exc:
-                    start, error = None, str(exc)
+                start, error = capture.source_start_s, capture.payload_error
+                if error is None and (
+                    start is None
+                    or not math.isclose(start, index * PACKET_S, abs_tol=1e-9)
+                ):
+                    error = "append source start is not index * 80 ms"
+                else:
+                    pass
                 if error:
                     reasons.append(f"append {index} (line {line_number}): {error}")
                 else:
@@ -410,13 +344,8 @@ def analyze_variant(
                 live_after_t = True
             else:
                 pass
-            if kind == "session.updated" and engine == "sglang":
-                fmt = (
-                    ((event.get("session") or {}).get("audio") or {})
-                    .get("output", {})
-                    .get("format", {})
-                )
-                out_rate = fmt.get("rate") if fmt.get("type") == "audio/pcm" else None
+            if capture.declares_output_rate:
+                out_rate = capture.output_rate
             elif kind == "session.closed":
                 closed_count += 1
                 close_times_s.append(at(time_s))
@@ -444,11 +373,9 @@ def analyze_variant(
                         raise ValueError("audio before first input append")
                     else:
                         pass
-                    rate = (
-                        out_rate if engine == "sglang" else event.get("sample_rate_hz")
-                    )
-                    if engine == "vllm" and event.get("format") != "pcm16":
-                        raise ValueError("audio delta is not pcm16")
+                    rate = capture.output_rate
+                    if capture.payload_error is not None:
+                        raise ValueError(capture.payload_error)
                     else:
                         pass
                     if type(rate) is not int or rate <= 0:
@@ -459,7 +386,7 @@ def analyze_variant(
                         raise ValueError("audio output rate changed")
                     else:
                         pass
-                    data = decode_b64(event.get("delta"))
+                    data = capture.output_pcm
                     if not data or len(data) % 2:
                         raise ValueError("empty or truncated PCM16 audio delta")
                     else:
@@ -517,8 +444,8 @@ def analyze_variant(
         if first_append_s is not None
         else []
     )
-    receipts_path, receipts_sha, completions = variant_dir / SEND_RECEIPTS, None, None
-    if engine == "sglang" and (receipts_required or receipts_path.is_file()):
+    receipts_sha, completions = None, None
+    if receipts_path is not None and (receipts_required or receipts_path.is_file()):
         receipts_sha, completions = check_send_receipts(
             receipts_path, append_ids, append_times, deadlines, reasons
         )
@@ -527,7 +454,7 @@ def analyze_variant(
     sent_format = bool(sent_records or lifecycle_events)
     legacy = not sent_format and receipts_sha is None and not receipts_required
     if sent_format:
-        if engine == "vllm" and not lifecycle_events:
+        if requires_window_mark and not lifecycle_events:
             reasons.append("window mark missing from new-format trace")
         else:
             pass
@@ -562,14 +489,14 @@ def analyze_variant(
     valid = not reasons
     output = None
     record = {
-        "engine_format": engine,
+        "trace_format": trace_format.value,
         "source": {
             "directory": str(variant_dir),
             "trace_sha256": sha_file(trace_path),
             "input_pcm_sha256": input_sha,
             **(
                 {"input_send_receipts_sha256": receipts_sha}
-                if engine == "sglang"
+                if receipts_path is not None
                 else {}
             ),
         },
@@ -696,7 +623,7 @@ def analyze_variant(
     return record, (pcm if input_sha == expected_input_sha else None), output
 
 
-def load_runs(runs: list[Path], engine: str) -> tuple[
+def load_runs(runs: list[Path], trace_format: TraceFormat) -> tuple[
     dict[str, tuple[Path, dict[str, JsonValue]]],
     list[dict[str, JsonValue]],
     list[dict[str, JsonValue]],
@@ -707,9 +634,17 @@ def load_runs(runs: list[Path], engine: str) -> tuple[
         run = run.resolve()
         data = json.loads((run / "run.json").read_text())
         manifest = json.loads((run / "manifest.json").read_text())
-        is_vllm = str(manifest.get("validation_scope", "")).startswith("vllm-native")
-        if is_vllm != (engine == "vllm"):
-            raise ValueError(f"{run} is not a {engine} run")
+        declared_format = manifest.get("trace_format")
+        if declared_format is None and str(
+            manifest.get("validation_scope", "")
+        ).startswith("vllm-native"):
+            declared_format = TraceFormat.FLOAT32.value
+        else:
+            pass
+        if declared_format is not None and TraceFormat(declared_format) != trace_format:
+            raise ValueError(
+                f"{run} declares a different trace format: {declared_format}"
+            )
         else:
             pass
         sources.append(
@@ -740,7 +675,7 @@ def load_runs(runs: list[Path], engine: str) -> tuple[
 
 
 def diagnostics(
-    run: Path, state: dict[str, JsonValue], engine: str
+    run: Path, state: dict[str, JsonValue], trace_format: TraceFormat
 ) -> dict[str, JsonValue]:
     """Preserve recorder verdicts verbatim-by-field; they never decide eligibility."""
     kept = {
@@ -749,13 +684,16 @@ def diagnostics(
         if k not in ("files", "native_lifecycle", "input_timing")
     }
     directory = run / state["directory"]
-    if engine == "vllm" and (directory / "native-lifecycle.json").is_file():
+    if (
+        trace_format == TraceFormat.FLOAT32
+        and (directory / "native-lifecycle.json").is_file()
+    ):
         native = json.loads((directory / "native-lifecycle.json").read_text())
         native.pop("capabilities", None)
         kept["native_lifecycle"] = native
     else:
         pass
-    if engine == "sglang" and (directory / "report.json").is_file():
+    if trace_format == TraceFormat.PCM16 and (directory / "report.json").is_file():
         kept["report_sha256"] = sha_file(directory / "report.json")
     else:
         pass

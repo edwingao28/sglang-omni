@@ -16,6 +16,7 @@ from numpy.typing import NDArray
 from pydantic import JsonValue
 
 from benchmarks.duplex import reference_audio
+from benchmarks.duplex.reference_capture import TraceFormat, resolve_trace_format
 from benchmarks.duplex.reference_export import export_runs
 from benchmarks.eval.benchmark_duplex_reference import main
 
@@ -53,8 +54,8 @@ def make_session_trace(
     append_delays_s: dict[int, float] | None = None,
     omit_last_append: bool = False,
     corrupted_append_index: int | None = None,
-    include_window_mark: bool = True,
-    include_sent_records: bool = True,
+    include_window_mark: bool | None = None,
+    include_sent_records: bool | None = None,
     created_response_ids: Sequence[str] = ("r1",),
     completed_response_ids: Sequence[str] = (),
     send_completion_delays_s: dict[int, float] | None = None,
@@ -68,6 +69,12 @@ def make_session_trace(
     ] = []
     append_delays_s = append_delays_s or {}
     send_completion_delays_s = send_completion_delays_s or {}
+    include_window_mark = (
+        engine == "vllm" if include_window_mark is None else include_window_mark
+    )
+    include_sent_records = (
+        engine == "vllm" if include_sent_records is None else include_sent_records
+    )
     if engine == "sglang":
         rows.append(
             (
@@ -152,18 +159,18 @@ def make_session_trace(
                     },
                 )
             )
-            if include_sent_records:
-                completion_delay_s = send_completion_delays_s.get(index, 1e-4)
-                rows.append(
-                    (
-                        send_start_s + completion_delay_s,
-                        "sent",
-                        {"event_id": event_id, "type": event["type"]},
-                        {},
-                    )
+        if include_sent_records:
+            completion_delay_s = send_completion_delays_s.get(index, 1e-4)
+            rows.append(
+                (
+                    send_start_s + completion_delay_s,
+                    "sent",
+                    {"event_id": event_id, "type": event["type"]},
+                    {},
                 )
-            else:
-                pass
+            )
+        else:
+            pass
     for response_id in created_response_ids:
         rows.append(
             (
@@ -213,7 +220,7 @@ def make_session_trace(
         rows.append(
             (TRACE_ORIGIN_S + elapsed_s, "error", {"message": "client failure"}, {})
         )
-    if include_window_mark and engine == "vllm":
+    if include_window_mark:
         rows.append(
             (
                 TRACE_ORIGIN_S
@@ -304,12 +311,53 @@ class AudioFixture(unittest.TestCase):
             else expected_input_sha256
         )
         return reference_audio.analyze_variant(
-            variant_directory, engine, expected_input_sha256
+            variant_directory, resolve_trace_format(engine, None), expected_input_sha256
         )
 
 
 class WindowEligibility(AudioFixture):
     pcm = make_input_pcm(8000)
+
+    def test_capture_formats_preserve_equivalent_audio_and_evidence(self) -> None:
+        pcm = make_input_pcm(7681)
+        captures = []
+        for engine in ("sglang", "vllm"):
+            trace = make_session_trace(
+                pcm,
+                engine,
+                audio_deltas=[
+                    (0.1, make_constant_pcm(0.08, 24000)),
+                    (0.46, make_constant_pcm(0.1, 24000, 2000)),
+                    (0.50, make_constant_pcm(0.1, 24000, 3000)),
+                ],
+                output_sample_rate=24000,
+                include_sent_records=True,
+                include_window_mark=True,
+                append_delays_s=dict.fromkeys(range(1, 7), 0.001),
+            )
+            record, input_pcm, audio = self.analyze(engine, pcm, trace)
+            self.assertTrue(record["window"]["valid"], record["window"]["reasons"])
+            self.assertEqual(input_pcm, pcm)
+            self.assertEqual(
+                record["source"]["trace_sha256"],
+                hashlib.sha256(trace.encode()).hexdigest(),
+            )
+            self.assertEqual(
+                record["source"]["input_pcm_sha256"], hashlib.sha256(pcm).hexdigest()
+            )
+            captures.append((record, audio))
+        for field in (
+            "input",
+            "window",
+            "input_check",
+            "lifecycle",
+            "output",
+            "boundary",
+        ):
+            self.assertEqual(captures[0][0][field], captures[1][0][field], field)
+        np.testing.assert_array_equal(captures[0][1], captures[1][1])
+        self.assertEqual(captures[0][0]["input_check"]["append_completions_after_T"], 1)
+        self.assertTrue(captures[0][0]["boundary"]["playout_active_at_T"])
 
     def test_missing_terminal_is_lifecycle_only(self) -> None:
         record, pcm, out = self.analyze(
@@ -571,6 +619,70 @@ class TraceClock(AudioFixture):
 
 
 class ReferenceExport(AudioFixture):
+    def test_explicit_trace_format_makes_engine_label_metadata_only(self) -> None:
+        pcm = make_input_pcm(7681)
+        for engine, trace_format in (
+            ("sglang", TraceFormat.PCM16),
+            ("vllm", TraceFormat.FLOAT32),
+        ):
+            run = self.make_run(
+                {
+                    variant: (pcm, make_session_trace(pcm, engine))
+                    for variant in ("overlap", "clean")
+                }
+            )
+            original = export_runs([run], self.root / f"original-{engine}", engine)
+            relabeled_output = self.root / f"relabeled-{engine}"
+            self.assertEqual(
+                main(
+                    [
+                        "export",
+                        "--engine",
+                        "other-engine",
+                        "--trace-format",
+                        trace_format.value,
+                        "--run",
+                        str(run),
+                        "--out",
+                        str(relabeled_output),
+                    ]
+                ),
+                0,
+            )
+            relabeled = json.loads(
+                (relabeled_output / "reference-manifest.json").read_text()
+            )
+            self.assertEqual(relabeled["engine"], "other-engine")
+            self.assertEqual(relabeled["trace_format"], trace_format.value)
+            self.assertEqual(original["samples"], relabeled["samples"])
+            self.assertEqual(original["counts"], relabeled["counts"])
+            shutil.rmtree(run)
+
+    def test_unknown_format_or_unmapped_engine_is_rejected_before_export(self) -> None:
+        for extra_args in (
+            ["--engine", "other-engine"],
+            ["--engine", "sglang", "--trace-format", "unknown"],
+        ):
+            output = self.root / "export"
+            with self.assertRaises(SystemExit) as error:
+                main(
+                    [
+                        "export",
+                        *extra_args,
+                        "--run",
+                        str(self.root / "missing"),
+                        "--out",
+                        str(output),
+                    ]
+                )
+            self.assertEqual(error.exception.code, 2)
+            self.assertFalse(output.exists())
+        with self.assertRaises(ValueError):
+            export_runs(
+                [], self.root / "unknown", "other-engine", trace_format="unknown"
+            )
+        self.assertFalse((self.root / "unknown").exists())
+
     def test_declared_send_receipts_cannot_fall_back_to_legacy(self) -> None:
         pcm = make_input_pcm(8000)
         text = make_session_trace(pcm, "sglang")

@@ -21,6 +21,7 @@ from benchmarks.duplex.reference_audio import (
     sha_file,
     write_wav,
 )
+from benchmarks.duplex.reference_capture import resolve_trace_format
 from benchmarks.duplex.reference_core import read_json, utc_now
 from benchmarks.duplex.v15_audio import normalize_audio, write_json
 from benchmarks.duplex.v15_dataset import SUBSETS, list_sample_dirs
@@ -32,15 +33,17 @@ def export_runs(
     engine: str,
     sample_ids: list[str] | None = None,
     dataset_root: Path | None = None,
+    trace_format: str | None = None,
 ) -> dict[str, JsonValue]:
     """Export every selected variant, retaining missing and invalid outcomes."""
+    capture_format = resolve_trace_format(engine, trace_format)
     output = output.resolve()
     for run in runs:
         if output.is_relative_to(run.resolve()):
             raise ValueError("Reference output must be outside every source run")
         else:
             pass
-    chosen, sources, superseded = load_runs(runs, engine)
+    chosen, sources, superseded = load_runs(runs, capture_format)
     if sample_ids:
         selected = list(dict.fromkeys(sample_ids))
     elif dataset_root is not None:
@@ -93,9 +96,9 @@ def export_runs(
                 pass
             record, pcm, audio = analyze_variant(
                 directory,
-                engine,
+                capture_format,
                 (state.get("input") or {}).get("sha256"),
-                receipts_required=engine == "sglang" and sidecar,
+                receipts_required=sidecar,
             )
             reasons = record["window"]["reasons"]
             if dataset_root is not None and pcm is not None:
@@ -113,7 +116,7 @@ def export_runs(
                 eligible=not reasons,
                 reasons=reasons,
                 flags=[k for k, v in record.get("boundary", {}).items() if v is True],
-                protocol_diagnostics=diagnostics(run, state, engine),
+                protocol_diagnostics=diagnostics(run, state, capture_format),
             )
             if reasons:
                 record.pop("output", None)
@@ -129,6 +132,7 @@ def export_runs(
         "schema_version": 1,
         "kind": SCHEMA,
         "engine": engine,
+        "trace_format": capture_format.value,
         "created_utc": utc_now(),
         "policy_version": POLICY_VERSION,
         "policy": POLICY,
@@ -140,6 +144,7 @@ def export_runs(
             for source_path in (
                 Path(__file__),
                 Path(__file__).with_name("reference_audio.py"),
+                Path(__file__).with_name("reference_capture.py"),
             )
         },
         "counts": {

@@ -50,7 +50,7 @@ python -m benchmarks.eval.benchmark_duplex_v15 record \
     --timeout 90 --output results/recording
 
 python -m benchmarks.eval.benchmark_duplex_reference export \
-    --engine sglang --run results/recording \
+    --engine sglang --trace-format realtime-pcm16-v1 --run results/recording \
     --dataset-root "$FDB_DATASET" --out results/reference-audio
 ```
 
@@ -68,9 +68,15 @@ samples as missing. `--only category/id` selects an explicit diagnostic subset.
 Repeated `--run` accepts disjoint shards and records any incomplete entry
 superseded by a later run. Duplicate complete captures are rejected.
 
-`--engine vllm` reads the retained native vLLM trace format: serialized float32
-input, send-completion receipts and an observation-end marker. This command is
-an offline importer, not a vLLM server launcher or live recorder.
+`--engine` labels the resulting cohort. `--trace-format realtime-pcm16-v1` reads
+PCM16 appends with source sequence/timestamps and a session-declared output rate.
+`--trace-format realtime-f32-v1` reads padded float32 appends, PCM16 output with
+per-event rates, send-completion receipts and an observation-end marker. Both
+formats preserve capture timestamps and use the same observation-window checks.
+An explicit format permits any engine label. Existing `--engine sglang` and
+`--engine vllm` commands still select their respective formats when the format
+is omitted. Other labels require an explicit format. The float32 importer reads
+retained native vLLM captures; this command does not launch or record a server.
 
 ## Score and resume
 
