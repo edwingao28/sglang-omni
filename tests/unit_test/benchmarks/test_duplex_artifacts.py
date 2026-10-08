@@ -30,6 +30,7 @@ def recorded_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "config": {
             "packet_ms": 80,
             "timeout_s": 90,
+            "transport": {"admission_retries": 3},
             "unsupported": ["concurrent_sessions"],
         },
         "input": {
@@ -67,7 +68,9 @@ def recorded_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             "".join(json.dumps(record) + "\n" for record in records)
         )
 
-    def evaluate(records: list[dict], scenario: str, profile: str) -> dict:
+    def evaluate(
+        records: list[dict], scenario: str, profile: str, max_admission_attempts: int
+    ) -> dict:
         return {
             "status": "pass",
             "violations": [],
@@ -77,6 +80,35 @@ def recorded_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     monkeypatch.setattr(artifacts, "evaluate_trace", evaluate)
     return tmp_path
+
+
+def test_replay_uses_the_recorded_admission_limit(
+    recorded_run: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    limits = []
+
+    def evaluate(
+        records: list[dict], scenario: str, profile: str, max_admission_attempts: int
+    ) -> dict:
+        limits.append(max_admission_attempts)
+        return {"status": "pass", "violations": [], "coverage": {}, "metrics": {}}
+
+    monkeypatch.setattr(artifacts, "evaluate_trace", evaluate)
+    manifest_path = recorded_run / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["config"]["transport"]["admission_retries"] = 5
+    manifest_path.write_text(json.dumps(manifest))
+    assert artifacts.replay_run(recorded_run)["summary"]["passed"] == 2
+    assert limits == [5, 5]
+
+    del manifest["config"]["transport"]
+    manifest_path.write_text(json.dumps(manifest))
+    result = artifacts.replay_run(recorded_run)
+    assert result["summary"]["failed"] == 2
+    assert all(
+        "manifest lacks config.transport.admission_retries" in case["violations"]
+        for case in result["cases"]
+    )
 
 
 def test_replay_accounts_for_every_selected_case(recorded_run: Path) -> None:
@@ -177,7 +209,7 @@ def test_partial_send_preserves_client_failure_and_identity_diagnostic(
     monkeypatch.setattr(
         artifacts,
         "evaluate_trace",
-        lambda records, scenario, profile: {
+        lambda records, scenario, profile, max_admission_attempts: {
             "status": "fail",
             "violations": ["client error: connection timeout"],
             "coverage": {"input_output_overlap": False},
@@ -241,7 +273,9 @@ def test_not_exercised_is_not_pass_or_qualified_timing(
     records[-1]["time_s"] = 2.0
     path.write_text("".join(json.dumps(record) + "\n" for record in records))
 
-    def evaluate(records: list[dict], scenario: str, profile: str) -> dict:
+    def evaluate(
+        records: list[dict], scenario: str, profile: str, max_admission_attempts: int
+    ) -> dict:
         unexercised = records[-1]["time_s"] == 2.0
         return {
             "status": "not_exercised" if unexercised else "pass",
@@ -288,7 +322,7 @@ def real_recorded_run(tmp_path: Path) -> Path:
                     "revision": "e1b9c9c674b1187918593257906ee6e8cc6a13da",
                     "revision_source": "operator_supplied",
                 },
-                "config": {"packet_ms": 80},
+                "config": {"packet_ms": 80, "transport": {"admission_retries": 3}},
                 "input": {
                     "file": "input.pcm",
                     "sha256": hashlib.sha256(pcm).hexdigest(),
@@ -388,7 +422,7 @@ def test_cli_succeeds_only_when_every_case_passes(
     monkeypatch.setattr(
         artifacts,
         "evaluate_trace",
-        lambda records, scenario, profile: {
+        lambda records, scenario, profile, max_admission_attempts: {
             "status": status,
             "violations": [],
             "coverage": {},

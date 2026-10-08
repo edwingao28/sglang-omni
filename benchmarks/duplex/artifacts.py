@@ -218,6 +218,12 @@ def replay_run(run_dir: Path) -> dict[str, JsonValue]:
     except (OSError, ValueError) as exc:
         input_errors.append(f"input artifact unavailable: {exc}")
 
+    admission_retries = manifest.config.get("transport", {}).get("admission_retries")
+    if admission_retries is None:
+        input_errors.append("manifest lacks config.transport.admission_retries")
+    else:
+        pass
+
     id_counts = Counter(case_record.id for case_record in manifest.cases)
     trace_counts = Counter(
         (run_dir / case_record.trace_file).resolve() for case_record in manifest.cases
@@ -273,7 +279,10 @@ def replay_run(run_dir: Path) -> dict[str, JsonValue]:
         else:
             pass
         verdict = evaluate_trace(
-            trace_records, scenario=case_record.scenario, profile=manifest.profile
+            trace_records,
+            scenario=case_record.scenario,
+            profile=manifest.profile,
+            max_admission_attempts=admission_retries,
         )
         cases.append(
             {

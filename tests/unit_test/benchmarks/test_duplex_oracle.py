@@ -652,7 +652,6 @@ def test_admission_denials_before_the_session_are_not_failures() -> None:
     [
         ([admission(1), admission(3)], "not contiguous from one"),
         ([admission(2)], "not contiguous from one"),
-        ([admission(1), admission(2), admission(3), admission(4)], "less_than_equal"),
         ([admission(1, http_status=500)], "http_status"),
     ],
 )
@@ -662,6 +661,26 @@ def test_malformed_admission_diagnostics_fail(
     result = evaluate_trace([*records, *trace_fixture()], scenario="continuous")
     assert result["status"] == "fail"
     assert any(violation in item for item in result["violations"])
+
+
+@pytest.mark.parametrize(("limit", "status"), [(5, "pass"), (3, "fail")])
+def test_admission_attempts_are_bounded_by_the_recorded_limit(
+    limit: int, status: str
+) -> None:
+    denials = [admission(attempt) for attempt in range(1, 5)]
+    result = evaluate_trace(
+        [*denials, *trace_fixture()],
+        scenario="continuous",
+        max_admission_attempts=limit,
+    )
+    assert result["status"] == status
+    assert result["metrics"]["admission_denials"] == 4
+    if status == "fail":
+        assert any(
+            "exceeds the recorded limit 3" in item for item in result["violations"]
+        )
+    else:
+        pass
 
 
 def test_admission_diagnostic_after_session_start_fails() -> None:

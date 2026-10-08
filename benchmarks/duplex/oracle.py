@@ -9,7 +9,6 @@ from typing import Literal
 from pydantic import JsonValue, ValidationError
 
 from benchmarks.duplex.oracle_models import (
-    MAX_ADMISSION_ATTEMPTS,
     AdmissionEvent,
     Identifier,
     MediaTime,
@@ -25,7 +24,6 @@ from benchmarks.duplex.oracle_models import (
 from benchmarks.duplex.profiles import DEFAULT_PROFILE, PROFILES, ProfileName
 
 __all__ = [
-    "MAX_ADMISSION_ATTEMPTS",
     "AdmissionEvent",
     "Identifier",
     "MediaTime",
@@ -88,8 +86,13 @@ def evaluate_trace(
     *,
     scenario: Literal["continuous"],
     profile: ProfileName = DEFAULT_PROFILE,
+    max_admission_attempts: int | None = None,
 ) -> dict[str, JsonValue]:
-    """Report protocol failures separately from an unexercised duplex scenario."""
+    """Report protocol failures separately from an unexercised duplex scenario.
+
+    max_admission_attempts is the retry limit the recording client used, read from
+    its manifest; None checks only that denials count up from one.
+    """
     if scenario != "continuous":
         raise ValueError(f"unsupported scenario: {scenario}")
     else:
@@ -148,6 +151,12 @@ def evaluate_trace(
                 check(
                     admission.attempt == admissions + 1,
                     "admission attempts are not contiguous from one",
+                )
+                check(
+                    max_admission_attempts is None
+                    or admission.attempt <= max_admission_attempts,
+                    f"admission attempt {admission.attempt} exceeds the recorded "
+                    f"limit {max_admission_attempts}",
                 )
                 admissions += 1
                 continue
