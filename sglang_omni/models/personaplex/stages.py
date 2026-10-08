@@ -34,9 +34,13 @@ from sglang_omni.models.personaplex.prompts import (
 )
 from sglang_omni.models.personaplex.request_builders import stage_request_params
 from sglang_omni.models.weight_loader import resolve_model_path
-from sglang_omni.preprocessing.transcription import resolve_audio_source
+from sglang_omni.preprocessing.transcription import (
+    police_request_audio,
+    resolve_audio_source,
+)
 from sglang_omni.proto.request import StagePayload
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
+from sglang_omni.scheduling.sglang_backend.request_data import SGLangARRequestData
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 from sglang_omni.scheduling.stage_cache import StageOutputCache, value_size_bytes
 from sglang_omni.utils.audio import load_audio
@@ -72,7 +76,9 @@ def caller_audio_source(payload: StagePayload) -> str | bytes:
     return resolve_audio_source(payload)
 
 
-def create_preprocessing_executor(model_path: str, **_) -> SimpleScheduler:
+def create_preprocessing_executor(
+    model_path: str, **_
+) -> SimpleScheduler[StagePayload, StagePayload]:
     model_dir = Path(resolve_model_path(model_path))
     tokenizer = load_text_tokenizer(model_dir)
 
@@ -89,7 +95,8 @@ def create_preprocessing_executor(model_path: str, **_) -> SimpleScheduler:
         # Note (wilsonzheng0327): Channel 0, not a downmix: in a two-party recording the
         # agent is on channel 1.
         channels = load_channels(
-            caller_audio_source(payload), source_name="PersonaPlex"
+            police_request_audio(caller_audio_source(payload)),
+            source_name="PersonaPlex",
         )
         caller = torch.as_tensor(channels[0], dtype=torch.float32)
 
@@ -137,7 +144,7 @@ def load_codec(
 
 def create_mimi_encode_executor(
     model_path: str, *, device: str | None = None, gpu_id: int | None = None, **_
-) -> SimpleScheduler:
+) -> SimpleScheduler[StagePayload, StagePayload]:
     codec, device = load_codec(model_path, device=device, gpu_id=gpu_id)
 
     def encode_waveform(waveform: torch.Tensor) -> torch.Tensor:
@@ -150,10 +157,12 @@ def create_mimi_encode_executor(
         state = PersonaPlexState.from_dict(payload.data)
         if state.waveform is not None:
             state.user_codes = encode_waveform(state.waveform)
+            state.waveform = None
         else:
             pass
         if state.voice_waveform is not None:
             state.voice_codes = encode_waveform(state.voice_waveform)
+            state.voice_waveform = None
         else:
             pass
         payload.data = state.to_dict()
@@ -171,7 +180,7 @@ def create_lm_executor(
     context_length: int | None = None,
     server_args_overrides: dict[str, object] | None = None,
     **overrides: object,
-) -> OmniScheduler:
+) -> OmniScheduler[SGLangARRequestData]:
     server_args_overrides = {**overrides, **(server_args_overrides or {})}
     # Note (wilsonzheng0327): The shim config is written before the engine reads its
     # overrides, so an engine context_length must reach the builder too.
@@ -188,7 +197,9 @@ def create_lm_executor(
     )
 
 
-def create_decode_executor(model_path: str, **_) -> SimpleScheduler:
+def create_decode_executor(
+    model_path: str, **_
+) -> SimpleScheduler[StagePayload, StagePayload]:
     """Turn the frame-locked text stream into the reply text."""
     tokenizer = load_text_tokenizer(resolve_model_path(model_path))
 
