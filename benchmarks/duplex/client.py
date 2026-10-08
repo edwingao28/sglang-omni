@@ -14,7 +14,7 @@ from typing import Literal, TypedDict
 import websockets
 from pydantic import JsonValue
 
-from benchmarks.duplex.profiles import DEFAULT_PROFILE, PROFILES, ProfileName
+from benchmarks.duplex.profiles import DEFAULT_PROFILE, ProfileName
 
 SAMPLE_RATE = 16000
 PACKET_MS = 80
@@ -226,11 +226,7 @@ async def run_session(
                     if await settle("session.created"):
                         await send(
                             "session.update",
-                            session={
-                                "output_modalities": list(
-                                    PROFILES[profile].output_modalities
-                                )
-                            },
+                            session={"output_modalities": ["audio"]},
                         )
                     else:
                         pass

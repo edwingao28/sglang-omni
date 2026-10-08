@@ -27,7 +27,6 @@ from benchmarks.duplex.reference_core import (
     read_json,
     record_identity,
     selected,
-    sha256_file,
     utc_now,
 )
 from benchmarks.duplex.reference_source import (
@@ -36,6 +35,7 @@ from benchmarks.duplex.reference_source import (
     load_official_timing,
     soundfile_load_wav,
 )
+from benchmarks.duplex.run_artifacts import file_sha256
 
 
 def timing_config(
@@ -43,7 +43,7 @@ def timing_config(
 ) -> dict[str, JsonValue]:
     versions = package_versions()
     return {
-        "reference_timing_sha256": sha256_file(paths["timing"]),
+        "reference_timing_sha256": file_sha256(paths["timing"]),
         "entry": "process_folder(folder)",
         "vad_branch": bridge["vad_branch"],
         "silero_vad": versions["silero-vad"],
@@ -170,7 +170,7 @@ def run_timing(
                     folder = folder / "clean"
                 else:
                     pass
-                if sha256_file(folder / module.OUT_FILENAME) != old["intervals_sha256"]:
+                if file_sha256(folder / module.OUT_FILENAME) != old["intervals_sha256"]:
                     raise ValueError(f"Timing intervals changed: {sample_id}/{variant}")
                 else:
                     pass
@@ -250,7 +250,7 @@ def run_timing(
                     receipt.update(
                         status="invalid_intervals" if errors else "ok",
                         errors=errors,
-                        intervals_sha256=sha256_file(folder / module.OUT_FILENAME),
+                        intervals_sha256=file_sha256(folder / module.OUT_FILENAME),
                         raw_vad_samples={"user": raw[0], "model": raw[1]},
                         user_segments=user_segments,
                         model_segments=model_segments,

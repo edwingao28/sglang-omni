@@ -11,7 +11,6 @@ from argparse import Namespace
 from collections import Counter
 from pathlib import Path
 from statistics import NormalDist
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
@@ -35,10 +34,10 @@ from benchmarks.duplex.reference_core import (
     read_json,
     record_identity,
     selected,
-    sha256_file,
     utc_now,
 )
 from benchmarks.duplex.reference_source import ReferenceBehavior, load_official_behavior
+from benchmarks.duplex.run_artifacts import file_sha256
 
 
 class CustomDecoding(BaseModel):
@@ -46,9 +45,9 @@ class CustomDecoding(BaseModel):
 
     temperature: float = Field(ge=0, le=2)
     top_p: float = Field(gt=0, le=1)
-    top_k: int = Field(ge=-1)
-    min_p: float = Field(ge=0, le=1)
-    repetition_penalty: float = Field(gt=0)
+    top_k: int | None = Field(default=None, ge=-1)
+    min_p: float | None = Field(default=None, ge=0, le=1)
+    repetition_penalty: float | None = Field(default=None, gt=0)
     max_tokens: int = Field(gt=0)
 
 
@@ -60,8 +59,8 @@ class CustomJudgeConfig(BaseModel):
     tokenizer_id: str = Field(min_length=1)
     tokenizer_revision: str = Field(pattern=r"^[0-9a-f]{40}$")
     served_model: str = Field(min_length=1)
-    precision: Literal["bf16"]
-    enable_thinking: Literal[False]
+    precision: str = Field(min_length=1)
+    enable_thinking: bool | None = None
     decoding: CustomDecoding
     seeds: list[int] = Field(min_length=1, max_length=3)
     server_launch_receipt: str = Field(min_length=1)
@@ -82,13 +81,18 @@ def build_custom_request(
         temperature=config.decoding.temperature,
         top_p=config.decoding.top_p,
         max_tokens=config.decoding.max_tokens,
-        extra_body={
-            "top_k": config.decoding.top_k,
-            "min_p": config.decoding.min_p,
-            "repetition_penalty": config.decoding.repetition_penalty,
-            "chat_template_kwargs": {"enable_thinking": config.enable_thinking},
-        },
     )
+    extensions = config.decoding.model_dump(
+        exclude={"temperature", "top_p", "max_tokens"}, exclude_none=True
+    )
+    if config.enable_thinking is not None:
+        extensions["chat_template_kwargs"] = {"enable_thinking": config.enable_thinking}
+    else:
+        pass
+    if extensions:
+        body["extra_body"] = extensions
+    else:
+        pass
     identity = {
         "experiment_hash": experiment_hash,
         "engine": engine.name,
@@ -97,10 +101,10 @@ def build_custom_request(
         "seeds": config.seeds,
         "transcript_sha256": request["transcript_sha256"],
         "audio_sha256": {
-            name: sha256_file(engine.source_audio(sid, name)) for name in AUDIO_FILES
+            name: file_sha256(engine.source_audio(sid, name)) for name in AUDIO_FILES
         },
         "asr_receipt_sha256": {
-            name: sha256_file(engine.sample_dir(sid) / "receipts" / f"asr-{name}.json")
+            name: file_sha256(engine.sample_dir(sid) / "receipts" / f"asr-{name}.json")
             for name in ("input", "clean_input", "output", "clean_output")
         },
     }
@@ -220,7 +224,7 @@ def run_custom(
             pass
     config = CustomJudgeConfig.model_validate(read_json(args.judge_config))
     launch_path = (args.judge_config.parent / config.server_launch_receipt).resolve()
-    if sha256_file(launch_path) != config.server_launch_receipt_sha256:
+    if file_sha256(launch_path) != config.server_launch_receipt_sha256:
         raise SystemExit("server launch receipt differs from the pinned SHA-256")
     else:
         pass
@@ -230,8 +234,8 @@ def run_custom(
     experiment = {
         "scope": "custom_behavior_judge_non_official",
         "reference_revision": REFERENCE_REVISION,
-        "reference_files": {name: sha256_file(path) for name, path in paths.items()},
-        "custom_judge_sha256": sha256_file(Path(__file__)),
+        "reference_files": {name: file_sha256(path) for name, path in paths.items()},
+        "custom_judge_sha256": file_sha256(Path(__file__)),
         "source_scores": str(args.source_scores.resolve()),
         "source_receipts": {
             engine.name: read_json(engine.root / "manifest-receipt.json")
@@ -240,7 +244,7 @@ def run_custom(
         "selected_samples": {
             engine.name: selected(engine, args.only) for engine in engines
         },
-        "config": config.model_dump(),
+        "config": config.model_dump(exclude_none=True),
         "server_launch_receipt": read_json(launch_path),
     }
     experiment_hash = canonical_hash(experiment)
@@ -311,7 +315,11 @@ def run_custom(
                     sample_state.update(
                         status=previous_result["status"], label=previous_result["label"]
                     )
-                    if previous_result["status"] != "failed" or not args.retry_failed:
+                    if (
+                        previous_result["status"] != "failed"
+                        or args.phase == "custom-summarize"
+                        or not args.retry_failed
+                    ):
                         continue
                     else:
                         pass

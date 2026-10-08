@@ -22,10 +22,10 @@ from benchmarks.duplex.reference_core import (
     atomic_write_json,
     read_json,
     selected,
-    sha256_file,
     utc_now,
 )
 from benchmarks.duplex.reference_source import ReferenceBehavior, load_official_behavior
+from benchmarks.duplex.run_artifacts import file_sha256
 
 
 def quantile(sorted_values: list[float], q: float) -> float:
@@ -129,7 +129,7 @@ def summarize_timing(
             else engine.sample_dir(sample_id) / "clean"
         )
         intervals = folder / "latency_intervals.json"
-        if sha256_file(intervals) != receipt["intervals_sha256"]:
+        if file_sha256(intervals) != receipt["intervals_sha256"]:
             raise ValueError(f"Timing intervals changed after scoring: {intervals}")
         else:
             pass

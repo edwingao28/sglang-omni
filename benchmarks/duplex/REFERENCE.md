@@ -133,8 +133,12 @@ official requests, labels and summaries are never modified.
 
 Save a JSON configuration with `model_id`, `model_revision`, `tokenizer_id`,
 `tokenizer_revision` (both revisions must be 40-character commit hashes),
-`served_model`, `precision: "bf16"`, `enable_thinking: false`, `seeds: [1, 2, 3]`,
-and these explicit decoding settings:
+`served_model`, the deployment's `precision`, and `seeds: [1, 2, 3]`.
+The required decoding settings are `temperature`, `top_p`, and `max_tokens`.
+Only configured extensions are sent: `top_k`, `min_p`, `repetition_penalty`,
+and the optional top-level `enable_thinking` chat-template option. Omit extensions
+that the endpoint does not support. The retained Qwen experiment uses
+`precision: "bf16"`, `enable_thinking: false`, and:
 
 ```json
 "decoding": {

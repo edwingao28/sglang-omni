@@ -6,15 +6,19 @@ from __future__ import annotations
 import copy
 import fcntl
 import json
+from argparse import Namespace
+from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
+from pydantic import JsonValue, ValidationError
 
 from benchmarks.duplex import reference_behavior, reference_core, reference_custom_judge
 from benchmarks.duplex.reference_source import load_official_behavior, verify_reference
+from benchmarks.duplex.run_artifacts import file_sha256
 from benchmarks.eval import benchmark_duplex_reference as cli_module
 from tests.unit_test.benchmarks.test_duplex_reference import (
     REF,
+    StubBehavior,
     build_trees,
     response,
     tree_digest,
@@ -23,9 +27,15 @@ from tests.unit_test.benchmarks.test_duplex_reference import (
 
 
 @pytest.fixture
-def custom_run(tmp_path):
-    if REF is None:
-        pytest.skip("Set FDB_REFERENCE_SOURCE to the pinned external checkout")
+def custom_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Namespace, list[reference_core.Engine], dict[str, Path]]:
+    paths = {name: tmp_path / f"{name}.txt" for name in reference_core.REFERENCE_FILES}
+    for name, path in paths.items():
+        path.write_text(f"Local {name} fixture\n")
+    monkeypatch.setattr(
+        reference_custom_judge, "load_official_behavior", lambda *_: StubBehavior()
+    )
     trees = build_trees(tmp_path)
     source = tmp_path / "reference-scores"
     for name, tree in trees.items():
@@ -41,12 +51,8 @@ def custom_run(tmp_path):
                     sample / "receipts" / f"asr-{stem}.json",
                     {
                         "status": "ok",
-                        "transcript_sha256": reference_core.sha256_file(
-                            sample / f"{stem}.json"
-                        ),
-                        "audio_sha256": reference_core.sha256_file(
-                            tree / sid / f"{stem}.wav"
-                        ),
+                        "transcript_sha256": file_sha256(sample / f"{stem}.json"),
+                        "audio_sha256": file_sha256(tree / sid / f"{stem}.wav"),
                     },
                 )
             reference_core.atomic_write_json(
@@ -82,13 +88,13 @@ def custom_run(tmp_path):
             },
             "seeds": [1, 2, 3],
             "server_launch_receipt": launch.name,
-            "server_launch_receipt_sha256": reference_core.sha256_file(launch),
+            "server_launch_receipt_sha256": file_sha256(launch),
         },
     )
     argv = [
         "custom-judge",
         "--reference-source",
-        str(REF),
+        str(tmp_path),
         "--source-scores",
         str(source),
         "--out",
@@ -102,7 +108,7 @@ def custom_run(tmp_path):
         *[f"--tree={name}={tree}" for name, tree in trees.items()],
     ]
     args = cli_module.build_parser().parse_args(argv)
-    return args, cli_module.open_engines(args), verify_reference(REF)
+    return args, cli_module.open_engines(args), paths
 
 
 def custom_response(
@@ -120,7 +126,9 @@ def test_custom_payload_resume_and_source_bytes_unchanged(custom_run):
     args, engines, paths = custom_run
     before = tree_digest(args.source_scores)
     audio_before = {engine.name: tree_digest(engine.tree) for engine in engines}
-    official = load_official_behavior(paths["behavior"], paths["instruction"])
+    official = reference_custom_judge.load_official_behavior(
+        paths["behavior"], paths["instruction"]
+    )
     sent = []
 
     def transport(body, seed):
@@ -208,11 +216,11 @@ def test_custom_input_drift_does_not_reuse_result(custom_run, kind):
     if kind == "transcript_bytes":
         transcript = sample / "output.json"
         transcript.write_text(transcript.read_text() + "\n")
-        receipt["transcript_sha256"] = reference_core.sha256_file(transcript)
+        receipt["transcript_sha256"] = file_sha256(transcript)
     elif kind == "audio":
         audio = engine.source_audio(sid, "output.wav")
         audio.write_bytes(audio.read_bytes() + b"\0")
-        receipt["audio_sha256"] = reference_core.sha256_file(audio)
+        receipt["audio_sha256"] = file_sha256(audio)
     else:
         receipt["recorded_at"] = "changed"
     reference_core.atomic_write_json(receipt_path, receipt)
@@ -273,8 +281,16 @@ def test_custom_failed_retry_keeps_all_attempts(custom_run):
     assert all("error" in attempt for attempt in result["attempts"][:3])
 
 
-def test_custom_preserves_reference_embedded_json_policy(custom_run):
+def test_custom_preserves_reference_embedded_json_policy(custom_run, monkeypatch):
+    if REF is None:
+        pytest.skip("Set FDB_REFERENCE_SOURCE to the pinned external checkout")
+    else:
+        pass
     args, engines, paths = custom_run
+    paths = verify_reference(REF)
+    monkeypatch.setattr(
+        reference_custom_judge, "load_official_behavior", load_official_behavior
+    )
     content = 'Explanation before {"behaviour": ["C_RESUME"]} and after'
     counts = reference_custom_judge.run_custom(
         args, engines, paths, lambda *_: custom_response(content)
@@ -359,9 +375,9 @@ def test_custom_launch_receipt_requires_matching_hash(custom_run):
 
 @pytest.mark.parametrize(
     "field,value",
-    [("model_revision", "main"), ("precision", "fp8"), ("enable_thinking", True)],
+    [("model_revision", "main"), ("precision", ""), ("enable_thinking", "false")],
 )
-def test_custom_config_rejects_unpinned_or_wrong_mode(custom_run, field, value):
+def test_custom_config_rejects_unpinned_or_invalid_fields(custom_run, field, value):
     args, engines, paths = custom_run
     config = reference_core.read_json(args.judge_config)
     config[field] = value
@@ -370,12 +386,84 @@ def test_custom_config_rejects_unpinned_or_wrong_mode(custom_run, field, value):
         reference_custom_judge.run_custom(args, engines, paths)
 
 
+@pytest.mark.parametrize(
+    "decoding,thinking,expected_extensions",
+    [
+        ({}, None, None),
+        ({"top_k": 20}, None, {"top_k": 20}),
+        ({}, True, {"chat_template_kwargs": {"enable_thinking": True}}),
+    ],
+)
+def test_custom_sends_only_configured_extensions(
+    custom_run: tuple[Namespace, list[reference_core.Engine], dict[str, Path]],
+    decoding: dict[str, int],
+    thinking: bool | None,
+    expected_extensions: dict[str, JsonValue] | None,
+) -> None:
+    args, engines, paths = custom_run
+    config = reference_core.read_json(args.judge_config)
+    config["precision"] = "fp16"
+    config["served_model"] = "local-judge"
+    config.pop("enable_thinking")
+    for name in ("top_k", "min_p", "repetition_penalty"):
+        config["decoding"].pop(name)
+    config["decoding"].update(decoding)
+    if thinking is not None:
+        config["enable_thinking"] = thinking
+    else:
+        pass
+    launch = args.judge_config.parent / config["server_launch_receipt"]
+    launch.write_text(json.dumps({"model_revision": "a" * 40, "dtype": "float16"}))
+    config["server_launch_receipt_sha256"] = file_sha256(launch)
+    reference_core.atomic_write_json(args.judge_config, config)
+    sent = []
+
+    def transport(body, seed):
+        sent.append(body)
+        return custom_response(model="local-judge")
+
+    counts = reference_custom_judge.run_custom(args, engines, paths, transport)
+    assert counts == {"valid": 3, "variant_ineligible": 1}
+    for body in sent:
+        if expected_extensions is None:
+            assert "extra_body" not in body
+        else:
+            assert body["extra_body"] == expected_extensions
+
+
+def test_custom_summary_preserves_failed_results_without_work_options(
+    custom_run: tuple[Namespace, list[reference_core.Engine], dict[str, Path]],
+) -> None:
+    args, engines, paths = custom_run
+    reference_custom_judge.run_custom(
+        args, engines, paths, lambda *_: custom_response("malformed")
+    )
+    summary_args = cli_module.build_parser().parse_args(
+        [
+            "custom-summarize",
+            "--reference-source",
+            str(args.reference_source),
+            "--source-scores",
+            str(args.source_scores),
+            "--out",
+            str(args.out),
+            "--judge-config",
+            str(args.judge_config),
+            *[f"--tree={tree}" for tree in args.tree],
+        ]
+    )
+    counts = reference_custom_judge.run_custom(
+        summary_args, engines, paths, lambda *_: pytest.fail("API call")
+    )
+    assert counts == {"failed": 3, "variant_ineligible": 1}
+
+
 def test_custom_cli_requires_endpoint_and_independent_out(custom_run, tmp_path):
     args, _, _ = custom_run
     argv = [
         "custom-judge",
         "--reference-source",
-        str(REF),
+        str(args.reference_source),
         "--source-scores",
         str(args.source_scores),
         "--out",

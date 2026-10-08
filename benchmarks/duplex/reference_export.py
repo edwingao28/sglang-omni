@@ -18,11 +18,11 @@ from benchmarks.duplex.reference_audio import (
     diagnostics,
     load_runs,
     sha_bytes,
-    sha_file,
     write_wav,
 )
 from benchmarks.duplex.reference_capture import resolve_trace_format
 from benchmarks.duplex.reference_core import read_json, utc_now
+from benchmarks.duplex.run_artifacts import file_sha256
 from benchmarks.duplex.v15_audio import normalize_audio, write_json
 from benchmarks.duplex.v15_dataset import SUBSETS, list_sample_dirs
 
@@ -103,7 +103,7 @@ def export_runs(
             reasons = record["window"]["reasons"]
             if dataset_root is not None and pcm is not None:
                 source = dataset_root / state["source"]["file"]
-                if sha_file(source) != state["source"]["sha256"]:
+                if file_sha256(source) != state["source"]["sha256"]:
                     reasons.append("dataset source sha256 differs from run.json")
                 elif sha_bytes(normalize_audio(source)[0]) != sha_bytes(pcm):
                     reasons.append("renormalized dataset source differs from input.pcm")
@@ -140,11 +140,12 @@ def export_runs(
         "sources": sources,
         "superseded": superseded,
         "builder_sha256": {
-            source_path.name: sha_file(source_path)
+            source_path.name: file_sha256(source_path)
             for source_path in (
                 Path(__file__),
                 Path(__file__).with_name("reference_audio.py"),
                 Path(__file__).with_name("reference_capture.py"),
+                Path(__file__).with_name("run_artifacts.py"),
             )
         },
         "counts": {

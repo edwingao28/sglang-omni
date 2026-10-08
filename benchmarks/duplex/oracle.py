@@ -270,9 +270,7 @@ def evaluate_trace(
                     check(
                         isinstance(modalities, list)
                         and all(isinstance(item, str) for item in modalities)
-                        and set(profile_contract.output_modalities).issubset(
-                            modalities
-                        ),
+                        and "audio" in modalities,
                         "unsupported capability: output_modalities",
                     )
                 else:

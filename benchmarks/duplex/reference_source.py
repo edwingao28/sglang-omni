@@ -19,8 +19,8 @@ from benchmarks.duplex.reference_core import (
     REFERENCE_FILES,
     REFERENCE_REVISION,
     load_module,
-    sha256_file,
 )
+from benchmarks.duplex.run_artifacts import file_sha256
 
 
 class AudioTensor(Protocol):
@@ -72,7 +72,7 @@ def verify_reference(source: Path) -> dict[str, Path]:
     paths = {}
     for key, (relative_path, expected) in REFERENCE_FILES.items():
         path = source / relative_path
-        actual = sha256_file(path)
+        actual = file_sha256(path)
         if actual != expected:
             raise SystemExit(
                 f"{relative_path} sha256 {actual} != pinned {expected} ({REFERENCE_REVISION})"
@@ -161,7 +161,7 @@ def silero_jit_hash(silero: types.ModuleType | None) -> str | None:
     else:
         pass
     model_path = Path(silero.__file__).parent / "data" / "silero_vad.jit"
-    return sha256_file(model_path) if model_path.exists() else None
+    return file_sha256(model_path) if model_path.exists() else None
 
 
 def soundfile_load_wav(sr_target: int) -> WaveformLoader:

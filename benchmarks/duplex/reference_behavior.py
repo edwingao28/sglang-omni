@@ -26,10 +26,10 @@ from benchmarks.duplex.reference_core import (
     read_json,
     record_identity,
     selected,
-    sha256_file,
     utc_now,
 )
 from benchmarks.duplex.reference_source import ReferenceBehavior, load_official_behavior
+from benchmarks.duplex.run_artifacts import file_sha256
 
 
 class JudgeTransport(Protocol):
@@ -77,7 +77,7 @@ def build_request(official: ReferenceBehavior, sample: Path) -> dict[str, JsonVa
         "body": body,
         "seeds": seeds,
         "transcript_sha256": {
-            file_name: sha256_file(sample / file_name)
+            file_name: file_sha256(sample / file_name)
             for file_name in (
                 "input.json",
                 "clean_input.json",
@@ -117,12 +117,12 @@ def behavior_units(engine: Engine, only: list[str]) -> tuple[list[str], dict[str
         if all(status == "ok" for status in states):
             for stem, receipt in receipts.items():
                 transcript = engine.sample_dir(sample_id) / f"{stem}.json"
-                if sha256_file(transcript) != receipt["transcript_sha256"]:
+                if file_sha256(transcript) != receipt["transcript_sha256"]:
                     blocked[sample_id] = "stale_request"
                 else:
                     pass
                 if (
-                    sha256_file(engine.source_audio(sample_id, f"{stem}.wav"))
+                    file_sha256(engine.source_audio(sample_id, f"{stem}.wav"))
                     != receipt["audio_sha256"]
                 ):
                     blocked[sample_id] = "asr_audio_changed"
@@ -316,9 +316,7 @@ def run_judge(
             else:
                 pass
             pending_requests.append((sample, prepared))
-    pending_requests = pending_requests[
-        : args.max_requests if args.max_requests is not None else args.limit
-    ]
+    pending_requests = pending_requests[: args.limit]
     progress = Progress(args.out, "judge", len(pending_requests))
     if pending_requests:
         record_identity(

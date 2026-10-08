@@ -37,9 +37,9 @@ from benchmarks.duplex.reference_core import (
     read_json,
     record_identity,
     selected,
-    sha256_file,
     utc_now,
 )
+from benchmarks.duplex.run_artifacts import file_sha256
 
 
 class WordTimestamp(TypedDict):
@@ -64,7 +64,7 @@ class ParakeetModel(Protocol):
 
 def asr_config(asr_path: Path, nemo_sha: str, device: str) -> dict[str, JsonValue]:
     return {
-        "reference_asr_sha256": sha256_file(asr_path),
+        "reference_asr_sha256": file_sha256(asr_path),
         "task": "default",
         "timestamps": True,
         "model_id": ASR_MODEL_ID,
@@ -285,7 +285,7 @@ def run_asr(
                 receipt.update(
                     status="ok",
                     words=len(transcript.get("chunks", [])),
-                    output_sha256=sha256_file(cache_directory / "audio.json"),
+                    output_sha256=file_sha256(cache_directory / "audio.json"),
                 )
             except Exception as exc:
                 receipt.update(status="failed", error=f"{type(exc).__name__}: {exc}")

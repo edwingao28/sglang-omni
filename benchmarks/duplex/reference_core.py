@@ -23,6 +23,8 @@ from typing import TypedDict
 from pydantic import JsonValue
 from typing_extensions import NotRequired
 
+from benchmarks.duplex.run_artifacts import file_sha256
+
 REFERENCE_REVISION = "3e799c45a045256f47d5f1c9cda90157e2d2ec9e"
 REFERENCE_FILES = {
     "asr": (
@@ -81,11 +83,6 @@ def canonical_hash(value: JsonValue) -> str:
     ).hexdigest()
 
 
-def sha256_file(path: Path) -> str:
-    with open(path, "rb") as file_handle:
-        return hashlib.file_digest(file_handle, "sha256").hexdigest()
-
-
 def atomic_write_bytes(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -139,7 +136,7 @@ class HashCache:
         file_stat = resolved_path.stat()
         key = f"{resolved_path}|{file_stat.st_size}|{file_stat.st_mtime_ns}"
         if key not in self.data:
-            self.data[key] = sha256_file(resolved_path)
+            self.data[key] = file_sha256(resolved_path)
             self.dirty = True
         else:
             pass
@@ -277,7 +274,7 @@ class Engine:
             "tree": str(self.tree),
             "source_manifest_sha256": manifest_sha,
             "projection": str(projection.resolve()) if projection else None,
-            "projection_sha256": sha256_file(projection) if projection else None,
+            "projection_sha256": file_sha256(projection) if projection else None,
         }
         receipt = read_json(receipt_path) if receipt_path.exists() else None
 
@@ -363,8 +360,13 @@ def record_identity(
         "platform": platform.platform(),
         "packages": package_versions(),
         "wrapper_sha256": {
-            path.name: sha256_file(path)
-            for path in sorted(Path(__file__).parent.glob("reference_*.py"))
+            path.name: file_sha256(path)
+            for path in sorted(
+                [
+                    *Path(__file__).parent.glob("reference_*.py"),
+                    Path(__file__).with_name("run_artifacts.py"),
+                ]
+            )
         },
         "reference_revision": REFERENCE_REVISION,
         "reference_files": {

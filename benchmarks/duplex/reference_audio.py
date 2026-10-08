@@ -19,6 +19,7 @@ from benchmarks.duplex.reference_capture import (
     parse_float32_trace,
     parse_pcm16_trace,
 )
+from benchmarks.duplex.run_artifacts import file_sha256
 from benchmarks.duplex.v15_audio import PACING_TOLERANCE_S
 
 POLICY_VERSION = 2
@@ -39,11 +40,6 @@ SEND_RECEIPTS = "input-send-receipts.json"
 
 def sha_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-
-
-def sha_file(path: Path) -> str:
-    with open(path, "rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def response_id(event: dict[str, JsonValue]) -> JsonValue:
@@ -121,7 +117,7 @@ def check_send_receipts(
         else:
             pass
     check_completions(completions, append_times, deadlines, reasons)
-    return sha_file(path), completions
+    return file_sha256(path), completions
 
 
 def check_sent_records(
@@ -492,7 +488,7 @@ def analyze_variant(
         "trace_format": trace_format.value,
         "source": {
             "directory": str(variant_dir),
-            "trace_sha256": sha_file(trace_path),
+            "trace_sha256": file_sha256(trace_path),
             "input_pcm_sha256": input_sha,
             **(
                 {"input_send_receipts_sha256": receipts_sha}
@@ -651,8 +647,8 @@ def load_runs(runs: list[Path], trace_format: TraceFormat) -> tuple[
             {
                 "run": str(run),
                 "status": data.get("status"),
-                "run_json_sha256": sha_file(run / "run.json"),
-                "manifest_sha256": sha_file(run / "manifest.json"),
+                "run_json_sha256": file_sha256(run / "run.json"),
+                "manifest_sha256": file_sha256(run / "manifest.json"),
                 "validation_scope": manifest.get("validation_scope"),
                 "profile": manifest.get("profile"),
                 "server": manifest.get("server"),
@@ -694,7 +690,7 @@ def diagnostics(
     else:
         pass
     if trace_format == TraceFormat.PCM16 and (directory / "report.json").is_file():
-        kept["report_sha256"] = sha_file(directory / "report.json")
+        kept["report_sha256"] = file_sha256(directory / "report.json")
     else:
         pass
     return kept
@@ -702,4 +698,4 @@ def diagnostics(
 
 def write_wav(path: Path, pcm16: NDArray[np.int16]) -> str:
     soundfile.write(str(path), pcm16, RATE, subtype="PCM_16")
-    return sha_file(path)
+    return file_sha256(path)

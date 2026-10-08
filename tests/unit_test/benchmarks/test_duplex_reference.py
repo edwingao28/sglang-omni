@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import soundfile
+from pydantic import JsonValue
 
 from benchmarks.duplex import (
     reference_asr,
@@ -24,11 +25,82 @@ from benchmarks.duplex import (
     reference_summary,
     reference_timing,
 )
+from benchmarks.duplex.run_artifacts import file_sha256
 from benchmarks.eval import benchmark_duplex_reference as cli_module
 
 REFERENCE_PATH = os.environ.get("FDB_REFERENCE_SOURCE")
 REF = Path(REFERENCE_PATH) if REFERENCE_PATH else None
 SR = 16000
+
+
+@pytest.mark.parametrize("phase", ["prepare-judge", "summarize", "custom-summarize"])
+@pytest.mark.parametrize("unused_option", [["--limit", "1"], ["--retry-failed"]])
+def test_summary_and_prepare_phases_reject_work_options(
+    phase: str, unused_option: list[str]
+) -> None:
+    arguments = [
+        phase,
+        "--reference-source",
+        "reference",
+        "--out",
+        "scores",
+        "--tree",
+        "engine=audio",
+    ]
+    if phase == "custom-summarize":
+        arguments.extend(["--source-scores", "source", "--judge-config", "judge.json"])
+    else:
+        pass
+    with pytest.raises(SystemExit) as error:
+        cli_module.build_parser().parse_args([*arguments, *unused_option])
+    assert error.value.code == 2
+
+
+def test_judge_work_limit_alias_rejects_conflicting_limits() -> None:
+    arguments = [
+        "judge",
+        "--reference-source",
+        "reference",
+        "--out",
+        "scores",
+        "--tree",
+        "engine=audio",
+        "--judge",
+        reference_core.JUDGE_MODEL,
+    ]
+    for flag in ("--limit", "--max-requests"):
+        parsed = cli_module.build_parser().parse_args([*arguments, flag, "2"])
+        assert parsed.limit == 2
+    with pytest.raises(SystemExit) as error:
+        cli_module.build_parser().parse_args(
+            [*arguments, "--limit", "2", "--max-requests", "3"]
+        )
+    assert error.value.code == 2
+
+
+class StubBehavior:
+    instruction: str = "Return a behavior label as JSON."
+    model: str = reference_core.JUDGE_MODEL
+    initial_seed: int = 1
+
+    @staticmethod
+    def template(
+        input_clean_text: str,
+        input_noisy_text: str,
+        output_clean_text: str,
+        output_noisy_text: str,
+    ) -> str:
+        return "\n".join(
+            (input_clean_text, input_noisy_text, output_clean_text, output_noisy_text)
+        )
+
+    @staticmethod
+    def json_dict_to_compact_text(transcript: JsonValue) -> str:
+        return json.dumps(transcript)
+
+    @staticmethod
+    def parse_eval(prediction: str) -> dict[str, JsonValue]:
+        return json.loads(prediction)
 
 
 def speech_runs(wav: np.ndarray) -> list[tuple[int, int]]:
@@ -326,7 +398,7 @@ def official_behavior():
     )
 
 
-def test_judge_retry_is_bounded_with_retained_errors(official_behavior):
+def test_judge_retry_is_bounded_with_retained_errors():
     seeds, sleeps = [], []
 
     def failing(body, seed):
@@ -334,7 +406,7 @@ def test_judge_retry_is_bounded_with_retained_errors(official_behavior):
         raise ConnectionError(f"boom {seed}")
 
     result = reference_behavior.run_judgment(
-        official_behavior, {"model": "m"}, [1, 2, 3], failing, 5.0, sleeps.append
+        StubBehavior(), {"model": "m"}, [1, 2, 3], failing, 5.0, sleeps.append
     )
     assert result["status"] == "failed" and result["label"] is None
     assert seeds == [1, 2, 3] and sleeps == [5.0, 5.0]
@@ -696,7 +768,7 @@ def test_engine_resume_freezes_projection_and_projected_manifest(tmp_path, monke
     engine = reference_core.Engine(out, "sgl", manifest.parent, manifest, proj)
     assert engine.eligible("a/1", "overlap") and not engine.eligible("a/1", "clean")
     receipt = json.loads((out / "engines/sgl/manifest-receipt.json").read_text())
-    assert receipt["projection_sha256"] == reference_core.sha256_file(proj)
+    assert receipt["projection_sha256"] == file_sha256(proj)
     assert receipt["projected_manifest_sha256"] == reference_core.canonical_hash(
         engine.manifest
     )

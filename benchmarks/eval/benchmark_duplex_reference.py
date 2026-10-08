@@ -68,10 +68,6 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument(
         "--only", action="append", default=[], help="category/id subset (validation)"
     )
-    common.add_argument(
-        "--limit", type=int, default=None, help="max work units this invocation"
-    )
-    common.add_argument("--retry-failed", action="store_true")
 
     asr = commands.add_parser("asr", parents=[common])
     asr.add_argument("--nemo", required=True, help="local parakeet-tdt-0.6b-v2.nemo")
@@ -88,21 +84,32 @@ def build_parser() -> argparse.ArgumentParser:
     judge.add_argument("--base-url", help="Configured OpenAI-compatible endpoint")
     judge.add_argument("--timeout-s", type=float, default=120.0)
     judge.add_argument("--retry-sleep-s", type=float, default=5.0)
-    judge.add_argument("--max-requests", type=int, default=None)
     summarize = commands.add_parser("summarize", parents=[common])
     summarize.add_argument("--bootstrap", type=int, default=2000)
     summarize.add_argument("--seed", type=int, default=20260925)
+    work_commands = [asr, timing, judge]
     for phase in ("custom-judge", "custom-summarize"):
         custom = commands.add_parser(phase, parents=[common])
         custom.add_argument("--source-scores", type=Path, required=True)
         custom.add_argument("--judge-config", type=Path, required=True)
         if phase == "custom-judge":
+            work_commands.append(custom)
             custom.add_argument("--base-url", required=True)
             custom.add_argument("--api-key-env", default="CUSTOM_JUDGE_API_KEY")
             custom.add_argument("--timeout-s", type=float, default=120.0)
             custom.add_argument("--retry-sleep-s", type=float, default=5.0)
         else:
             pass
+    for command in work_commands:
+        limit = command.add_mutually_exclusive_group()
+        limit.add_argument("--limit", type=int, help="max work units this invocation")
+        if command is judge:
+            limit.add_argument(
+                "--max-requests", dest="limit", type=int, help="Alias for --limit"
+            )
+        else:
+            pass
+        command.add_argument("--retry-failed", action="store_true")
     return parser
 
 
@@ -160,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     else:
         pass
-    for name in ("limit", "max_requests", "bootstrap"):
+    for name in ("limit", "bootstrap"):
         value = vars(args).get(name)
         if value is not None and value <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
