@@ -716,8 +716,10 @@ upstream evaluation code. Upstream has no speaking gates: a model that talks
 through the user turn or the interruption scores a near-zero latency there,
 and every interruption sample counts. The backchannel classifier differs from upstream
 `eval_backchannel.py`: segments after the input end are ignored and others are
-clipped to it, and any takeover segment marks the sample (upstream keeps the
-last segment's verdict and stops at the first segment over 3 s). Interruption
+clipped to it, any takeover segment marks the sample (upstream keeps the
+last segment's verdict and stops at the first segment over 3 s), and a takeover
+segment is not also counted as a backchannel (upstream adds every segment up to
+3 s to the backchannel list, takeover or not). Interruption
 relevance (the upstream GPT-4 rating) is not scored.
 
 Both `*_seedtts.py` scripts also support speech quality and similarity evaluation via UTMOS and WavLM speaker verification metrics. Running with `--utmos-only` or `--similarity-only` loads the respective pre-trained predictor and computes scores on the previously generated audio in the output directory without requiring the TTS/ASR servers to be running.

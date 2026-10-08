@@ -22,12 +22,11 @@ from scipy.spatial.distance import jensenshannon
 
 from benchmarks.duplex.v10_dataset import Task
 
-SCORING_VERSION = "fdb-v10-synthetic-v3"
+SCORING_VERSION = "fdb-v10-synthetic-v4"
 # note (Jeffro): Upstream takeover rule; output this short counts as a backchannel, not a turn.
 TAKEOVER_MAX_DURATION_S = 1.0
 TAKEOVER_MAX_WORDS = 3
-# note (Jeffro): Upstream backchannel rule; a speech segment this long is a full turn.
-BACKCHANNEL_MAX_SEGMENT_S = 3.0
+# note (Jeffro): Upstream backchannel rule; a backchannel has at most this many words.
 BACKCHANNEL_MAX_WORDS = 2
 BACKCHANNEL_WINDOW_S = 0.2
 BACKCHANNEL_EPSILON = 1e-10
@@ -46,7 +45,6 @@ SCORING_CONFIG = {
     "thresholds": {
         "takeover_max_duration_s": TAKEOVER_MAX_DURATION_S,
         "takeover_max_words": TAKEOVER_MAX_WORDS,
-        "backchannel_max_segment_s": BACKCHANNEL_MAX_SEGMENT_S,
         "backchannel_max_words": BACKCHANNEL_MAX_WORDS,
         "backchannel_window_s": BACKCHANNEL_WINDOW_S,
         "backchannel_epsilon": BACKCHANNEL_EPSILON,
@@ -82,9 +80,9 @@ SCORING_CONFIG = {
     "backchannel": "the user talks for 20-80 s and the model should acknowledge "
     "without taking over; each Silero VAD segment of the output is a takeover when "
     "it lasts takeover_max_duration_s or longer or has more than "
-    "backchannel_max_words words, a segment over backchannel_max_segment_s is a "
-    "full turn and never a backchannel, and the remaining short segments are "
-    "backchannels reported as a rate per second",
+    "backchannel_max_words words, and a takeover segment is never also counted as "
+    "a backchannel; the remaining short segments are backchannels reported as a "
+    "rate per second",
     "backchannel_timing": "backchannel segments are binned at backchannel_window_s "
     "across the input and compared with the human timing distribution from "
     "upstream icc_gt_distribution.json by Jensen-Shannon distance, lower is closer "
@@ -355,11 +353,6 @@ def score_backchannel(
         else:
             pass
         end_s = min(end_s, input_duration_s)
-        if end_s - start_s > BACKCHANNEL_MAX_SEGMENT_S:
-            takeover = True
-            continue
-        else:
-            pass
         words = [
             chunk
             for chunk in chunks
@@ -371,8 +364,7 @@ def score_backchannel(
         ):
             takeover = True
         else:
-            pass
-        backchannels.append([start_s, end_s])
+            backchannels.append([start_s, end_s])
     timing_jsd = None
     if reference is not None:
         if not backchannels:

@@ -181,7 +181,6 @@ def test_scoring_config_hash_covers_every_threshold() -> None:
     assert v10_scoring.SCORING_CONFIG["thresholds"] == {
         "takeover_max_duration_s": v10_scoring.TAKEOVER_MAX_DURATION_S,
         "takeover_max_words": v10_scoring.TAKEOVER_MAX_WORDS,
-        "backchannel_max_segment_s": v10_scoring.BACKCHANNEL_MAX_SEGMENT_S,
         "backchannel_max_words": v10_scoring.BACKCHANNEL_MAX_WORDS,
         "backchannel_window_s": v10_scoring.BACKCHANNEL_WINDOW_S,
         "backchannel_epsilon": v10_scoring.BACKCHANNEL_EPSILON,
@@ -299,9 +298,9 @@ def test_backchannel_takeover_rate_and_timing() -> None:
     assert record["takeover"] is False
     assert record["backchannel_rate_per_s"] == 0.5
     assert 0 < record["timing_jsd"] < 1
-    assert long["takeover"] is True and long["backchannels"] == [[0.0, 1.9]]
-    assert wordy["takeover"] is True
-    assert drawn_out["takeover"] is True and drawn_out["backchannels"] == [[0.1, 1.5]]
+    assert long["takeover"] is True and long["backchannels"] == []
+    assert wordy["takeover"] is True and wordy["backchannels"] == []
+    assert drawn_out["takeover"] is True and drawn_out["backchannels"] == []
     assert silent["timing_jsd"] == 1.0 and silent["backchannels"] == []
     assert unreferenced["timing_jsd"] is None
 
