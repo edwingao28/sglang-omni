@@ -7,7 +7,7 @@ separate results.
 
 The former event-anchored `benchmark_duplex_v15 score` command is removed. For
 existing recordings, use the `benchmark_duplex_reference` phases below:
-`export`, `asr`, `timing`, optionally `prepare-judge`/`judge`, then `summarize`.
+`export`, `asr`, `timing`, optionally `prepare-judge`/`judge`, then `summarize` and `report`.
 Write fresh scoring directories and preserve old `fdb-v15-event-v1` results.
 Reference whole-file intervals use different definitions; old scores must not
 be relabeled or silently compared as the same metric.
@@ -109,6 +109,45 @@ python -m benchmarks.eval.benchmark_duplex_reference summarize \
     --reference-source "$FDB_SOURCE" --tree model=results/reference-audio \
     --out results/reference-scores
 ```
+
+### Print saved results
+
+```bash
+python -m benchmarks.eval.benchmark_duplex_reference report \
+    --scores results/reference-scores --engine model
+```
+
+The report prints selected and eligible populations, protocol verdicts, ASR and
+timing coverage, whole-file interval means/medians and saved confidence intervals,
+and official behavior label distributions. Label distributions and protocol
+passes are not quality accuracy. Empty interval sets stay `n/a`; observation-window
+endings may be censored. WER and concurrent-session capacity remain unavailable
+because these artifacts contain no measurements for them.
+
+This command only reads `summary.json` and the frozen manifest/receipt under
+`engines/<label>`. It needs no reference checkout, GPU, model checkpoint or API
+credentials and does not rerun scoring or revalidate audio. A recorded trace may
+be partial; its presence is separate from protocol and eligibility checks. Exit
+zero means the report was printed, not that every session or score passed.
+New summaries bind their sample IDs and manifest hash; older summaries are
+accepted with an explicit missing-binding notice. Subset summaries require a
+matching subset manifest.
+
+Optional `--replay replay.json` adds saved offline replay agreement. Its schema is
+`{"selected": N, "replayed": M, "samples": [{"sample": "category/id",
+"variant": "overlap", "recorded_status": "pass", "status": "match"}]}`.
+Each sample/variant must be unique and belong to the manifest, with a matching
+recorded status. This receipt has no trace hash binding and is not a new replay.
+
+Optional `--semantic-summary semantic-summary.json` adds a separate custom
+quality section. It reads `scope`, `inputs_sha256`, `uncertainty_note`,
+`overall_axes` and `overall_joint`. Each axis supplies `selected`, `accepted`,
+`failed` and `unresolved` counts; quality is accepted / resolved and coverage is
+resolved / selected. Zero denominators display `n/a`. This A/F/U summary is
+different from the C-label `custom-summarize` output and is not joined to the
+reference population. It cannot fill missing official behavior labels.
+
+### Judge configuration
 
 Configure the API key outside manifests and command arguments. `--base-url`
 selects a configured compatible endpoint. The judge requests the exact reference

@@ -20,6 +20,7 @@ from benchmarks.duplex.reference_core import (
     VARIANTS,
     Engine,
     atomic_write_json,
+    canonical_hash,
     read_json,
     selected,
     utc_now,
@@ -325,9 +326,14 @@ def run_summarize(
             "note": "sampling uncertainty over dataset samples; no repeated generations were run",
         },
         "engines": {},
+        "populations": {},
     }
     for engine in engines:
         sample_ids = selected(engine, args.only)
+        summary["populations"][engine.name] = {
+            "manifest_sha256": canonical_hash(engine.manifest),
+            "sample_ids": sample_ids,
+        }
         groups = {"all": sample_ids}
         for sample_id in sample_ids:
             groups.setdefault(engine.samples[sample_id]["category"], []).append(

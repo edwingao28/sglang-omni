@@ -13,6 +13,7 @@ from benchmarks.duplex.reference_capture import TraceFormat
 from benchmarks.duplex.reference_core import Engine, HashCache
 from benchmarks.duplex.reference_custom_judge import run_custom
 from benchmarks.duplex.reference_export import export_runs
+from benchmarks.duplex.reference_report import render_report
 from benchmarks.duplex.reference_source import verify_reference
 from benchmarks.duplex.reference_summary import run_summarize
 from benchmarks.duplex.reference_timing import run_timing
@@ -33,6 +34,13 @@ def parse_pairs(values: list[str], flag: str) -> dict[str, Path]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     commands = parser.add_subparsers(dest="phase", required=True)
+    report = commands.add_parser("report", help="Print saved results without rescoring")
+    report.add_argument("--scores", type=Path, required=True)
+    report.add_argument("--engine", required=True, help="Engine label in summary.json")
+    report.add_argument("--replay", type=Path, help="Saved offline replay receipt")
+    report.add_argument(
+        "--semantic-summary", type=Path, help="Separate custom A/F/U quality summary"
+    )
     export = commands.add_parser(
         "export", help="Build fixed-window audio from saved runs"
     )
@@ -151,6 +159,17 @@ def open_engines(args: argparse.Namespace) -> list[Engine]:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.phase == "report":
+        try:
+            report = render_report(
+                args.scores, args.engine, args.replay, args.semantic_summary
+            )
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+        print(report)
+        return 0
+    else:
+        pass
     if args.phase == "export":
         try:
             result = export_runs(

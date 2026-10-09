@@ -21,6 +21,7 @@ from benchmarks.duplex import (
     reference_asr,
     reference_behavior,
     reference_core,
+    reference_report,
     reference_source,
     reference_summary,
     reference_timing,
@@ -617,6 +618,9 @@ def test_phases_end_to_end_resume_and_denominators(
 
     args, engines, paths, _ = cli("summarize", tmp_path, trees, "--bootstrap", "200")
     summary = reference_summary.run_summarize(args, engines, paths)
+    report = reference_report.render_report(args.out, "sgl")
+    assert "manifest and selected sample IDs match" in report
+    assert "C_RESPOND" in report and "1 / 1; 100.0%" in report
     vllm_all = summary["engines"]["vllm"]["all"]
     assert vllm_all["timing_supplementary_clean"]["status"] == {
         "ineligible": 1,
