@@ -10,6 +10,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 from examples.launchers.ming_omni import (
@@ -1093,6 +1094,70 @@ def test_compute_video_cache_key_changes_with_decode_params() -> None:
     assert compute_video_cache_key([], fps=8.0) is None
 
 
+@pytest.mark.parametrize("changed", ["image", "video", "audio"])
+def test_ming_media_cache_keys_track_decoded_content(
+    monkeypatch, tmp_path, changed
+) -> None:
+    import asyncio
+
+    from PIL import Image
+
+    from sglang_omni.models.ming_omni.components import preprocessor as mod
+    from sglang_omni.proto import OmniRequest, StagePayload
+
+    audio_path = tmp_path / "question.wav"
+    audio_path.write_bytes(b"H" * 8192 + b"a" * 4096 + b"T" * 8192)
+    media = {"image": Image.new("RGB", (2, 2), "red"), "video": torch.zeros(2, 3, 2, 2)}
+
+    async def images(raw):
+        return [media["image"]]
+
+    async def videos(raw, **kwargs):
+        return [media["video"]], [1.0], None
+
+    def load_audio(path, target_sr):
+        return np.frombuffer(Path(path).read_bytes(), dtype=np.uint8).astype(np.float32)
+
+    monkeypatch.setattr(mod, "ensure_image_list_async", images)
+    monkeypatch.setattr(mod, "ensure_video_list_async", videos)
+    monkeypatch.setattr(mod, "load_audio_path", load_audio)
+    monkeypatch.setattr(
+        mod, "compute_mel_features_for_waveform", lambda *_: (torch.zeros(1, 2), 1, 1)
+    )
+    pre = mod.MingPreprocessor.__new__(mod.MingPreprocessor)
+    pre.audio_config = SimpleNamespace()
+    pre.process_images = lambda _: (torch.ones(1, 2), torch.tensor([[1, 2, 2]]), [1])
+    pre.process_videos = lambda _: (torch.ones(1, 2), torch.tensor([[1, 2, 2]]), [1])
+    pre.build_prompt = lambda messages, **counts: ("prompt", [1, 2, 3], [1])
+    stage = mod.AUDIO_STAGE if changed == "audio" else mod.IMAGE_STAGE
+
+    def cache_key(name: str = "same") -> str:
+        inputs = {
+            "messages": [{"role": "user", "content": "Describe this."}],
+            "images": [f"https://media.invalid/{name}.png"],
+            "videos": [f"https://media.invalid/{name}.mp4"],
+            "audios": [str(audio_path)],
+        }
+        payload = StagePayload(
+            request_id="ming-cache", request=OmniRequest(inputs=inputs), data=None
+        )
+        return asyncio.run(pre(payload)).data["encoder_inputs"][stage]["cache_key"]
+
+    before = cache_key()
+    assert cache_key() == before
+    # A new URL body or a same-size file edit must not reuse the previous entry.
+    if changed == "audio":
+        audio_path.write_bytes(b"H" * 8192 + b"b" * 4096 + b"T" * 8192)
+    elif changed == "image":
+        media["image"] = Image.new("RGB", (2, 2), "blue")
+    else:
+        media["video"] = torch.ones(2, 3, 2, 2)
+    after = cache_key()
+    assert after != before
+    # Identical content at another address shares the entry.
+    assert cache_key("other") == after
+
+
 def make_fake_ming_image_encoder(spatial_merge_size: int = 2):
     """Build a MingImageEncoder shell whose ``_encode`` returns synthetic
     tensors with the real shape contract (embeds rows == sum(token_counts)).
@@ -1215,3 +1280,48 @@ def test_ming_image_encoder_forward_skips_video_when_grid_thw_missing() -> None:
     )
     assert "video_embeds" not in out
     assert "video_grid_thw" not in out
+
+
+def test_ming_audio_paths_follow_the_server_media_policy(monkeypatch, tmp_path) -> None:
+    import asyncio
+
+    from sglang_omni.models.ming_omni.components import preprocessor as mod
+    from sglang_omni.preprocessing import resource_connector
+    from sglang_omni.proto import OmniRequest, StagePayload
+
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    inside, outside = allowed / "inside.wav", tmp_path / "outside.wav"
+    for path in (inside, outside):
+        path.write_bytes(b"RIFF" + b"\0" * 64)
+    monkeypatch.setenv(resource_connector.ALLOWED_LOCAL_MEDIA_PATH_ENV, str(allowed))
+    monkeypatch.setenv(resource_connector.ALLOWED_MEDIA_DOMAINS_ENV, "")
+    monkeypatch.setattr(resource_connector, "_global_connector", None)
+    reads = []
+
+    def load_audio(path, target_sr):
+        reads.append(Path(path))
+        return np.zeros(1600, dtype=np.float32)
+
+    monkeypatch.setattr(mod, "load_audio_path", load_audio)
+    monkeypatch.setattr(
+        mod, "compute_mel_features_for_waveform", lambda *_: (torch.zeros(1, 2), 1, 1)
+    )
+    pre = mod.MingPreprocessor.__new__(mod.MingPreprocessor)
+    pre.audio_config = SimpleNamespace()
+    pre.build_prompt = lambda messages, **counts: ("prompt", [1, 2, 3], [1])
+
+    def run(path: Path) -> None:
+        inputs = {
+            "messages": [{"role": "user", "content": "Describe this."}],
+            "audios": [str(path)],
+        }
+        payload = StagePayload(
+            request_id="ming-policy", request=OmniRequest(inputs=inputs), data=None
+        )
+        asyncio.run(pre(payload))
+
+    run(inside)
+    with pytest.raises(ValueError, match="not within allowed directory"):
+        run(outside)
+    assert reads == [inside.resolve()]

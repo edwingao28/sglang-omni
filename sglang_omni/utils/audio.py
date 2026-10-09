@@ -71,6 +71,8 @@ def check_torchcodec_ready() -> bool:
 
 def decode_with_soundfile(
     source: str | bytes | io.BytesIO,
+    *,
+    source_name: str,
 ) -> tuple[torch.Tensor, int]:
     """Decode audio with SoundFile when TorchCodec cannot be loaded.
 
@@ -85,9 +87,8 @@ def decode_with_soundfile(
     try:
         data, sample_rate = sf.read(decoder_source, dtype="float32", always_2d=True)
     except Exception as exc:
-        raise AudioDecodeError(
-            "Could not decode audio input with the soundfile backend"
-        ) from exc
+        # openai_errors.py regex-matches this message to return 400, not 500.
+        raise AudioDecodeError(f"Could not decode {source_name} audio input") from exc
     return torch.from_numpy(np.ascontiguousarray(data.T)), int(sample_rate)
 
 
@@ -149,7 +150,7 @@ def load_with_torchaudio(
 ) -> tuple[torch.Tensor, int]:
     decoder_source = io.BytesIO(source) if isinstance(source, bytes) else source
     if not check_torchcodec_ready():
-        return decode_with_soundfile(decoder_source)
+        return decode_with_soundfile(decoder_source, source_name=source_name)
     else:
         pass
     try:
@@ -160,7 +161,7 @@ def load_with_torchaudio(
 
         return _torchaudio.load(decoder_source)
     except ImportError:
-        return decode_with_soundfile(decoder_source)
+        return decode_with_soundfile(decoder_source, source_name=source_name)
     except (MemoryError, torch.OutOfMemoryError):
         raise
     except RuntimeError as exc:
@@ -296,6 +297,19 @@ def decode_audio_data_uri(value: str) -> bytes | None:
         raise AudioDecodeError("Invalid base64 audio data URI") from exc
 
 
+def audio_request_timeout() -> int:
+    """Seconds an audio URL fetch may take, from REQUEST_TIMEOUT."""
+    try:
+        timeout = int(os.getenv("REQUEST_TIMEOUT", str(_DEFAULT_REQUEST_TIMEOUT)))
+    except ValueError:
+        return _DEFAULT_REQUEST_TIMEOUT
+    if timeout <= 0:
+        return _DEFAULT_REQUEST_TIMEOUT
+    else:
+        pass
+    return timeout
+
+
 def load_audio(
     source: object,
     source_name: str = "audio",
@@ -317,17 +331,9 @@ def load_audio(
         if decoded is not None:
             source = decoded
         elif source.startswith(("http://", "https://")):
-            try:
-                timeout = int(
-                    os.getenv("REQUEST_TIMEOUT", str(_DEFAULT_REQUEST_TIMEOUT))
-                )
-                if timeout <= 0:
-                    timeout = _DEFAULT_REQUEST_TIMEOUT
-                else:
-                    pass
-            except ValueError:
-                timeout = _DEFAULT_REQUEST_TIMEOUT
-            response = httpx.get(source, timeout=timeout, follow_redirects=True)
+            response = httpx.get(
+                source, timeout=audio_request_timeout(), follow_redirects=True
+            )
             response.raise_for_status()
             source = response.content
         elif source.startswith("file://"):

@@ -8,10 +8,15 @@ import inspect
 import threading
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 import typer
 from sglang.srt.arg_groups.overrides import resolution_result
+from sglang.srt.layers.rotary_embedding.mrope_rope_index import (
+    get_rope_index_qwen3_omni,
+)
+from tokenizers.normalizers import NFC
 
 import sglang_omni.models.qwen3_omni.stages as qwen_stages
 from sglang_omni.cli.serve import (
@@ -37,12 +42,14 @@ from sglang_omni.models.qwen3_omni.config import (
     Qwen3OmniSpeechPipelineConfig,
 )
 from sglang_omni.models.qwen3_omni.merge import decode_events, merge_for_thinker
+from sglang_omni.models.qwen3_omni.mrope_positions import feat_extract_output_lengths
 from sglang_omni.models.qwen3_omni.payload_types import Qwen3OmniPipelineState
 from sglang_omni.models.qwen3_omni.request_builders import (
     apply_thinker_result,
     build_sglang_thinker_request,
+    compute_mrope_positions,
     merge_for_talker,
-    project_mm_aggregate_to_talker_ar,
+    project_encoder_to_talker_ar,
     project_preprocessing_to_mm_aggregate,
     project_talker_to_code2wav,
     project_thinker_to_decode,
@@ -56,6 +63,7 @@ from sglang_omni.scheduling.sglang_backend.server_args_builder import (
     apply_encoder_mem_reserve,
     build_sglang_server_args,
 )
+from sglang_omni.serve.openai_errors import is_bad_request_error
 from sglang_omni.utils.imports import import_string
 from tests.unit_test.fixtures.qwen_fakes import (
     FakeQwenTokenizer,
@@ -63,6 +71,17 @@ from tests.unit_test.fixtures.qwen_fakes import (
     make_qwen_state,
 )
 from tests.unit_test.pipeline.helpers import build_compiled_process_topology
+from tests.unit_test.qwen3_omni.test_mrope_positions import (
+    AUDIO_START_TOKEN_ID,
+    AUDIO_TOKEN_ID,
+    IMAGE_TOKEN_ID,
+    POSITION_ID_PER_SECONDS,
+    SPATIAL_MERGE_SIZE,
+    VIDEO_TOKEN_ID,
+    VISION_START_TOKEN_ID,
+    audio_in_video_span,
+    thinker_config_ns,
+)
 
 
 def make_stage(config: PipelineConfig, name: str):
@@ -339,6 +358,191 @@ def test_qwen_preprocess_pretokenized_builds_state_and_releases_inputs() -> None
     }
 
 
+@pytest.mark.parametrize("missing", [None, np.array([], dtype=np.float32)])
+def test_merge_extracted_video_audio_rejects_mixed_audio_presence(missing) -> None:
+    from sglang_omni.models.qwen3_omni.components.preprocessor import (
+        merge_extracted_video_audio,
+    )
+
+    with pytest.raises(ValueError, match="every video"):
+        merge_extracted_video_audio([], [np.ones(3), missing])
+
+
+@pytest.mark.parametrize("sampled_fps", [[2.0, 2.0], [2.0, 4.0]])
+def test_qwen_preprocessor_two_videos_and_audio_with_real_processor(
+    monkeypatch, sampled_fps
+) -> None:
+    """Keep audio features and tokens aligned through the real processor call."""
+    from transformers import (
+        Qwen2Tokenizer,
+        Qwen2VLImageProcessor,
+        Qwen2VLVideoProcessor,
+        WhisperFeatureExtractor,
+    )
+    from transformers.models.qwen3_omni_moe.processing_qwen3_omni_moe import (
+        Qwen3OmniMoeProcessor,
+    )
+
+    from sglang_omni.models.qwen3_omni.components import (
+        preprocessor as preprocessor_mod,
+    )
+
+    tokens = {
+        "image_token": "<image>",
+        "audio_token": "<audio>",
+        "video_token": "<video>",
+        "vision_bos_token": "<vision_start>",
+        "vision_eos_token": "<vision_end>",
+        "audio_bos_token": "<audio_start>",
+        "audio_eos_token": "<audio_end>",
+    }
+    tokenizer = Qwen2Tokenizer(extra_special_tokens=tokens)
+    template = (
+        "{% for message in messages %}{% for part in message['content'] %}"
+        "{% if part['type'] == 'video' %}<vision_start><video><vision_end>"
+        "{% elif part['type'] == 'audio' %}<audio_start><audio><audio_end>"
+        "{% else %}{{ part['text'] }}{% endif %}{% endfor %}{% endfor %}"
+    )
+    processor = Qwen3OmniMoeProcessor(
+        tokenizer=tokenizer,
+        image_processor=Qwen2VLImageProcessor(),
+        video_processor=Qwen2VLVideoProcessor(),
+        feature_extractor=WhisperFeatureExtractor(feature_size=128),
+        chat_template=template,
+    )
+    embedded = [np.ones(3200, dtype=np.float32), np.ones(6400, dtype=np.float32)]
+    explicit = np.ones(9600, dtype=np.float32)
+
+    async def decoded_videos(*_args, **_kwargs):
+        return [torch.zeros((4, 3, 28, 28))] * 2, sampled_fps, embedded
+
+    monkeypatch.setattr(preprocessor_mod, "ensure_video_list_async", decoded_videos)
+    pre = object.__new__(preprocessor_mod.Qwen3OmniPreprocessor)
+    pre.max_seq_len = None
+    pre.default_video_fps = None
+    pre.default_video_max_frames = None
+    pre.default_video_min_pixels = 28 * 28
+    pre.default_video_max_pixels = 28 * 28
+    pre.default_video_total_pixels = None
+    pre.processor = processor
+    payload = StagePayload(
+        request_id="two-videos-and-audio",
+        request=OmniRequest(
+            inputs={
+                "messages": [
+                    {"role": "user", "content": "Describe the video and audio."}
+                ],
+                "videos": ["first.mp4", "second.mp4"],
+                "audios": [explicit],
+                "use_audio_in_video": True,
+            }
+        ),
+        data={},
+    )
+    if sampled_fps[0] != sampled_fps[1]:
+        with pytest.raises(ValueError, match="same sampled FPS"):
+            asyncio.run(pre.call_impl(payload))
+        return
+
+    state = Qwen3OmniPipelineState.from_dict(asyncio.run(pre.call_impl(payload)).data)
+    assert state.mm_inputs["video"]["video_second_per_grid"].tolist() == [1.0, 1.0]
+    assert state.mm_inputs["video"]["video_grid_thw"].shape[0] == 2
+    mask = state.encoder_inputs["audio_encoder"]["feature_attention_mask"]
+    assert mask.sum(-1).tolist() == [20, 40, 60]
+    decoded = tokenizer.decode(state.prompt["input_ids"])
+    spans = decoded.split(tokens["audio_eos_token"])[:3]
+    assert [span.count(tokens["audio_token"]) for span in spans] == [3, 5, 8]
+
+
+@pytest.mark.parametrize(
+    ("explicit", "embedded", "requested", "expected_audio", "expected_video_audio"),
+    [
+        ([], ["embedded"], True, ["embedded"], True),
+        ([], [None], True, None, False),
+        (["explicit"], [None], True, ["explicit"], False),
+        (["explicit"], ["embedded"], True, ["embedded", "explicit"], True),
+        ([], None, False, None, False),
+        ([], None, None, None, None),
+    ],
+)
+def test_qwen_preprocessor_passes_embedded_video_audio_to_processor(
+    monkeypatch,
+    explicit,
+    embedded,
+    requested,
+    expected_audio,
+    expected_video_audio,
+) -> None:
+    from sglang_omni.models.qwen3_omni.components import (
+        preprocessor as preprocessor_mod,
+    )
+
+    processor_calls = []
+
+    class FakeProcessor:
+        def apply_chat_template(self, *_args, **_kwargs):
+            return "prompt"
+
+        def __call__(self, **kwargs):
+            processor_calls.append(kwargs)
+            result = {
+                "input_ids": torch.tensor([[1, 2]]),
+                "attention_mask": torch.tensor([[1, 1]]),
+                "pixel_values_videos": torch.ones((1, 3)),
+                "video_grid_thw": torch.tensor([[1, 1, 1]]),
+            }
+            if kwargs["audio"] is not None:
+                result["input_features"] = torch.ones((len(kwargs["audio"]), 2, 3))
+            return result
+
+    async def fake_images(_value, **_kwargs):
+        return []
+
+    async def fake_videos(_value, **kwargs):
+        assert kwargs["extract_audio"] is bool(requested)
+        return ["video"], [1.0], embedded
+
+    async def fake_audios(_value, **_kwargs):
+        return explicit
+
+    monkeypatch.setattr(preprocessor_mod, "ensure_image_list_async", fake_images)
+    monkeypatch.setattr(preprocessor_mod, "ensure_video_list_async", fake_videos)
+    monkeypatch.setattr(preprocessor_mod, "ensure_audio_list_async", fake_audios)
+    monkeypatch.setattr(preprocessor_mod, "compute_image_cache_key", lambda _v: None)
+    monkeypatch.setattr(preprocessor_mod, "compute_video_cache_key", lambda _v: None)
+    monkeypatch.setattr(preprocessor_mod, "compute_audio_cache_key", lambda _v: None)
+
+    pre = object.__new__(preprocessor_mod.Qwen3OmniPreprocessor)
+    pre.max_seq_len = None
+    pre.default_video_fps = None
+    pre.default_video_max_frames = None
+    pre.default_video_min_pixels = None
+    pre.default_video_max_pixels = None
+    pre.default_video_total_pixels = None
+    pre.processor = FakeProcessor()
+    payload = StagePayload(
+        request_id="embedded-audio",
+        request=OmniRequest(
+            inputs={
+                "messages": [{"role": "user", "content": "hello"}],
+                "videos": ["video.mp4"],
+                "audios": ["explicit.wav"] if explicit else None,
+                "use_audio_in_video": requested,
+            }
+        ),
+        data={},
+    )
+
+    state = Qwen3OmniPipelineState.from_dict(asyncio.run(pre.call_impl(payload)).data)
+
+    assert processor_calls[0]["audio"] == expected_audio
+    assert (
+        processor_calls[0]["videos_kwargs"].get("use_audio_in_video")
+        is expected_video_audio
+    )
+    assert state.mm_inputs["video"].get("use_audio_in_video") is expected_video_audio
+
+
 def test_qwen_accepts_miles_audio_video_processor_tensors() -> None:
     from sglang_omni.client import Client
     from sglang_omni.models.qwen3_omni.components import (
@@ -434,7 +638,11 @@ def test_qwen_preprocessor_retries_without_special_token_compat(
         if "extra_special_tokens" in kwargs:
             raise TypeError("old transformers does not accept extra_special_tokens")
         return SimpleNamespace(
-            tokenizer=SimpleNamespace(chat_template=None),
+            tokenizer=SimpleNamespace(
+                chat_template=None,
+                get_vocab=lambda: {"token": 0},
+                backend_tokenizer=SimpleNamespace(normalizer=NFC()),
+            ),
             chat_template=None,
         )
 
@@ -452,6 +660,69 @@ def test_qwen_preprocessor_retries_without_special_token_compat(
         "audio_token": "<|audio_pad|>",
     }
     assert "extra_special_tokens" not in calls[1]
+
+
+@pytest.mark.parametrize(
+    ("prompt_text", "rejection"),
+    [
+        pytest.param(
+            "x" * 221,
+            "Requested token count exceeds the model's maximum context length "
+            "of 64 tokens. The input messages need at least 56 tokens",
+            id="normalized",
+        ),
+        pytest.param(
+            "x" * 100_000,
+            "The input (at least 6250 tokens) is longer than the model's "
+            "context length (64 tokens).",
+            id="past-the-nfc-bound",
+        ),
+        pytest.param("e\u0301" * 220, None, id="decomposed-text-that-nfc-halves"),
+    ],
+)
+def test_qwen_preprocessor_rejects_text_too_long_to_fit_before_tokenizing(
+    prompt_text: str, rejection: str | None
+) -> None:
+    from sglang_omni.models.qwen3_omni.components import (
+        preprocessor as preprocessor_mod,
+    )
+
+    tokenized_prompts: list[str] = []
+
+    class FakeProcessor:
+        def apply_chat_template(self, *_args, **_kwargs):
+            return prompt_text
+
+        def __call__(self, *, text, **_kwargs):
+            tokenized_prompts.append(text)
+            return {"input_ids": torch.tensor([[1, 2]])}
+
+    pre = object.__new__(preprocessor_mod.Qwen3OmniPreprocessor)
+    # Room for (64 - 8 - 1) * 4 = 220 characters of NFC prompt text.
+    pre.max_seq_len = 64
+    pre.max_token_chars = 4
+    pre.normalizer = NFC()
+    for name in ("fps", "max_frames", "min_pixels", "max_pixels", "total_pixels"):
+        setattr(pre, "default_video_" + name, None)
+    pre.processor = FakeProcessor()
+    payload = StagePayload(
+        request_id="long-text",
+        request=OmniRequest(
+            inputs={"messages": [{"role": "user", "content": "hello"}]},
+            params={"max_new_tokens": 8},
+        ),
+        data={},
+    )
+
+    if rejection is None:
+        asyncio.run(pre.call_impl(payload))
+        assert tokenized_prompts == [prompt_text]
+    else:
+        with pytest.raises(ValueError) as exc_info:
+            asyncio.run(pre.call_impl(payload))
+        assert str(exc_info.value).startswith(rejection)
+        assert is_bad_request_error(exc_info.value)
+        assert tokenized_prompts == []
 
 
 def test_qwen_talker_to_code2wav_projection_keeps_only_request_latch() -> None:
@@ -1465,46 +1736,127 @@ def test_qwen_speech_preprocessing_route_excludes_talker_for_text_output() -> No
     ]
 
 
-def test_qwen_merge_for_talker_matches_projected_thinker_merge() -> None:
-    def payloads() -> dict[str, StagePayload]:
-        state = make_qwen_state(
-            encoder_inputs={
-                "image_encoder": {
-                    "cache_key": "image-cache",
-                    "pixel_values": torch.ones((2, 3)),
-                },
+def test_qwen_talker_merge_carries_mrope_metadata_without_features() -> None:
+    state = make_qwen_state(
+        encoder_inputs={
+            "image_encoder": {
+                "cache_key": "image-cache",
+                "pixel_values": torch.ones((2, 3)),
             },
-        )
-        image_state = Qwen3OmniPipelineState(
-            encoder_outs={
-                "image_encoder": {
-                    "image_embeds": torch.ones((2, 2)),
-                    "deepstack_visual_embeds_image": [torch.ones((2, 2))],
-                }
+        },
+    )
+    image_state = Qwen3OmniPipelineState(
+        encoder_outs={
+            "image_encoder": {
+                "image_embeds": torch.ones((2, 2)),
+                "image_grid_thw": torch.ones((1, 3), dtype=torch.long),
+                "deepstack_visual_embeds_image": [torch.ones((2, 2))],
             }
-        )
-        return {
+        }
+    )
+
+    talker_merged = merge_for_talker(
+        {
             "preprocessing": project_preprocessing_to_mm_aggregate(
                 make_qwen_payload(state)
             ),
-            "image_encoder": make_qwen_payload(image_state),
+            "image_encoder": project_encoder_to_talker_ar(
+                make_qwen_payload(image_state)
+            ),
         }
-
-    talker_merged = merge_for_talker(payloads())
-    expected = project_mm_aggregate_to_talker_ar(merge_for_thinker(payloads()))
+    )
 
     talker_state = Qwen3OmniPipelineState.from_dict(talker_merged.data)
-    expected_state = Qwen3OmniPipelineState.from_dict(expected.data)
-    assert sorted(talker_state.thinker_inputs["model_inputs"]) == sorted(
-        expected_state.thinker_inputs["model_inputs"]
-    )
-    model_inputs = talker_state.thinker_inputs["model_inputs"]
-    assert "image_embeds" in model_inputs
-    assert "deepstack_visual_embeds" not in model_inputs
-    assert "image_deepstack_visual_embeds" not in model_inputs
+    assert list(talker_state.thinker_inputs["model_inputs"]) == ["image_grid_thw"]
     assert talker_state.prompt["input_ids"].tolist() == [11, 12, 13]
     assert talker_state.encoder_outs == {}
     assert talker_state.mm_inputs == {}
+
+
+def test_qwen_talker_merge_of_audio_in_video_gives_the_reference_positions() -> None:
+    grid, audio_feature_length, seconds_per_grid = [4, 4, 4], 300, 0.37
+    input_ids = torch.tensor(
+        [7, 8] + audio_in_video_span(grid, audio_feature_length) + [9], dtype=torch.long
+    )
+    video_tokens = (grid[0] * grid[1] * grid[2]) // SPATIAL_MERGE_SIZE**2
+    audio_tokens = feat_extract_output_lengths(audio_feature_length)
+    state = make_qwen_state(
+        prompt={
+            "prompt_text": "watch",
+            "input_ids": input_ids,
+            "attention_mask": torch.ones(len(input_ids), dtype=torch.long),
+        },
+        mm_inputs={
+            "video": {
+                "video_grid_thw": torch.tensor([grid], dtype=torch.long),
+                "video_second_per_grid": torch.tensor([seconds_per_grid]),
+                "use_audio_in_video": True,
+            },
+            "audio": {
+                "feature_attention_mask": torch.ones(
+                    (1, audio_feature_length), dtype=torch.long
+                ),
+                "audio_feature_lengths": torch.tensor([audio_feature_length]),
+            },
+        },
+    )
+    video_state = Qwen3OmniPipelineState(
+        encoder_outs={
+            "image_encoder": {
+                "video_embeds": torch.ones((video_tokens, 2)),
+                "video_grid_thw": torch.tensor([grid], dtype=torch.long),
+                "deepstack_visual_embeds_video": [torch.ones((video_tokens, 2))],
+            }
+        }
+    )
+    audio_state = Qwen3OmniPipelineState(
+        encoder_outs={
+            "audio_encoder": {
+                "audio_embeds": torch.ones((audio_tokens, 2)),
+                "audio_feature_lengths": torch.tensor([audio_feature_length]),
+                "audio_output_lengths": torch.tensor([audio_tokens]),
+            }
+        }
+    )
+
+    talker_merged = merge_for_talker(
+        {
+            "preprocessing": project_preprocessing_to_mm_aggregate(
+                make_qwen_payload(state)
+            ),
+            "image_encoder": project_encoder_to_talker_ar(
+                make_qwen_payload(video_state)
+            ),
+            "audio_encoder": project_encoder_to_talker_ar(
+                make_qwen_payload(audio_state)
+            ),
+        }
+    )
+
+    talker_state = Qwen3OmniPipelineState.from_dict(talker_merged.data)
+    model_inputs = talker_state.thinker_inputs["model_inputs"]
+    positions, delta = compute_mrope_positions(
+        talker_state.prompt["input_ids"], model_inputs, thinker_config_ns()
+    )
+    reference_positions, reference_delta = get_rope_index_qwen3_omni(
+        spatial_merge_size=SPATIAL_MERGE_SIZE,
+        image_token_id=IMAGE_TOKEN_ID,
+        video_token_id=VIDEO_TOKEN_ID,
+        vision_start_token_id=VISION_START_TOKEN_ID,
+        tokens_per_second=None,
+        input_ids=input_ids.unsqueeze(0),
+        image_grid_thw=None,
+        video_grid_thw=torch.tensor([grid], dtype=torch.long),
+        second_per_grid_ts=torch.tensor([seconds_per_grid]),
+        audio_token_id=AUDIO_TOKEN_ID,
+        audio_start_token_id=AUDIO_START_TOKEN_ID,
+        position_id_per_seconds=POSITION_ID_PER_SECONDS,
+        use_audio_in_video=True,
+        audio_seqlens=torch.tensor([audio_feature_length]),
+    )
+    assert not any(key.endswith("embeds") for key in model_inputs)
+    assert torch.equal(positions.float(), reference_positions.squeeze(1).float())
+    assert torch.equal(delta.float(), reference_delta.float())
 
 
 def test_qwen_thinker_request_and_decode_contracts() -> None:
@@ -1801,7 +2153,7 @@ def test_qwen_audio_cache_key_tracks_decoded_content(
     assert after != before
     assert run(audio=audio, video=video, sr=8000) != after
     assert loaded["loads"] == 4
-    assert pre.processor.audio_calls[-1][-1] is track
+    assert pre.processor.audio_calls[-1][0] is track
 
 
 def test_qwen_audio_cache_key_distinguishes_unsampled_file_content(
@@ -1837,8 +2189,67 @@ def test_qwen_audio_cache_key_requires_complete_content(decoded_audio_preprocess
     forward = run()
     loaded["audio"] = [b, a]
     assert run() != forward
-    loaded["video"] = [object()]
+    loaded["video"] = [[object()]]
     assert run(video=True) is None
+
+
+@pytest.mark.parametrize("changed", ["image", "video"])
+def test_qwen_visual_cache_key_tracks_decoded_content(
+    decoded_audio_preprocessor, monkeypatch, changed
+):
+    from PIL import Image
+
+    from sglang_omni.models.qwen3_omni.components import preprocessor as mod
+
+    pre, _, _ = decoded_audio_preprocessor
+    media = {"image": Image.new("RGB", (2, 2), "red"), "video": torch.zeros(4, 3, 2, 2)}
+
+    class Processor:
+        def apply_chat_template(self, *args, **kwargs):
+            return "visual prompt"
+
+        def __call__(self, **kwargs):
+            return {
+                "input_ids": torch.tensor([[1, 2]]),
+                "pixel_values": torch.ones(1, 3),
+            }
+
+    async def image_loader(raw, **kwargs):
+        return [media["image"]]
+
+    async def video_loader(raw, **kwargs):
+        return [media["video"]], [2.0], None
+
+    pre.processor = Processor()
+    monkeypatch.setattr(mod, "ensure_image_list_async", image_loader)
+    monkeypatch.setattr(mod, "ensure_video_list_async", video_loader)
+
+    def run(name="same"):
+        inputs = {
+            "messages": [{"role": "user", "content": "hello"}],
+            "images": [f"https://media.invalid/{name}.png"],
+            "videos": [f"https://media.invalid/{name}.mp4"],
+        }
+        payload = StagePayload(
+            request_id="visual-cache", request=OmniRequest(inputs=inputs), data={}
+        )
+        state = Qwen3OmniPipelineState.from_dict(
+            asyncio.run(pre.call_impl(payload)).data
+        )
+        return state.encoder_inputs["image_encoder"]["cache_key"]
+
+    before = run()
+    assert run() == before
+    # New content behind the same URL must not reuse the previous entry.
+    media[changed] = (
+        Image.new("RGB", (2, 2), "blue")
+        if changed == "image"
+        else torch.ones(4, 3, 2, 2)
+    )
+    after = run()
+    assert after != before
+    # Identical content at another address shares the entry.
+    assert run("other") == after
 
 
 def test_preprocessing_executor_defaults_to_serial_dispatch(monkeypatch):
@@ -1947,6 +2358,135 @@ def test_preprocessing_stops_media_loaders_before_closing_connection(
         with pytest.raises(asyncio.CancelledError if cancel else ValueError):
             await task
         assert closed
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_preprocessing_stops_video_siblings_before_closing_connection(
+    decoded_audio_preprocessor, monkeypatch, cancel
+):
+    from sglang_omni.models.qwen3_omni.components import preprocessor as mod
+    from sglang_omni.preprocessing.resource_connector import MultiModalResourceConnector
+    from sglang_omni.preprocessing.video import (
+        VideoDecodeError,
+        ensure_video_list_async,
+    )
+
+    pre, _, _ = decoded_audio_preprocessor
+    monkeypatch.setattr(mod, "ensure_video_list_async", ensure_video_list_async)
+
+    async def run():
+        entered = asyncio.Event()
+        stopped = asyncio.Event()
+        closed = asyncio.Event()
+
+        async def fetch_video(connector, url, **kwargs):
+            if url.endswith("bad.mp4"):
+                await entered.wait()
+                if cancel:
+                    await asyncio.Event().wait()
+                raise VideoDecodeError("invalid video")
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped.set()
+
+        async def close(connection):
+            assert stopped.is_set()
+            closed.set()
+
+        monkeypatch.setattr(
+            MultiModalResourceConnector, "fetch_video_async", fetch_video
+        )
+        monkeypatch.setattr(mod.ResourceHTTPConnection, "close", close)
+        payload = make_qwen_payload(
+            inputs={
+                "messages": [],
+                "videos": ["https://example/slow.mp4", "https://example/bad.mp4"],
+            }
+        )
+        task = asyncio.create_task(pre(payload))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        if cancel:
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError if cancel else VideoDecodeError):
+            await asyncio.wait_for(task, timeout=5)
+        assert closed.is_set()
+
+    asyncio.run(run())
+
+
+def test_preprocessing_repeated_cancellation_drains_and_closes(
+    decoded_audio_preprocessor, monkeypatch
+):
+    from sglang_omni.models.qwen3_omni.components import preprocessor as mod
+    from sglang_omni.preprocessing.resource_connector import MultiModalResourceConnector
+    from sglang_omni.preprocessing.video import VideoMediaIO, ensure_video_list_async
+
+    pre, _, _ = decoded_audio_preprocessor
+    monkeypatch.setattr(mod, "ensure_video_list_async", ensure_video_list_async)
+
+    async def run():
+        started = asyncio.Event()
+        release_decoder = threading.Event()
+        decoder_finished = threading.Event()
+        closing = asyncio.Event()
+        release_close = asyncio.Event()
+        closed = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def decode(self, data: bytes, media_type: str | None) -> None:
+            loop.call_soon_threadsafe(started.set)
+            release_decoder.wait(timeout=10)
+            decoder_finished.set()
+
+        async def load_http_bytes(
+            self, url: str, *, timeout: float, max_bytes: int | None
+        ) -> tuple[bytes, str]:
+            return b"video", "video/mp4"
+
+        async def close(connection):
+            assert decoder_finished.is_set()
+            closing.set()
+            await release_close.wait()
+            closed.set()
+
+        monkeypatch.setattr(
+            MultiModalResourceConnector, "load_http_bytes_async", load_http_bytes
+        )
+        monkeypatch.setattr(VideoMediaIO, "load_http_bytes", decode)
+        monkeypatch.setattr(mod.ResourceHTTPConnection, "close", close)
+        task = asyncio.create_task(
+            pre(
+                make_qwen_payload(
+                    inputs={"messages": [], "videos": ["https://example/video.mp4"]}
+                )
+            )
+        )
+        try:
+            await asyncio.wait_for(started.wait(), timeout=5)
+            for _ in range(3):
+                task.cancel()
+                await asyncio.sleep(0)
+            assert not task.done()
+            assert not closing.is_set()
+            release_decoder.set()
+            await asyncio.wait_for(closing.wait(), timeout=5)
+            for _ in range(3):
+                task.cancel()
+                await asyncio.sleep(0)
+            assert not task.done()
+            assert not closed.is_set()
+            release_close.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=5)
+            assert closed.is_set()
+        finally:
+            release_decoder.set()
+            release_close.set()
+            await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(run())
 

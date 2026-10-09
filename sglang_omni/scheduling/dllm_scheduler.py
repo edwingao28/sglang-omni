@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.dllm.config import DllmConfig
-from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
+from sglang.srt.managers.schedule_batch import FINISH_LENGTH, Req, ScheduleBatch
 from sglang.srt.managers.schedule_policy import AddReqResult, PrefillAdder
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
@@ -143,7 +143,18 @@ class DllmScheduler:
                 pass
 
             if msg.type == "new_request":
-                req_data = self.request_builder(msg.data)
+                try:
+                    req_data = self.request_builder(msg.data)
+                except Exception as exc:
+                    logger.exception(
+                        f"DllmScheduler: request builder failed for {msg.request_id}"
+                    )
+                    self.outbox.put(
+                        OutgoingMessage(
+                            request_id=msg.request_id, type="error", data=exc
+                        )
+                    )
+                    continue
                 req = req_data.req
                 self.rid_to_req_data[req.rid] = req_data
                 self.waiting_queue.append(req)
@@ -375,6 +386,14 @@ class DllmScheduler:
 
             req.output_ids.extend(req_token_ids)
             req.update_finish_state(new_accepted_len=new_tokens)
+            if (
+                not req.finished()
+                and req.seqlen + block_size > self.model_config.context_len
+            ):
+                # note (ratish): the next block would run past the context.
+                req.finished_reason = FINISH_LENGTH(length=len(req.output_ids))
+            else:
+                pass
 
             if req.finished():
                 req_data = self.rid_to_req_data.pop(req.rid, None)
