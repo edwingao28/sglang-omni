@@ -390,6 +390,30 @@ def with_projected_tables(talker: Qwen3TTSTalker) -> Qwen3TTSTalker:
     return talker
 
 
+def test_on_weight_share_attached_rebuilds_projected_tables_from_attached_weights():
+    # Note (wenyao): the dummy-loader load path already ran post_load_weights,
+    # so a follower's tables are stale after attach unless the hook rebuilds them.
+    talker = with_projected_tables(build_talker(torch.device("cpu")))
+    dummy_tables = talker.predictor_projected_embeddings.clone()
+    codec_embedding = talker.code_predictor.model.codec_embedding
+    torch.manual_seed(11)
+    with torch.no_grad():
+        for embedding in codec_embedding:
+            embedding.weight.copy_(torch.randn_like(embedding.weight))
+    assert torch.equal(talker.predictor_projected_embeddings, dummy_tables)
+
+    talker.on_weight_share_attached()
+
+    expected = torch.stack(
+        [
+            talker.code_predictor.project_input(embedding.weight)
+            for embedding in codec_embedding[: NUM_CODE_GROUPS - 2]
+        ]
+    )
+    assert torch.equal(talker.predictor_projected_embeddings, expected)
+    assert not torch.equal(talker.predictor_projected_embeddings, dummy_tables)
+
+
 @pytest.mark.accelerator
 @pytest.mark.parametrize("batch_size", [1, 4, 16])
 def test_projected_tables_graph_matches_eager_and_the_unfused_gather(batch_size: int):

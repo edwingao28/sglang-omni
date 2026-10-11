@@ -2258,6 +2258,12 @@ class Qwen3TTSTalker(Qwen3TTSPromptBuilderMixin, nn.Module):
                 pass
         self.post_load_weights()
 
+    def on_weight_share_attached(self) -> None:
+        # Note (wenyao): a follower's dummy-weight load already projected random
+        # codec embeddings into the tables, and attach only swaps registered
+        # tensors, so the plain-tensor tables must be rebuilt here.
+        self.post_load_weights()
+
     @torch.no_grad()
     def post_load_weights(self) -> None:
         """Rebuild the projected codec tables; the loaders call this after every
