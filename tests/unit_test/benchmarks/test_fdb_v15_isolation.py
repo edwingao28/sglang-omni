@@ -17,6 +17,8 @@ from benchmarks.duplex.fdb_v15.common import (
     NCCL_PORT_END,
     load_settings,
 )
+from benchmarks.duplex.fdb_v15.generate import generate
+from benchmarks.duplex.fdb_v15.selection import SampleSelection
 from sglang_omni.utils.port_claim import claim_tcp_port, release_tcp_port
 
 CLAIM_BASE_PORT = 25100
@@ -97,6 +99,19 @@ def test_gpu_without_visible_devices_still_offsets_ports(
     settings = load_settings("isolation")
     assert settings.gpu == "1"
     assert settings.server_port == DEFAULT_SERVER_PORT + JOB_PORT_STRIDE
+
+
+def test_generate_refuses_more_shards_than_the_server_admits(
+    clean_job_env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    server_config = tmp_path / "server.yaml"
+    server_config.write_text("max_sessions: 2\n")
+    monkeypatch.setenv("FDB_WORK", str(tmp_path / "fdb"))
+    monkeypatch.setenv("SERVER_CONFIG", str(server_config))
+    settings = load_settings("isolation")
+    with pytest.raises(SystemExit, match="--num-shards 3 exceeds max_sessions 2"):
+        generate(settings, 1, SampleSelection(per_subset=1), num_shards=3)
+    assert not (tmp_path / "fdb").exists()
 
 
 def test_judge_ports_stay_above_the_nccl_claim_range() -> None:

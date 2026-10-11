@@ -11,6 +11,8 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 
+import yaml
+
 from benchmarks.duplex.fdb_v15.common import (
     ENGINE_LABEL,
     MODEL_ID,
@@ -29,6 +31,7 @@ from benchmarks.duplex.fdb_v15.selection import (
 )
 from benchmarks.duplex.fdb_v15.servers import model_server
 from benchmarks.duplex.run_artifacts import accounting, load_run
+from sglang_omni.models.minicpm_o.native_config import DEFAULT_MAX_SESSIONS
 
 PROGRESS_INTERVAL_S = 60
 
@@ -166,6 +169,16 @@ def generate(
         raise SystemExit(
             f"ERROR: {repeat_dir / 'recording'} exists. "
             f"Use a new --repeat, or delete {repeat_dir} to redo it."
+        )
+    else:
+        pass
+    server_config = yaml.safe_load(settings.server_config.read_text())
+    max_sessions = server_config.get("max_sessions", DEFAULT_MAX_SESSIONS)
+    if num_shards > max_sessions:
+        raise SystemExit(
+            f"ERROR: --num-shards {num_shards} exceeds max_sessions {max_sessions} "
+            f"in {settings.server_config}; the server rejects extra connections "
+            "with HTTP 503."
         )
     else:
         pass
