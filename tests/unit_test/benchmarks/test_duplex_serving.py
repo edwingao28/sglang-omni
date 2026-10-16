@@ -1,6 +1,8 @@
 import base64
 import json
 import math
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -312,8 +314,9 @@ def test_turn_based_level_is_judged_by_reply_real_time_factor(tmp_path: Path) ->
     assert level["unmet_targets"] == ["reply real-time factor p90 below 1"]
 
 
+@pytest.mark.parametrize("dataset", ["v1.0", "v1.5"])
 def test_sweep_records_every_level_then_reports(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dataset: str
 ) -> None:
     recorder_calls: list[list[str]] = []
 
@@ -325,10 +328,12 @@ def test_sweep_records_every_level_then_reports(
         )
         return 1
 
-    monkeypatch.setitem(benchmark_duplex_serving.RECORDERS, "v1.5", fake_recorder)
+    monkeypatch.setattr(
+        f"{benchmark_duplex_serving.RECORDERS[dataset]}.main", fake_recorder
+    )
     sweep_dir = tmp_path / "sweep"
     code = benchmark_duplex_serving.main(
-        ["sweep", "--dataset", "v1.5", "--concurrency", "2,1"]
+        ["sweep", "--dataset", dataset, "--concurrency", "2,1"]
         + [
             "--output",
             str(sweep_dir),
@@ -359,3 +364,35 @@ def test_sweep_refuses_recorder_options_it_sets(tmp_path: Path) -> None:
             + ["--output", str(tmp_path / "sweep"), "--", "--concurrency=4"]
         )
     assert not (tmp_path / "sweep").exists()
+
+
+def test_v15_sweep_does_not_load_v10_scoring_dependencies(tmp_path: Path) -> None:
+    process = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys
+from benchmarks.eval.benchmark_duplex_serving import main
+
+try:
+    main([
+        "sweep", "--dataset", "v1.5", "--concurrency", "1",
+        "--output", sys.argv[1], "--", "--help",
+    ])
+except SystemExit as exception:
+    assert exception.code == 0
+else:
+    raise AssertionError("The selected recorder did not handle --help")
+
+assert "benchmarks.eval.benchmark_duplex_v15" in sys.modules
+for module in ("benchmarks.eval.benchmark_duplex_v10", "silero_vad", "torch"):
+    assert module not in sys.modules, f"Unused scoring dependency loaded: {module}"
+""",
+            str(tmp_path / "sweep"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert process.returncode == 0, process.stderr
