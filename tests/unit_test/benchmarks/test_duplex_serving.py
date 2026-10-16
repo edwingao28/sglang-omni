@@ -185,6 +185,35 @@ def test_unit_without_receipt_is_missed(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("input_s", "unit_done_s", "unit_lags_s", "units_missed"),
+    [
+        (2.0, [101.16, 102.12, 102.2], [0.2, 0.2], 0),
+        (2.0, [102.0, 102.12, 102.2], [1.04, 0.2], 1),
+        (2.0, [101.16, 102.12, 104.0], [0.2, 0.2], 0),
+        (2.5, [101.16, 102.12, 102.7], [0.2, 0.2, 0.2], 0),
+    ],
+    ids=["empty-eos", "late-unit", "late-empty-eos", "partial-unit"],
+)
+def test_unit_lag_excludes_empty_eos_but_counts_partial_unit(
+    tmp_path: Path,
+    input_s: float,
+    unit_done_s: list[float],
+    unit_lags_s: list[float],
+    units_missed: int,
+) -> None:
+    session = score_session(
+        record_session(tmp_path / "session", unit_done_s, input_s=input_s),
+        PROFILE,
+        PLAYBACK_RESERVE_S,
+    )
+
+    assert session["units_missed"] == units_missed
+    assert session["units_expected"] == len(unit_lags_s)
+    assert session["units_done"] == len(unit_lags_s)
+    assert session["unit_lag_s"] == pytest.approx(unit_lags_s)
+
+
+@pytest.mark.parametrize(
     ("playback_reserve_s", "underrun_s"), [(0.0, 0.2), (0.08, 0.12), (0.3, 0.0)]
 )
 def test_reply_latency_underrun_and_real_time_factor(
