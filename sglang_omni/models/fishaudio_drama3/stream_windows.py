@@ -29,6 +29,15 @@ def stream_window_lengths(
         window_index += 1
 
 
+def utterance_graph_lengths(max_frames: int, *, step: int) -> tuple[int, ...]:
+    """Graph lengths for whole-utterance decodes: every step frames below max_frames,
+    then max_frames itself; none when max_frames is 0."""
+    if max_frames == 0:
+        return ()
+    else:
+        return (*range(step, max_frames, step), max_frames)
+
+
 def frames_in_complete_windows(
     frame_count: int,
     *,
