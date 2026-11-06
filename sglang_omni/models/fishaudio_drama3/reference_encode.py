@@ -160,11 +160,46 @@ class Drama3ReferenceEncodeHook(FishReferenceEncodeHook):
         ):
             return reference_codes_of(self.codec.quantizer, self.codec.encoder(audio))
 
-    def encode_waveform(self, audios: torch.Tensor) -> torch.Tensor:
-        sample_count = int(audios.shape[-1])
+    def encode_reference_waveform(self, audio: torch.Tensor, sr: int) -> torch.Tensor:
         if self.device.type == "cpu":
-            return super().encode_waveform(audios)
-        elif sample_count == 0:
+            return super().encode_reference_waveform(audio, sr)
+        else:
+            pass
+        return self.encode_waveform(self.reference_waveform(audio, sr))
+
+    def reference_waveform(self, audio: torch.Tensor, sr: int) -> torch.Tensor:
+        """The [1, samples] CPU waveform the codec encodes: mono, at the codec's rate,
+        within the length limit, and clamped to [-1, 1] under autocast. Mirrors
+        FishReferenceEncodeHook.encode_reference_waveform up to the codec call."""
+        import torchaudio
+
+        if (
+            self.max_reference_audio_seconds is not None
+            and audio.shape[-1] > self.max_reference_audio_seconds * sr
+        ):
+            raise ValueError(
+                f"reference audio lasts {audio.shape[-1] / sr:.1f} s, longer than "
+                f"the {self.max_reference_audio_seconds:g} s limit; shorten it or "
+                f"raise max_reference_audio_seconds"
+            )
+        else:
+            pass
+        if audio.shape[0] > 1:
+            audio = audio.mean(0, keepdim=True)
+        else:
+            pass
+        audio = torchaudio.functional.resample(audio, sr, self.codec.sample_rate)
+        audios = audio.squeeze(0).unsqueeze(0)
+        if self.autocast_dtype is not None:
+            audios = audios.clamp(-1.0, 1.0)
+        else:
+            pass
+        return audios
+
+    def encode_waveform(self, audios: torch.Tensor) -> torch.Tensor:
+        """[codebooks, frames] CPU codes of a reference_waveform result."""
+        sample_count = int(audios.shape[-1])
+        if sample_count == 0:
             raise ValueError("reference audio is empty")
         else:
             pass
