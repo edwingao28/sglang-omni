@@ -328,6 +328,11 @@ class FishReferenceEncodeHook(TensorReferenceEncodeHook[FishReferenceInput]):
         return None
 
     def encode_reference_waveform(self, audio: torch.Tensor, sr: int) -> torch.Tensor:
+        return self.encode_waveform(self.reference_waveform(audio, sr))
+
+    def reference_waveform(self, audio: torch.Tensor, sr: int) -> torch.Tensor:
+        """The [1, samples] CPU waveform the codec encodes: mono, at the codec's rate,
+        within the length limit, and clamped to [-1, 1] under autocast."""
         import torchaudio
 
         if (
@@ -351,6 +356,10 @@ class FishReferenceEncodeHook(TensorReferenceEncodeHook[FishReferenceInput]):
             audios = audios.clamp(-1.0, 1.0)
         else:
             pass
+        return audios
+
+    def encode_waveform(self, audios: torch.Tensor) -> torch.Tensor:
+        """[codebooks, frames] CPU codes of a reference_waveform result."""
         audio_lengths = torch.tensor([audios.shape[1]], dtype=torch.long)
         with (
             torch.no_grad(),
