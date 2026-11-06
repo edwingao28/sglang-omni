@@ -145,6 +145,8 @@ _COMPLETED_REQUEST_ID_LIMIT = 10000
 _PENDING_STREAM_REQUEST_LIMIT = 10000
 _PENDING_STREAM_REQUEST_RETAINED = 5000
 _IDLE_WAIT_S = 0.02
+# A non-streaming prefill hold waits for company only when this many already wait.
+NON_STREAMING_HOLD_MIN_WAITING = 2
 MAX_STREAM_ALLOCATION_ATTEMPTS = 65
 
 
@@ -371,6 +373,7 @@ class OmniScheduler(Generic[RequestDataT]):
         prefill_coalesce_when_idle: bool = False,
         prefill_coalesce_requires_pending_builds: bool = False,
         prefill_coalesce_after_builds_during_decode: bool = False,
+        non_streaming_prefill_decode_interval: int = 0,
         request_build_max_workers: int = 1,
         request_build_max_pending: int | None = None,
         shutdown_callback: Callable[[], None] | None = None,
@@ -512,6 +515,13 @@ class OmniScheduler(Generic[RequestDataT]):
         self.prefill_coalesce_after_builds_during_decode = bool(
             prefill_coalesce_after_builds_during_decode
         )
+        # A queue of only non-streaming requests waits this many decode steps after
+        # a prefill (when longer than prefill_decode_interval), so its admissions
+        # share one prefill without delaying any streaming request's first packet.
+        self.non_streaming_prefill_decode_interval = int(
+            non_streaming_prefill_decode_interval
+        )
+        self.non_streaming_hold_remaining = 0
 
         # Token / memory info (upstream reads from tp_worker.get_worker_info)
         mr = tp_worker.model_runner
@@ -2184,6 +2194,8 @@ class OmniScheduler(Generic[RequestDataT]):
             return False
         elif self._prefill_decode_interval_remaining > 0:  # noqa: leading-underscore
             return False
+        elif self.non_streaming_hold_defers(running_batch, consume=False):
+            return False
         elif self.chunked_req is not None:
             return True
         elif not self.waiting_queue:
@@ -2221,6 +2233,68 @@ class OmniScheduler(Generic[RequestDataT]):
             now_s = time.perf_counter()
             waiting = self.prefill_coalesce_waiting_requests(running_batch)
             return waiting is None or not self.prefill_coalesce_holds(waiting, now_s)
+
+    def non_streaming_hold_steps(self) -> int:
+        """Decode steps the non-streaming hold adds past the base prefill interval."""
+        return max(
+            0, self.non_streaming_prefill_decode_interval - self.prefill_decode_interval
+        )
+
+    def _arm_prefill_decode_interval(  # noqa: leading-underscore  # upstream name
+        self, batch: ScheduleBatch | None
+    ) -> None:
+        _Upstream._arm_prefill_decode_interval(self, batch)  # noqa: leading-underscore
+        if batch is None:
+            return
+        elif (
+            batch.is_extend_in_batch
+            if self.require_mlp_sync
+            else batch.forward_mode.is_extend()
+        ):
+            self.non_streaming_hold_remaining = self.non_streaming_hold_steps()
+        else:
+            pass
+
+    def _should_defer_prefill(  # noqa: leading-underscore  # upstream name
+        self, running_batch: ScheduleBatch
+    ) -> bool:
+        if _Upstream._should_defer_prefill(
+            self, running_batch
+        ):  # noqa: leading-underscore
+            return True
+        else:
+            return self.non_streaming_hold_defers(running_batch, consume=True)
+
+    def non_streaming_hold_defers(
+        self, running_batch: ScheduleBatch, *, consume: bool
+    ) -> bool:
+        """Whether a queue of only non-streaming requests keeps waiting past the base
+        prefill interval. A streaming arrival, a queue below
+        NON_STREAMING_HOLD_MIN_WAITING or a running batch below
+        prefill_decode_interval_min_bs ends the hold; consume counts one decode step."""
+        waiting = self.waiting_queue
+        if self.non_streaming_hold_remaining <= 0:
+            return False
+        elif (
+            running_batch.batch_size() < self.prefill_decode_interval_min_bs
+            or len(waiting) < NON_STREAMING_HOLD_MIN_WAITING
+            or any(self.waiting_request_is_streaming(req) for req in waiting)
+        ):
+            self.non_streaming_hold_remaining = 0
+            return False
+        else:
+            if consume:
+                self.non_streaming_hold_remaining -= 1
+            else:
+                pass
+            return True
+
+    @staticmethod
+    def waiting_request_is_streaming(req: Req) -> bool:
+        """A request without a stage payload counts as streaming, so only requests
+        known to be non-streaming ever wait the longer interval."""
+        payload = getattr(getattr(req, "omni_data", None), "stage_payload", None)
+        return payload is None or bool(payload.request.params.get("stream"))
 
     def prefill_coalesce_waiting_requests(
         self, running_batch: ScheduleBatch | None

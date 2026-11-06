@@ -31,6 +31,7 @@ from sglang_omni.models.fishaudio_drama3.config import (
     DEFAULT_GDN_PREFILL_CUDA_GRAPHS,
     DEFAULT_MAX_NEW_TOKENS_CAP,
     DEFAULT_MAX_PROMPT_ROWS,
+    DEFAULT_NON_STREAMING_PREFILL_DECODE_INTERVAL,
     DEFAULT_REFERENCE_SAMPLING,
     DEFAULT_REFERENCE_SAMPLING_FALLBACK,
     DEFAULT_STREAM_FOLLOWUP_STRIDE,
@@ -128,6 +129,9 @@ class Drama3EngineBuilder(SGLangGenerationEngineBuilder[Drama3RequestData]):
         tower_fused_layers: bool = DEFAULT_TOWER_FUSED_LAYERS,
         enable_async_decode: bool = DEFAULT_ENABLE_ASYNC_DECODE,
         async_decode_min_batch_size: int = DEFAULT_ASYNC_DECODE_MIN_BATCH_SIZE,
+        non_streaming_prefill_decode_interval: int = (
+            DEFAULT_NON_STREAMING_PREFILL_DECODE_INTERVAL
+        ),
     ) -> None:
         self.context_length = context_length
         self.max_running_requests = max_running_requests
@@ -145,6 +149,9 @@ class Drama3EngineBuilder(SGLangGenerationEngineBuilder[Drama3RequestData]):
         self.tower_fused_layers = tower_fused_layers
         self.enable_async_decode = enable_async_decode
         self.async_decode_min_batch_size = async_decode_min_batch_size
+        self.non_streaming_prefill_decode_interval = (
+            non_streaming_prefill_decode_interval
+        )
         self.frame_streamer: Drama3FrameStreamer | None = None
         self.sglang_runner: SGLModelRunner | None = None
 
@@ -455,9 +462,17 @@ class Drama3EngineBuilder(SGLangGenerationEngineBuilder[Drama3RequestData]):
                 "Drama 3 async decode: off, "
                 "tts_engine.factory.enable_async_decode is false"
             )
+        logger.info(
+            f"Drama 3 prefill interval: {DECODE_STEPS_BETWEEN_PREFILLS} decode steps, "
+            f"{self.non_streaming_prefill_decode_interval} for a queue of only "
+            f"non-streaming requests"
+        )
         return {
             "stream_output_builder": self.frame_streamer,
             "enable_async_decode": self.enable_async_decode,
             "async_decode_min_batch_size": self.async_decode_min_batch_size,
             "async_decode_resolve_before_prefill": True,
+            "non_streaming_prefill_decode_interval": (
+                self.non_streaming_prefill_decode_interval
+            ),
         }

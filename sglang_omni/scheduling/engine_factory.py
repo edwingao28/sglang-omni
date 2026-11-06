@@ -92,6 +92,7 @@ class SchedulerExtras(TypedDict, Generic[RequestDataT], total=False):
     prefill_coalesce_when_idle: bool
     prefill_coalesce_requires_pending_builds: bool
     prefill_coalesce_after_builds_during_decode: bool
+    non_streaming_prefill_decode_interval: int
     request_build_max_workers: int
     request_build_max_pending: int | None
 
