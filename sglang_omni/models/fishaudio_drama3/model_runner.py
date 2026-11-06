@@ -39,6 +39,7 @@ from sglang_omni.models.fishaudio_drama3.model_inputs import (
     next_frame_labels,
 )
 from sglang_omni.models.fishaudio_drama3.request_builders import Drama3RequestData
+from sglang_omni.models.fishaudio_drama3.sampling import RAS_WINDOW_FRAMES
 from sglang_omni.models.fishaudio_drama3.sglang_model import Drama3ForCausalLM
 from sglang_omni.scheduling.sglang_backend.output_processor import SGLangOutputProcessor
 from sglang_omni.scheduling.types import SchedulerRequest
@@ -230,41 +231,47 @@ class Drama3ModelRunner(ModelRunner[Drama3RequestData]):
         next_frames: torch.Tensor,
     ) -> Drama3StepInputs:
         request_data = [request_data_of(request) for request in requests]
-
-        def staged(host: torch.Tensor) -> torch.Tensor:
-            return self.pinned(host).to(self.device, non_blocking=True)
-
+        request_count = len(request_data)
+        row_count, frame_width = frames.shape
+        ras_windows = torch.tensor(
+            [ras_window(data.frame_rows) for data in request_data], dtype=torch.int64
+        )
+        # One pinned block and one copy per dtype; the device tensors are views.
+        ints = self.pinned(
+            torch.cat(
+                (
+                    frames.flatten(),
+                    next_frames.flatten(),
+                    ras_windows.flatten(),
+                    torch.tensor(
+                        [data.top_k for data in request_data], dtype=torch.int64
+                    ),
+                )
+            )
+        ).to(self.device, non_blocking=True)
+        floats = self.pinned(
+            torch.tensor(
+                [data.temperature for data in request_data]
+                + [data.top_p for data in request_data]
+                + [data.epsilon_cutoff for data in request_data],
+                dtype=torch.float32,
+            )
+        ).to(self.device, non_blocking=True)
+        frame_count = row_count * frame_width
+        frames, next_frames, ras_windows, top_k = torch.split(
+            ints, [frame_count, frame_count, ras_windows.numel(), request_count]
+        )
+        temperature, top_p, epsilon_cutoff = torch.split(floats, request_count)
         step_inputs = Drama3StepInputs(
             request_ids=request_ids_of(request_data),
-            frames=staged(frames),
-            next_frames=staged(next_frames),
-            ras_windows=staged(
-                torch.tensor(
-                    [ras_window(data.frame_rows) for data in request_data],
-                    dtype=torch.int64,
-                )
-            ),
-            temperature=staged(
-                torch.tensor(
-                    [data.temperature for data in request_data], dtype=torch.float32
-                )
-            ),
-            top_k=staged(
-                torch.tensor([data.top_k for data in request_data], dtype=torch.int64)
-            ),
-            top_p=staged(
-                torch.tensor([data.top_p for data in request_data], dtype=torch.float32)
-            ),
+            frames=frames.view(row_count, frame_width),
+            next_frames=next_frames.view(row_count, frame_width),
+            ras_windows=ras_windows.view(request_count, RAS_WINDOW_FRAMES),
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
         )
-        self.decode_buffers.epsilon_cutoff[: len(request_data)].copy_(
-            self.pinned(
-                torch.tensor(
-                    [data.epsilon_cutoff for data in request_data],
-                    dtype=torch.float32,
-                )
-            ),
-            non_blocking=True,
-        )
+        self.decode_buffers.epsilon_cutoff[:request_count].copy_(epsilon_cutoff)
         self.model.step_exchange.stage(step_inputs)
         return step_inputs
 
