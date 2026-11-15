@@ -12,6 +12,7 @@ from typing import Protocol
 import torch
 from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
+from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from torch import nn
@@ -144,54 +145,87 @@ class CountingFusedTowerLayers(FusedTowerLayers):
         )
 
 
-class AttentionBreak(Protocol):
+EagerAttentionArgument = torch.Tensor | bool | int | None
+
+
+class BoundEagerAttention(Protocol):
+    """RadixAttention._eager_attention as one layer reads it."""
+
     def __call__(
         self,
-        query: torch.Tensor,
-        key: torch.Tensor | None,
-        value: torch.Tensor | None,
-        output: torch.Tensor,
-        save_kv_cache: bool,
-        layer_id: int,
-        *,
-        use_mha_companion: bool,
-        key_value_num_tokens: int | None,
+        q: torch.Tensor,
+        *arguments: EagerAttentionArgument,
+        **keyword_arguments: EagerAttentionArgument,
+    ) -> None: ...
+
+    def run_eager(
+        self,
+        q: torch.Tensor,
+        *arguments: EagerAttentionArgument,
+        **keyword_arguments: EagerAttentionArgument,
     ) -> None: ...
 
 
-class CaptureBreakRecorder:
-    def __init__(self, attention_break: AttentionBreak) -> None:
-        self.attention_break = attention_break
-        self.layer_ids_by_token_count: dict[int, list[int]] = {}
+class EagerAttention(Protocol):
+    """RadixAttention._eager_attention as the class holds it."""
+
+    def __get__(
+        self, attention: RadixAttention, owner: type[RadixAttention]
+    ) -> BoundEagerAttention: ...
+
+
+@dataclass(frozen=True, kw_only=True)
+class RecordingEagerAttention:
+    """One layer's eager attention. A call made while a CUDA graph is captured
+    breaks the graph, so it records the layer under the captured token count."""
+
+    eager_attention: BoundEagerAttention
+    layer_id: int
+    layer_ids_by_token_count: dict[int, list[int]]
 
     def __call__(
         self,
-        query: torch.Tensor,
-        key: torch.Tensor | None,
-        value: torch.Tensor | None,
-        output: torch.Tensor,
-        save_kv_cache: bool,
-        layer_id: int,
-        *,
-        use_mha_companion: bool,
-        key_value_num_tokens: int | None,
+        q: torch.Tensor,
+        *arguments: EagerAttentionArgument,
+        **keyword_arguments: EagerAttentionArgument,
     ) -> None:
         if torch.cuda.is_current_stream_capturing():
-            self.layer_ids_by_token_count.setdefault(query.shape[0], []).append(
-                layer_id
+            self.layer_ids_by_token_count.setdefault(q.shape[0], []).append(
+                self.layer_id
             )
         else:
             pass
-        self.attention_break(
-            query,
-            key,
-            value,
-            output,
-            save_kv_cache,
-            layer_id,
-            use_mha_companion=use_mha_companion,
-            key_value_num_tokens=key_value_num_tokens,
-        )
+        return self.eager_attention(q, *arguments, **keyword_arguments)
+
+    def run_eager(
+        self,
+        q: torch.Tensor,
+        *arguments: EagerAttentionArgument,
+        **keyword_arguments: EagerAttentionArgument,
+    ) -> None:
+        return self.eager_attention.run_eager(q, *arguments, **keyword_arguments)
+
+
+class CaptureBreakRecorder:
+    """Stands in for RadixAttention._eager_attention, keeping its attributes, and
+    hands each layer a RecordingEagerAttention around sglang's bound method."""
+
+    def __init__(self, eager_attention: EagerAttention) -> None:
+        functools.update_wrapper(self, eager_attention)
+        self.eager_attention = eager_attention
+        self.layer_ids_by_token_count: dict[int, list[int]] = {}
+
+    def __get__(
+        self, attention: RadixAttention | None, owner: type[RadixAttention]
+    ) -> CaptureBreakRecorder | RecordingEagerAttention:
+        if attention is None:
+            return self
+        else:
+            return RecordingEagerAttention(
+                eager_attention=self.eager_attention.__get__(attention, owner),
+                layer_id=attention.layer_id,
+                layer_ids_by_token_count=self.layer_ids_by_token_count,
+            )
 
 
 class EndOfSpeechControlledLogits(nn.Module):
