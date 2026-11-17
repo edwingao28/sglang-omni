@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import numpy as np
 import pytest
 
-from sglang_omni.config import AudioChunkingConfig, ResolvedAudioChunking
+from sglang_omni.config import AudioChunkingConfig, ProcessConfig, ResolvedAudioChunking
+from sglang_omni.config.schema import PipelineConfig
+from sglang_omni.models.ming3_asr.config import Ming3ASRPipelineConfig
+from sglang_omni.models.qwen3_asr.config import Qwen3ASRPipelineConfig
 from sglang_omni.serve import transcription_chunking
 from sglang_omni.serve.transcription_chunking import (
     RMSSplitter,
@@ -73,8 +78,6 @@ def test_qwen3_asr_pipeline_declaresResolvedAudioChunking(monkeypatch) -> None:
     # Torch-MPS override is covered explicitly below.
     monkeypatch.setattr(current_platform, "is_mps", lambda: False)
 
-    from sglang_omni.models.qwen3_asr.config import Qwen3ASRPipelineConfig
-
     declared = Qwen3ASRPipelineConfig(model_path="dummy").resolved_audio_chunking
     assert declared.allow_audio_chunking is True
     # 30s is a scheduling choice, not a context limit (the context is sized
@@ -87,7 +90,6 @@ def test_qwen3_asr_pipeline_declaresResolvedAudioChunking(monkeypatch) -> None:
 
 
 def test_qwen3_asr_torch_mps_limits_runtime_audio_policy(monkeypatch) -> None:
-    from sglang_omni.models.qwen3_asr.config import Qwen3ASRPipelineConfig
     from sglang_omni.platforms import current_platform
 
     monkeypatch.setattr(current_platform, "is_mps", lambda: True)
@@ -102,7 +104,6 @@ def test_qwen3_asr_torch_mps_limits_runtime_audio_policy(monkeypatch) -> None:
 
 
 def test_qwen3_asr_torch_mps_rejects_unsafe_chunk_length(monkeypatch) -> None:
-    from sglang_omni.models.qwen3_asr.config import Qwen3ASRPipelineConfig
     from sglang_omni.platforms import current_platform
 
     monkeypatch.setattr(current_platform, "is_mps", lambda: True)
@@ -115,7 +116,6 @@ def test_qwen3_asr_torch_mps_rejects_unsafe_chunk_length(monkeypatch) -> None:
 
 
 def test_qwen3_asr_non_torch_mps_keeps_native_audio_policy(monkeypatch) -> None:
-    from sglang_omni.models.qwen3_asr.config import Qwen3ASRPipelineConfig
     from sglang_omni.platforms import current_platform
 
     monkeypatch.setattr(current_platform, "is_mps", lambda: False)
@@ -212,33 +212,46 @@ def test_clip_length_past_the_native_limit_is_rejected_at_config_time() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("config_cls", "engine_stage"),
+    [(Qwen3ASRPipelineConfig, "asr"), (Ming3ASRPipelineConfig, "thinker")],
+)
 def test_long_audio_admission_default_follows_max_running_requests(
     monkeypatch,
+    config_cls: type[PipelineConfig],
+    engine_stage: Literal["asr", "thinker"],
 ) -> None:
+    """The derived cap follows the engine's running slots across replicas; it once stayed at the fallback behind a CPU entry stage and ignored replicas."""
     from sglang_omni.platforms import current_platform
 
     monkeypatch.setattr(current_platform, "is_mps", lambda: False)
     from sglang_omni.config.manager import ConfigManager
-    from sglang_omni.models.qwen3_asr.config import Qwen3ASRPipelineConfig
 
-    manager = ConfigManager(Qwen3ASRPipelineConfig(model_path="dummy"))
+    manager = ConfigManager(config_cls(model_path="dummy"))
     # The default is a ratio of the engine's running slots, so raising the
     # engine capacity raises long-audio admission with it...
-    merged = manager.merge_config({"asr.engine.max_running_requests": "128"})
+    merged = manager.merge_config(
+        {f"{engine_stage}.engine.max_running_requests": "128"}
+    )
     assert merged.resolved_audio_chunking.max_concurrent_long_audio_requests == 8
     # ...and a tiny engine still admits one upload.
-    merged = manager.merge_config({"asr.engine.max_running_requests": "4"})
+    merged = manager.merge_config({f"{engine_stage}.engine.max_running_requests": "4"})
     assert merged.resolved_audio_chunking.max_concurrent_long_audio_requests == 1
     # More chunks per upload means fewer uploads for the same half share.
     merged = manager.merge_config({"audio_chunking.max_concurrent_chunks": "16"})
     assert merged.resolved_audio_chunking.max_concurrent_long_audio_requests == 2
+    # One server-wide cap admits uploads for every replica: 2 x 64 // (2 x 8).
+    replicated = config_cls(
+        model_path="dummy",
+        processes={engine_stage: ProcessConfig(num_replicas=2, replica_devices=[0, 1])},
+    )
+    assert replicated.resolved_audio_chunking.max_concurrent_long_audio_requests == 8
 
 
 def test_long_audio_admission_explicit_value_wins(monkeypatch) -> None:
     from sglang_omni.platforms import current_platform
 
     monkeypatch.setattr(current_platform, "is_mps", lambda: False)
-    from sglang_omni.models.qwen3_asr.config import Qwen3ASRPipelineConfig
 
     config = Qwen3ASRPipelineConfig(
         model_path="dummy",
@@ -247,35 +260,50 @@ def test_long_audio_admission_explicit_value_wins(monkeypatch) -> None:
     assert config.resolved_audio_chunking.max_concurrent_long_audio_requests == 2
 
 
-def test_long_audio_admission_at_engine_capacity_warns(monkeypatch, caplog) -> None:
+@pytest.mark.parametrize(
+    ("config_cls", "engine_stage"),
+    [(Qwen3ASRPipelineConfig, "asr"), (Ming3ASRPipelineConfig, "thinker")],
+)
+def test_long_audio_admission_at_engine_capacity_warns(
+    monkeypatch,
+    caplog,
+    config_cls: type[PipelineConfig],
+    engine_stage: Literal["asr", "thinker"],
+) -> None:
+    """The warning reads the engine's running slots across replicas; it once never fired behind a CPU entry stage and fired early with replicas."""
     from sglang_omni.platforms import current_platform
 
     monkeypatch.setattr(current_platform, "is_mps", lambda: False)
-    from sglang_omni.models.qwen3_asr.config import Qwen3ASRPipelineConfig
 
-    # 8 uploads x 8 chunks = 64 = every running slot: short clips would
-    # queue behind long audio whenever it is saturated. Chunks past the
-    # engine cap only queue, so this is a warning, not a config error.
     with caplog.at_level("WARNING", logger="sglang_omni.config.schema"):
-        Qwen3ASRPipelineConfig(
+        # The derived default and anything below the cap stay quiet, and so do
+        # 64 engine requests against two replicas' 128 running slots. The
+        # replica devices are left out, as in a file that CLI flags complete.
+        config_cls(model_path="dummy")
+        config_cls(
+            model_path="dummy",
+            audio_chunking=AudioChunkingConfig(max_concurrent_long_audio_requests=7),
+        )
+        config_cls(
+            model_path="dummy",
+            processes={engine_stage: ProcessConfig(num_replicas=2)},
+            audio_chunking=AudioChunkingConfig(max_concurrent_long_audio_requests=8),
+        )
+        assert not [
+            r for r in caplog.records if "max_concurrent_long_audio" in r.message
+        ]
+        # 8 uploads x 8 chunks = 64 = every running slot of one replica: short
+        # clips would queue behind long audio whenever it is saturated. Chunks
+        # past the engine cap only queue, so this is a warning, not an error.
+        config_cls(
             model_path="dummy",
             audio_chunking=AudioChunkingConfig(max_concurrent_long_audio_requests=8),
         )
         assert any(
             "max_concurrent_long_audio_requests=8" in record.message
-            and "max_running_requests=64" in record.message
+            and "64 running slots" in record.message
             for record in caplog.records
         )
-        # The derived default and anything below the cap stay quiet.
-        caplog.clear()
-        Qwen3ASRPipelineConfig(model_path="dummy")
-        Qwen3ASRPipelineConfig(
-            model_path="dummy",
-            audio_chunking=AudioChunkingConfig(max_concurrent_long_audio_requests=7),
-        )
-        assert not [
-            r for r in caplog.records if "max_concurrent_long_audio" in r.message
-        ]
 
 
 def test_stream_clip_limit_falls_back_to_the_chunk_length() -> None:
