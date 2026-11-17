@@ -41,6 +41,7 @@ class MiniCPMOThinkerSessionState:
     # note (luojiaxuan): One detector per session, since silero carries its recurrent state from one frame to the next.
     speech_detector: StatelessVAD
     drain_units_left: int = 0
+    post_reply_listen_units_left: int = 0
     force_listen_counter: int = 0
     generated_history: list[int] = field(default_factory=list)
     reply_units: list[ReplyUnit] = field(default_factory=list)

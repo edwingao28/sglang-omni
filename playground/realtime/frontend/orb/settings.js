@@ -21,6 +21,7 @@ const SAMPLING_FIELDS = [
   { key: "repetition_penalty", label: "Repetition penalty", step: "0.05", min: "1" },
   { key: "listen_prob_scale", label: "Listen scale", step: "0.1", min: "0" },
   { key: "force_listen_count", label: "Initial listen units", step: "1", min: "0" },
+  { key: "force_listen_count_after_reply", label: "Listen units after a reply", step: "1", min: "0" },
   { key: "max_new_tokens_per_unit", label: "Tokens per 1 s unit", step: "1", min: "1" },
   { key: "max_new_tokens", label: "Reply token limit", step: "1", min: "1" },
   { key: "repetition_window_size", label: "Repetition window", step: "1", min: "1" },
@@ -35,7 +36,7 @@ const SAMPLING_FIELDS = [
 ];
 // Note (ruoyu): the cascade maps max_new_tokens_per_unit to the chat completion's max_tokens, so on a turn-based backend it bounds the whole reply, not one unit.
 const TURN_BASED_LABELS = { max_new_tokens_per_unit: "Reply token limit" };
-const INTEGER_FIELDS = new Set(["top_k", "force_listen_count", "max_new_tokens_per_unit", "max_new_tokens", "repetition_window_size", "talker_top_k", "talker_max_new_tokens", "audio_top_k", "seed"]);
+const INTEGER_FIELDS = new Set(["top_k", "force_listen_count", "force_listen_count_after_reply", "max_new_tokens_per_unit", "max_new_tokens", "repetition_window_size", "talker_top_k", "talker_max_new_tokens", "audio_top_k", "seed"]);
 const TURN_TYPE_LABELS = { server_vad: "Silence ends the turn (server VAD)", semantic_vad: "End-of-turn model (semantic VAD)" };
 const EAGERNESS_LEVELS = ["low", "medium", "high"];
 // Note (ruoyu): the VAD node's own default in sglang_omni/models/vad/node.py. A profile that runs its vad stage with a shorter

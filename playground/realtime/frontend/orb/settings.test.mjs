@@ -120,6 +120,7 @@ test("MiniCPM-o renders every declared knob with a neutral placeholder and sends
     { name: "repetition_penalty", label: "Repetition penalty", placeholder: "default", min: "1" },
     { name: "listen_prob_scale", label: "Listen scale", placeholder: "default", min: "0" },
     { name: "force_listen_count", label: "Initial listen units", placeholder: "default", min: "0" },
+    { name: "force_listen_count_after_reply", label: "Listen units after a reply", placeholder: "default", min: "0" },
     { name: "max_new_tokens_per_unit", label: "Tokens per 1 s unit", placeholder: "default", min: "1" },
     { name: "repetition_window_size", label: "Repetition window", placeholder: "default", min: "1" },
     { name: "talker_temperature", label: "Voice temperature", placeholder: "default", min: "0" },

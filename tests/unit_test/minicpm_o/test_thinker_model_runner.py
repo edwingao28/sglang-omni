@@ -846,12 +846,17 @@ def spoken_output(token_id: int, ends_turn: bool) -> tuple[list[int], list[int]]
     ], generated_unit_ids
 
 
-def open_duplex_adapter() -> tuple[ThinkerAdapter, OmniRequest]:
+def open_duplex_adapter(
+    **sampling_overrides: int,
+) -> tuple[ThinkerAdapter, OmniRequest]:
     tokenizer = duplex_tokenizer()
     tokenizer.decode.return_value = ""
     adapter = make_thinker_adapter(tokenizer)
     request = OmniRequest(
-        None, params=MiniCPMODuplexSampling(force_listen_count=0).model_dump()
+        None,
+        params=MiniCPMODuplexSampling(
+            force_listen_count=0, **sampling_overrides
+        ).model_dump(),
     )
     adapter.open(SESSION, request)
     return adapter, request
@@ -1058,6 +1063,60 @@ def test_units_after_the_model_ends_its_turn_report_the_users_voice(
         results.append(adapter.result(SESSION, unit_request).data["hears_user"])
 
     assert results == hears_user
+
+
+@pytest.mark.parametrize(
+    ("sampling_overrides", "second_unit_ends_turn", "is_listen_forced"),
+    [
+        ({}, True, [False, False, False]),
+        ({"force_listen_count_after_reply": 2}, True, [True, True, False]),
+        ({"force_listen_count_after_reply": 2}, False, [False, False, False]),
+    ],
+    ids=[
+        "unset_after_the_model_ended_its_turn",
+        "after_the_model_ended_its_turn",
+        "mid_reply",
+    ],
+)
+def test_the_model_listens_through_the_set_units_after_it_ends_its_turn(
+    sampling_overrides: dict[str, int],
+    second_unit_ends_turn: bool,
+    is_listen_forced: list[bool],
+) -> None:
+    """After the model ends its own turn, force_listen_count_after_reply units listen, so it cannot start another reply in them; unset, or while the reply is open, no unit is forced."""
+    adapter, request = open_duplex_adapter(**sampling_overrides)
+    speak_two_units(
+        adapter,
+        request,
+        first_unit_ends_turn=False,
+        second_unit_ends_turn=second_unit_ends_turn,
+    )
+    forced = []
+    for input_seq in range(2, 5):
+        unit_request = adapter.build(
+            SESSION, audio_unit(input_seq, SILENT_UNIT_PCM), step_plan_payload(request)
+        )
+        unit_request.output_ids = [SPECIAL_TOKENS.listen]
+        adapter.result(SESSION, unit_request)
+        forced.append(unit_request.is_listen_forced)
+
+    assert forced == is_listen_forced
+
+
+def test_a_turn_a_client_stop_ends_arms_no_listen_units_after_the_reply() -> None:
+    """force_listen_count_after_reply counts only after the model ends its own turn; after a client stop only the stop's listen hold applies, and the user's voice releases it."""
+    adapter, request = open_duplex_adapter(force_listen_count_after_reply=2)
+
+    finished_units = listen_after_a_stop(
+        adapter,
+        request,
+        [unit_pcm(speech(UNIT_SAMPLES), VOICE_DBFS), SILENT_UNIT_PCM],
+    )
+
+    assert [unit_request.is_listen_forced for unit_request, _ in finished_units] == [
+        True,
+        False,
+    ]
 
 
 @pytest.mark.parametrize(

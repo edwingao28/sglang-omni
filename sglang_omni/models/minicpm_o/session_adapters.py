@@ -234,6 +234,10 @@ class ThinkerAdapter(ARSessionAdapter):
             hears_user = False
         state.is_listen_held = state.is_listen_held and not hears_user
         state.drain_units_left = 0 if hears_user else max(state.drain_units_left - 1, 0)
+        is_post_reply_listen = state.post_reply_listen_units_left > 0
+        state.post_reply_listen_units_left = max(
+            state.post_reply_listen_units_left - 1, 0
+        )
         prefix = (
             []
             if state.is_prefix_pending
@@ -305,6 +309,7 @@ class ThinkerAdapter(ARSessionAdapter):
             unit_embedding_spans=spans,
             is_listen_forced=is_interrupted
             or state.is_listen_held
+            or is_post_reply_listen
             or state.force_listen_counter < sampling.force_listen_count,
             is_interrupted=is_interrupted,
             hears_user=hears_user,
@@ -380,6 +385,9 @@ class ThinkerAdapter(ARSessionAdapter):
         is_turn_ending = data.is_interrupted or ends_own_turn
         if ends_own_turn:
             state.drain_units_left = MAX_DRAIN_UNITS
+            state.post_reply_listen_units_left = (
+                state.sampling.force_listen_count_after_reply
+            )
             state.speech_detector.reset()
         else:
             pass

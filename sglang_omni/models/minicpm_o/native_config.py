@@ -83,6 +83,8 @@ class MiniCPMODuplexSampling(BaseModel):
     repetition_penalty: float = Field(default=1.05, ge=1)
     listen_prob_scale: float = Field(default=1.0, ge=0)
     force_listen_count: int = Field(default=3, ge=0)
+    force_listen_count_after_reply: int = Field(default=0, ge=0)
+    "Units the model listens through after it ends its own turn; 0 lets it start another reply on the next unit."
     max_new_tokens_per_unit: int = Field(default=20, ge=1)
     repetition_window_size: int = Field(default=512, ge=1)
     talker_temperature: float = Field(default=0.8, ge=0, le=2)
