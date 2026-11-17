@@ -10,6 +10,7 @@ from sglang_omni.config.placement import build_stage_placement_plan
 from sglang_omni.config.runtime import resolve_stage_factory_args
 from sglang_omni.config.schema import SessionNodeConfig
 from sglang_omni.config.topology import compile_logical_processes
+from sglang_omni.models.qwen3_omni.components import code2wav_scheduler
 from sglang_omni.models.qwen3_omni.config import Qwen3OmniSessionPipelineConfig
 from sglang_omni.pipeline.replicas import expand_replica_stages
 from sglang_omni.proto.session import ControlEdge
@@ -21,6 +22,7 @@ from sglang_omni.proto.streams import (
     SESSION_CONTROL,
     TEXT_DELTA,
 )
+from tests.unit_test.fixtures.qwen_fakes import FakeCode2WavModel
 
 EXAMPLES = Path(__file__).resolve().parents[3] / "examples/qwen3_omni"
 
@@ -123,6 +125,33 @@ def test_every_session_stage_admits_the_configured_session_count() -> None:
     for stage_name in ("vad", "dialog"):
         kwargs = resolve_stage_factory_args(config.stage_named(stage_name), config)
         assert kwargs["max_open_sessions"] == 32
+
+
+@pytest.mark.parametrize(
+    ("max_sessions", "max_replay_rows", "warmed_row_counts"),
+    [
+        pytest.param(2, 8, {1, 2}, id="fewer-sessions-than-replay-rows"),
+        pytest.param(16, 3, {1, 2, 3}, id="fewer-replay-rows-than-sessions"),
+    ],
+)
+def test_code2wav_warms_no_more_rows_than_the_profile_has_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+    max_sessions: int,
+    max_replay_rows: int,
+    warmed_row_counts: set[int],
+) -> None:
+    """With two sessions the stage spent its start on window shapes of up to eight rows, which no replay of two sessions takes. A replay of more sessions still takes max_replay_rows rows at most."""
+    model = FakeCode2WavModel()
+    monkeypatch.setattr(
+        code2wav_scheduler, "load_code2wav_model", lambda *args, **kwargs: model
+    )
+    config = profile_config().model_copy(update={"max_sessions": max_sessions})
+    factory_kwargs = resolve_stage_factory_args(config.stage_named("code2wav"), config)
+    scheduler = code2wav_scheduler.create_code2wav_scheduler(
+        **{**factory_kwargs, "device": "cpu", "max_replay_rows": max_replay_rows}
+    )
+    scheduler.warm_up_window_shapes()
+    assert {window_shape[0] for window_shape in model.calls} == warmed_row_counts
 
 
 def test_a_node_reading_every_input_format_must_take_camera_frames():

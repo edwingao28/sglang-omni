@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import fcntl
+import logging
 import queue
+import tempfile
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -20,7 +24,10 @@ from sglang_omni.models.qwen3_omni.components.code2wav_scheduler import (
     Code2WavStreamState,
 )
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
+from sglang_omni.platforms import current_platform
 from sglang_omni.scheduling.message import IncomingMessage
+from sglang_omni.utils.gpu_memory import get_gpu_startup_lock_path
+from tests.unit_test.fixtures.accelerator import require_cuda
 from tests.unit_test.fixtures.qwen_fakes import (
     FakeCode2WavModel,
     deliver_code2wav_chunk,
@@ -52,16 +59,28 @@ class PublishedSizesRunner:
         return Code2WavRunResult(self.model(codes), mode, key, None)
 
 
+class OutOfMemoryPastOneRow(FakeCode2WavModel):
+    """Decodes one row, and runs out of device memory on any larger replay."""
+
+    def __call__(self, codes: torch.Tensor) -> torch.Tensor:
+        waveform = super().__call__(codes)
+        if codes.shape[0] > 1:
+            raise torch.OutOfMemoryError("CUDA out of memory")
+        else:
+            return waveform
+
+
 def make_scheduler(
     model: FakeCode2WavModel | None = None,
     *,
     runner: PublishedSizesRunner | None = None,
     left_context_size: int = CONTEXT_FRAMES,
+    device: str = "cpu",
     **kwargs,
 ) -> Code2WavScheduler:
     return Code2WavScheduler(
         model or FakeCode2WavModel(total_upsample=2),
-        device="cpu",
+        device=device,
         stream_chunk_size=CHUNK_FRAMES,
         left_context_size=left_context_size,
         sample_rate=24000,
@@ -136,6 +155,100 @@ def test_the_serving_loop_takes_every_queued_chunk_before_one_replay() -> None:
     assert sent == {"a", "b", "c"}
     # the three first windows were queued together, so they are one replay of three rows
     assert model.calls == [(3, 2, CHUNK_FRAMES)]
+
+
+@pytest.mark.accelerator
+def test_warmup_decodes_every_window_shape_a_replay_can_take() -> None:
+    """After a start, streams waited for their audio while each window shape was decoded for the first time."""
+    require_cuda()
+    if not current_platform.is_cuda():
+        pytest.skip("the warm-up runs on NVIDIA CUDA only")
+    else:
+        pass
+    model = FakeCode2WavModel(total_upsample=2)
+    scheduler = make_scheduler(
+        model, device=f"cuda:{torch.cuda.current_device()}", max_replay_rows=3
+    )
+    scheduler.warm_up_serving_thread()
+    warmed = set(model.calls)
+    assert warmed == {
+        (rows, model.config.num_quantizers, frames)
+        for rows in (1, 2, 3)
+        for frames in (CHUNK_FRAMES, CONTEXT_FRAMES + CHUNK_FRAMES)
+    }
+
+    for request_id in ("a", "b", "c"):
+        open_request(scheduler, request_id)
+    for start in range(0, 6, CHUNK_FRAMES):
+        for request_id in ("a", "b", "c"):
+            queue_chunk(scheduler, request_id, frames(start + 1, start + 2))
+        run_steps(scheduler)
+    served = model.calls[len(warmed) :]
+    assert served and set(served) <= warmed
+
+
+@pytest.mark.parametrize(
+    ("is_nvidia_cuda", "decodes_through_graphs", "has_codec_slots"),
+    [
+        pytest.param(False, False, False, id="amd-gpu"),
+        pytest.param(True, True, False, id="captured-graphs"),
+        pytest.param(True, False, True, id="codec-state-slots"),
+    ],
+)
+def test_warmup_decodes_nothing_on_a_stage_that_starts_without_it(
+    monkeypatch: pytest.MonkeyPatch,
+    is_nvidia_cuda: bool,
+    decodes_through_graphs: bool,
+    has_codec_slots: bool,
+) -> None:
+    """An AMD GPU reports cuda as its device type too, capture already ran a graph stage's shapes, and a stage with codec state slots replays windows only as a fallback."""
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: is_nvidia_cuda)
+    model = FakeCode2WavModel(total_upsample=2)
+    scheduler = make_scheduler(
+        model,
+        device="cuda:0",
+        runner=PublishedSizesRunner(model, (1,)) if decodes_through_graphs else None,
+        codec_pool=SimpleNamespace(num_slots=1) if has_codec_slots else None,
+    )
+    scheduler.warm_up_serving_thread()
+    assert model.calls == []
+
+
+def test_warmup_decodes_under_the_gpu_startup_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The warm-up reserved device memory with the GPU startup lock free, so a stage loading on that GPU could count the memory as its own load."""
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    lock_was_free: list[bool] = []
+
+    def take_the_lock_as_another_stage(scheduler: Code2WavScheduler) -> None:
+        with open(get_gpu_startup_lock_path(1), "a+") as lock_file:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                lock_was_free.append(False)
+            else:
+                lock_was_free.append(True)
+
+    monkeypatch.setattr(
+        Code2WavScheduler, "warm_up_window_shapes", take_the_lock_as_another_stage
+    )
+    make_scheduler(device="cuda:1").warm_up_serving_thread()
+    assert lock_was_free == [False]
+
+
+def test_warmup_out_of_memory_does_not_stop_the_start(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A warm-up that ran out of device memory stopped the server start, where the same shortage on a serving stage fails one replay."""
+    scheduler = make_scheduler(
+        OutOfMemoryPastOneRow(total_upsample=2), max_replay_rows=3
+    )
+    with caplog.at_level(logging.WARNING):
+        scheduler.warm_up_window_shapes()
+    assert len(caplog.records) == 1, "one warning, not one per window shape left cold"
 
 
 def test_every_row_of_a_replay_is_its_window_decoded_alone() -> None:

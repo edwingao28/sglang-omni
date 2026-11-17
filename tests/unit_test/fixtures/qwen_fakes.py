@@ -212,6 +212,7 @@ class FakeAudioEncoderModel:
 class FakeCode2WavModel:
     def __init__(self, *, total_upsample: int = 2, output_deficit: int = 0) -> None:
         self.decoder = torch.nn.Module()
+        self.config = SimpleNamespace(num_quantizers=2)
         self.total_upsample = total_upsample
         self.output_deficit = output_deficit
         self.calls: list[tuple[int, ...]] = []
@@ -226,7 +227,12 @@ class FakeCode2WavModel:
         self.calls.append(tuple(codes.shape))
         samples = int(codes.shape[-1]) * self.total_upsample - self.output_deficit
         base = codes.to(dtype=torch.float32).flatten(1).sum(dim=1).view(-1, 1, 1)
-        return torch.arange(samples, dtype=torch.float32).view(1, 1, samples) + base
+        return (
+            torch.arange(samples, dtype=torch.float32, device=codes.device).view(
+                1, 1, samples
+            )
+            + base
+        )
 
 
 def deliver_code2wav_chunk(
