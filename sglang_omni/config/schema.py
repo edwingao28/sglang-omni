@@ -600,13 +600,13 @@ DEFAULT_MAX_CONCURRENT_LONG_AUDIO_REQUESTS = 4
 
 
 def default_max_concurrent_long_audio_requests(
-    max_running_requests: int | None, max_concurrent_chunks: int
+    running_slots: int | None, max_concurrent_chunks: int
 ) -> int:
-    if max_running_requests is None or max_running_requests < 1:
+    if running_slots is None or running_slots < 1:
         return DEFAULT_MAX_CONCURRENT_LONG_AUDIO_REQUESTS
     else:
         pass
-    return max(1, max_running_requests // (2 * max(int(max_concurrent_chunks), 1)))
+    return max(1, running_slots // (2 * max(int(max_concurrent_chunks), 1)))
 
 
 class AudioChunkingConfig(BaseModel):
@@ -877,6 +877,44 @@ class PipelineConfig(BaseModel):
             pass
         self.warn_long_audio_admission_exceeds_engine()
 
+    def engine_admission_value(
+        self,
+        stage: StageConfig,
+        setting_name: Literal["max_running_requests", "max_queued_requests"],
+    ) -> int | None:
+        """One admission setting of an engine stage: its engine block, else the model default."""
+        values = {
+            **type(self).generation_admission_defaults(),
+            **(stage.engine.overrides() if stage.engine is not None else {}),
+        }
+        try:
+            return int(values[setting_name])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def generation_running_slots(self) -> int | None:
+        """Running slots of the first engine stage, summed across its replicas."""
+        config_cls = type(self)
+        engine_stages = [
+            stage
+            for stage in self.stages
+            if config_cls.stage_config_cls(stage.name).engine_stage
+        ]
+        if not engine_stages:
+            return None
+        else:
+            pass
+        stage = engine_stages[0]
+        running = self.engine_admission_value(stage, "max_running_requests")
+        if running is None or running < 1:
+            return None
+        else:
+            pass
+        # Note (wenyao): not compile_logical_processes: serve builds the file
+        # config before it merges CLI flags, so the topology may be incomplete here.
+        process = self.processes.get(stage_process_name(stage), ProcessConfig())
+        return running * process.num_replicas
+
     def warn_long_audio_admission_exceeds_engine(self) -> None:
         """Warn when long audio alone can fill every engine running slot."""
         if not type(self).allow_audio_chunking:
@@ -884,20 +922,23 @@ class PipelineConfig(BaseModel):
         else:
             pass
         explicit = self.audio_chunking.max_concurrent_long_audio_requests
-        engine = self.stage_named(self.resolved_entry_stage).engine
-        max_running = engine.max_running_requests if engine is not None else None
-        if explicit is None or max_running is None:
+        if explicit is None:
+            return
+        else:
+            pass
+        running_slots = self.generation_running_slots()
+        if running_slots is None:
             return
         else:
             pass
         chunks = self.audio_chunking.max_concurrent_chunks
-        if explicit * chunks >= max_running:
+        if explicit * chunks >= running_slots:
             logger.warning(
-                "audio_chunking.max_concurrent_long_audio_requests=%d x max_concurrent_chunks=%d = %d engine requests, which is not below engine.max_running_requests=%d (per replica): when long audio is saturated, short transcriptions queue behind its chunks. Lower one of the two or raise max_running_requests (which also resizes CUDA graph capture).",
+                "audio_chunking.max_concurrent_long_audio_requests=%d x max_concurrent_chunks=%d = %d engine requests, which is not below the engine's %d running slots (max_running_requests summed across replicas): when long audio is saturated, short transcriptions queue behind its chunks. Lower one of the two, or raise max_running_requests (which also resizes CUDA graph capture) or num_replicas.",
                 explicit,
                 chunks,
                 explicit * chunks,
-                max_running,
+                running_slots,
             )
         else:
             pass
@@ -909,9 +950,8 @@ class PipelineConfig(BaseModel):
         policy = self.audio_chunking
         long_audio_requests = policy.max_concurrent_long_audio_requests
         if long_audio_requests is None:
-            engine = self.stage_named(self.resolved_entry_stage).engine
             long_audio_requests = default_max_concurrent_long_audio_requests(
-                engine.max_running_requests if engine is not None else None,
+                self.generation_running_slots(),
                 policy.max_concurrent_chunks,
             )
         else:

@@ -238,8 +238,8 @@ fail the request rather than falling back to English.
 
 Pipelines that can transcribe an isolated clip accept long uploads by splitting
 them, running each chunk as its own engine request, and joining the transcripts
-in order. Qwen3-ASR and Whisper ASR share this splitting path, and with it the
-same four `audio_chunking` flags:
+in order. Qwen3-ASR, Whisper ASR and Ming-3.0-ASR share this splitting path, and
+with it the same four `audio_chunking` flags:
 
 | Name | Meaning |
 |---|---|
@@ -261,8 +261,15 @@ waveforms held at once are at most
 `max_concurrent_long_audio_requests × max_total_audio_s × 16000 × 4` bytes, and
 engine slots long audio can occupy together are at most
 `max_concurrent_long_audio_requests × max_concurrent_chunks`. The stock
-derivation keeps that product at half of `--asr.engine.max_running_requests` so
-short requests always have slots left.
+derivation keeps that product at half of the engine's running slots so short
+requests have slots left. Running slots are the engine stage's
+`max_running_requests` (`--asr.engine.max_running_requests`, or
+`--thinker.engine.max_running_requests` for Ming-3.0-ASR) times the
+`num_replicas` of its process, because one server-wide cap admits uploads for
+every replica. Replicas take requests in turn, not by load, so the half share
+holds across the replicas together rather than on each one. More replicas raise
+the derived cap, and the waveform bound with it; an explicit
+`max_concurrent_long_audio_requests` pins both.
 
 Streaming cannot chunk. A stream request runs as one engine request and is
 bounded by the model's `max_native_clip_s`; use `stream=false` for longer

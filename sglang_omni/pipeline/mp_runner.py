@@ -71,16 +71,9 @@ def engine_stage_capacity(
     logical_process_plan: LogicalProcessPlan,
 ) -> int | None:
     """Return one engine stage's running+queued capacity summed across replicas."""
-    values = {
-        **type(config).generation_admission_defaults(),
-        **(stage.engine.overrides() if stage.engine is not None else {}),
-    }
-    try:
-        running = int(values["max_running_requests"])
-        queued = int(values["max_queued_requests"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    if running < 1 or queued < 0:
+    running = config.engine_admission_value(stage, "max_running_requests")
+    queued = config.engine_admission_value(stage, "max_queued_requests")
+    if running is None or queued is None or running < 1 or queued < 0:
         return None
     else:
         pass
