@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Generator kinds: reply text from the conversation."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Literal
 
@@ -29,6 +30,17 @@ CHAT_REQUEST_FIELDS = frozenset(
     {"model", "messages", "stream", "max_tokens", "temperature"}
 )
 WARM_UP_MESSAGES = [ChatMessage(role="user", content="Hi")]
+# note (wenyao): 8 prompts per batch leave 3 in one prefill on each of 2 data-parallel ranks even when a rank prefills its first prompt alone, as the service did in every measured probe; a model with 32 state heads needs 3 sequences for the fused prefill kernel on an H200.
+WARM_UP_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
+SHORT_WARM_UP_BATCH = [
+    [ChatMessage(role="user", content=f"Say {word}.")] for word in WARM_UP_WORDS
+]
+# note (wenyao): each repeat is at least 3 tokens, so a long prompt crosses the 64-token state checkpoint interval of a Qwen3.8-27B chat service three times.
+LONG_WARM_UP_REPEATS = 64
+LONG_WARM_UP_BATCH = [
+    [ChatMessage(role="user", content=f"Say {word}. " * LONG_WARM_UP_REPEATS)]
+    for word in WARM_UP_WORDS
+]
 
 
 class OpenAIChatGeneratorConfig(ComponentConfig):
@@ -160,9 +172,10 @@ class OpenAIChatGenerator(Replier):
 
 
 async def probe_chat_service(config: OpenAIChatGeneratorConfig) -> None:
-    """Require the service to list its models and to stream one token sampled with the node's settings."""
+    """Require the service to list its models and to stream one token per warm-up prompt sampled with the node's settings, alone and in batches."""
     await probe_openai_service(config)
     # Note (ruoyu): The chat service warms itself up with a greedy prefill, so a fresh deployment compiled its sampling kernel on the first real request and answered it 72 s late; one sampled token here moves that into startup.
+    # note (wenyao): the service also compiles one prefill kernel on its first batch of several sequences that writes a state checkpoint and another on its first such batch that writes none, each blocking its scheduler for about 4 s on Qwen3.8-27B; a batch of short prompts and one of long prompts move both into startup.
     warm_up_body = dict(config.extra_body)
     if "min_tokens" in warm_up_body:
         warm_up_body["min_tokens"] = 0
@@ -172,9 +185,14 @@ async def probe_chat_service(config: OpenAIChatGeneratorConfig) -> None:
         config.model_copy(update={"max_tokens": 1, "extra_body": warm_up_body})
     )
     completions_url = f"{config.base_url.rstrip('/')}/chat/completions"
-    try:
-        async for _ in generator.complete(WARM_UP_MESSAGES):
+
+    async def warm_up(messages: list[ChatMessage]) -> None:
+        async for _ in generator.complete(messages):
             pass
+
+    try:
+        for batch in ([WARM_UP_MESSAGES], SHORT_WARM_UP_BATCH, LONG_WARM_UP_BATCH):
+            await asyncio.gather(*(warm_up(messages) for messages in batch))
     except httpx.HTTPStatusError as error:
         raise RuntimeError(
             f"{completions_url} answered {error.response.status_code}"
