@@ -1,13 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Stage factory for SGLang-backed Qwen3-ASR inference."""
+"""Stage factories for Qwen3-ASR: the SGLang engine and the CPU-only audio frontend."""
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
+from functools import partial
+
+import torch
+from transformers import AutoFeatureExtractor
 
 from sglang_omni.models.qwen3_asr.engine_builder import Qwen3ASREngineBuilder
-from sglang_omni.models.qwen3_asr.request_builders import Qwen3ASRRequestData
+from sglang_omni.models.qwen3_asr.request_builders import (
+    Qwen3ASRRequestData,
+    prepare_audio_for_engine,
+)
+from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
+from sglang_omni.scheduling.threaded_simple_scheduler import ThreadedSimpleScheduler
+from sglang_omni.serve.openai_errors import generation_error_status_code
+
+logger = logging.getLogger(__name__)
 
 
 def create_sglang_qwen3_asr_executor(
@@ -93,4 +106,31 @@ def create_qwen3_asr_executor(*args, **kwargs):
     return create_sglang_qwen3_asr_executor(*args, **kwargs)
 
 
-__all__ = ["create_sglang_qwen3_asr_executor", "create_qwen3_asr_executor"]
+class Qwen3ASRFrontendScheduler(ThreadedSimpleScheduler[StagePayload, StagePayload]):
+    def log_failure(self, request_id: str, exc: BaseException) -> None:
+        # note (wenyao): the API answers this failure with 400, as when the engine decodes the upload, so the traceback is noise.
+        if generation_error_status_code(exc) == 400:
+            logger.warning(f"Qwen3-ASR frontend rejected {request_id}: {exc}")
+        else:
+            super().log_failure(request_id, exc)
+
+
+def create_qwen3_asr_frontend_executor(
+    model_path: str, *, max_concurrency: int
+) -> Qwen3ASRFrontendScheduler:
+    # note (wenyao): sglang sets one intra-op thread in the engine process at model load, so the log-mel was single-threaded there; the same count here stops every worker thread from fanning out over the cores this process was given.
+    torch.set_num_threads(1)
+    feature_extractor = AutoFeatureExtractor.from_pretrained(
+        model_path, trust_remote_code=True
+    )
+    return Qwen3ASRFrontendScheduler(
+        partial(prepare_audio_for_engine, feature_extractor=feature_extractor),
+        max_concurrency=max_concurrency,
+    )
+
+
+__all__ = [
+    "create_sglang_qwen3_asr_executor",
+    "create_qwen3_asr_executor",
+    "create_qwen3_asr_frontend_executor",
+]

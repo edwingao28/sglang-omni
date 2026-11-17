@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import concurrent.futures
+import logging
+import threading
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 
 import numpy as np
 import pytest
@@ -22,10 +26,16 @@ from sglang_omni.models.qwen3_asr.mrope_fast_path import all_degenerate
 from sglang_omni.models.qwen3_asr.request_builders import (
     Qwen3ASRRequestData,
     make_qwen3_asr_scheduler_adapters,
+    prepare_audio_for_engine,
 )
+from sglang_omni.models.qwen3_asr.stages import create_qwen3_asr_frontend_executor
 from sglang_omni.proto import OmniRequest, StagePayload
+from sglang_omni.scheduling.message import IncomingMessage, OutgoingMessage
 from sglang_omni.scheduling.types import DeferredAdmission
-from sglang_omni.serve.openai_errors import is_bad_request_error
+from sglang_omni.serve.openai_errors import (
+    generation_error_status_code,
+    is_bad_request_error,
+)
 from sglang_omni.utils import audio as audio_utils
 from sglang_omni.utils.audio import AudioDecodeError
 
@@ -44,6 +54,25 @@ def unwrap_built(
         result.ready.result(timeout=5)
         return result.value
     return result
+
+
+def run_through_frontend(
+    payload: StagePayload,
+    feature_extractor: WhisperFeatureExtractor,
+    model_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> OutgoingMessage:
+    feature_extractor.save_pretrained(model_dir)
+    monkeypatch.setattr(torch, "set_num_threads", lambda thread_count: None)
+    frontend = create_qwen3_asr_frontend_executor(str(model_dir), max_concurrency=1)
+    frontend.enqueue(
+        IncomingMessage(request_id=payload.request_id, type="new_request", data=payload)
+    )
+    threading.Thread(target=frontend.start, daemon=True).start()
+    try:
+        return frontend.outbox.get(timeout=30)
+    finally:
+        frontend.stop()
 
 
 class FakeTokenizer:
@@ -613,7 +642,10 @@ def test_qwen3_asr_request_builder_preserves_audio_beyond_30_seconds(
     assert data.audio_duration_s == audio_duration_s
 
 
-def test_qwen3_asr_request_builder_rejects_undecodable_audio(monkeypatch) -> None:
+@pytest.mark.parametrize("decodes_in", ["engine", "frontend"])
+def test_qwen3_asr_rejects_undecodable_audio_as_a_client_error(
+    monkeypatch, decodes_in: Literal["engine", "frontend"]
+) -> None:
     monkeypatch.setattr(
         transcription,
         "load_audio",
@@ -632,8 +664,106 @@ def test_qwen3_asr_request_builder_rejects_undecodable_audio(monkeypatch) -> Non
         data={},
     )
 
-    with pytest.raises(ValueError, match="could not decode the uploaded audio"):
-        request_builder(payload)
+    with pytest.raises(
+        ValueError, match="could not decode the uploaded audio"
+    ) as error:
+        if decodes_in == "engine":
+            request_builder(payload)
+        else:
+            prepare_audio_for_engine(payload, feature_extractor=object())
+    assert is_bad_request_error(error.value)
+
+
+@pytest.mark.parametrize(
+    ("load_audio_error", "status_code", "logged"),
+    [
+        (AudioDecodeError("decode failed"), 400, (logging.WARNING, False)),
+        (RuntimeError("decoder backend unavailable"), 500, (logging.ERROR, True)),
+    ],
+)
+def test_qwen3_asr_frontend_logs_a_rejected_upload_as_one_warning(
+    monkeypatch,
+    tmp_path,
+    caplog,
+    load_audio_error: Exception,
+    status_code: int,
+    logged: tuple[int, bool],
+) -> None:
+    """The frontend logged every upload the API rejects with 400 as an error with a traceback; it logs one warning line, and other failures keep the traceback."""
+    monkeypatch.setattr(
+        transcription,
+        "load_audio",
+        lambda source, **kwargs: (_ for _ in ()).throw(load_audio_error),
+    )
+    payload = StagePayload(
+        request_id="req-invalid",
+        request=OmniRequest(inputs={"audio_bytes": b"not-audio"}),
+        data={},
+    )
+
+    message = run_through_frontend(
+        payload,
+        WhisperFeatureExtractor(feature_size=128, sampling_rate=16000),
+        tmp_path,
+        monkeypatch,
+    )
+
+    assert message.type == "error"
+    assert generation_error_status_code(message.data) == status_code
+    assert [
+        (record.levelno, record.exc_info is not None)
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+    ] == [logged]
+
+
+def test_qwen3_asr_frontend_payload_builds_the_same_request_as_raw_audio(
+    monkeypatch, tmp_path
+) -> None:
+    waveform = np.random.default_rng(7).standard_normal(16000).astype(np.float32) * 0.1
+    monkeypatch.setattr(transcription, "load_audio", lambda source, **kwargs: waveform)
+    feature_extractor = WhisperFeatureExtractor(feature_size=128, sampling_rate=16000)
+    request_builder, _ = make_qwen3_asr_scheduler_adapters(
+        tokenizer=FakeTokenizer(),
+        max_new_tokens=32,
+        feature_extractor=feature_extractor,
+        context_length=4096,
+    )
+
+    def upload(request_id: str) -> StagePayload:
+        inputs = {"audio_bytes": b"wav", "filename": "clip.wav"}
+        return StagePayload(
+            request_id=request_id,
+            request=OmniRequest(inputs=inputs, params={"language": "en"}),
+            data={"raw_inputs": inputs},
+        )
+
+    from_raw = request_builder(upload("req-raw"))
+    frontend_output = run_through_frontend(
+        upload("req-frontend"), feature_extractor, tmp_path, monkeypatch
+    )
+    assert frontend_output.type == "result", frontend_output.data
+    prepared = frontend_output.data
+    assert prepared.request.inputs == {"filename": "clip.wav"}
+    assert "raw_inputs" not in prepared.data
+    monkeypatch.setattr(
+        transcription,
+        "load_audio",
+        lambda source, **kwargs: pytest.fail("the engine decoded prepared audio"),
+    )
+    from_frontend = request_builder(prepared)
+
+    raw_audio = from_raw.req.multimodal_inputs.mm_items[0]
+    frontend_audio = from_frontend.req.multimodal_inputs.mm_items[0]
+    assert from_frontend.prompt_token_ids == from_raw.prompt_token_ids
+    assert torch.equal(frontend_audio.feature, raw_audio.feature)
+    assert torch.equal(
+        frontend_audio.feature_attention_mask, raw_audio.feature_attention_mask
+    )
+    assert frontend_audio.offsets == raw_audio.offsets
+    assert from_frontend.req.extra_key == from_raw.req.extra_key
+    assert from_frontend.max_new_tokens == from_raw.max_new_tokens
+    assert from_frontend.audio_duration_s == from_raw.audio_duration_s == 1.0
 
 
 def test_qwen3_asr_request_builder_rejects_corrupt_local_audio_path(
@@ -721,7 +851,10 @@ def test_qwen3_asr_rejects_full_context_before_mel_extraction(
         request_builder(payload)
 
 
-def test_qwen3_asr_embedding_cache_hit_skips_mel_extraction(monkeypatch) -> None:
+@pytest.mark.parametrize("decodes_in", ["engine", "frontend"])
+def test_qwen3_asr_embedding_cache_hit_skips_mel_extraction(
+    monkeypatch, decodes_in: Literal["engine", "frontend"]
+) -> None:
     class UnexpectedFeatureExtractor:
         hop_length = 160
 
@@ -766,6 +899,13 @@ def test_qwen3_asr_embedding_cache_hit_skips_mel_extraction(monkeypatch) -> None
         request=OmniRequest(inputs={"audio_bytes": b"wav"}),
         data={},
     )
+    if decodes_in == "frontend":
+        payload = prepare_audio_for_engine(
+            payload,
+            feature_extractor=WhisperFeatureExtractor(
+                feature_size=128, sampling_rate=16000
+            ),
+        )
 
     data = request_builder(payload)
 

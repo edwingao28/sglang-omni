@@ -10,7 +10,10 @@ import pytest
 from sglang_omni.config import AudioChunkingConfig, ProcessConfig, ResolvedAudioChunking
 from sglang_omni.config.schema import PipelineConfig
 from sglang_omni.models.ming3_asr.config import Ming3ASRPipelineConfig
-from sglang_omni.models.qwen3_asr.config import Qwen3ASRPipelineConfig
+from sglang_omni.models.qwen3_asr.config import (
+    Qwen3ASRFrontendPipelineConfig,
+    Qwen3ASRPipelineConfig,
+)
 from sglang_omni.serve import transcription_chunking
 from sglang_omni.serve.transcription_chunking import (
     RMSSplitter,
@@ -214,7 +217,11 @@ def test_clip_length_past_the_native_limit_is_rejected_at_config_time() -> None:
 
 @pytest.mark.parametrize(
     ("config_cls", "engine_stage"),
-    [(Qwen3ASRPipelineConfig, "asr"), (Ming3ASRPipelineConfig, "thinker")],
+    [
+        (Qwen3ASRPipelineConfig, "asr"),
+        (Ming3ASRPipelineConfig, "thinker"),
+        (Qwen3ASRFrontendPipelineConfig, "asr"),
+    ],
 )
 def test_long_audio_admission_default_follows_max_running_requests(
     monkeypatch,

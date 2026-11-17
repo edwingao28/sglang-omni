@@ -48,6 +48,38 @@ class Qwen3ASRStageConfig(EngineStageConfig):
     factory: Qwen3ASRFactoryArgs = Field(default_factory=Qwen3ASRFactoryArgs)
 
 
+def asr_engine_stage() -> Qwen3ASRStageConfig:
+    return Qwen3ASRStageConfig(
+        name="asr",
+        process="asr",
+        factory_path=f"{_PKG}.stages.create_sglang_qwen3_asr_executor",
+        # Note (Jeffro): max_new_tokens is the floor for the per-request
+        # output budget. The request builder will scale the actual budget
+        # with audio duration.
+        factory=Qwen3ASRFactoryArgs(
+            max_new_tokens=128,
+            enable_pre_lm_encoder=True,
+            pre_lm_cache_max_entries=4096,
+            pre_lm_cache_size_bytes=2 * 1024**3,
+            pre_lm_max_batch_size=8,
+            pre_lm_max_batch_wait_ms=0,
+            request_build_max_workers=8,
+            request_build_max_pending=32,
+            prefill_coalesce_requests=16,
+            prefill_coalesce_wait_ms=40,
+            prefill_coalesce_when_idle=True,
+            prefill_coalesce_requires_pending_builds=True,
+        ),
+        engine=EngineArgs(
+            max_running_requests=64,
+            enable_torch_compile=True,
+            torch_compile_max_bs=2,
+        ),
+        gpu=0,
+        terminal=True,
+    )
+
+
 class Qwen3ASRPipelineConfig(PipelineConfig):
     """Single-stage batched ASR pipeline for Qwen3-ASR checkpoints."""
 
@@ -69,37 +101,7 @@ class Qwen3ASRPipelineConfig(PipelineConfig):
 
     model_path: str
     entry_stage: str = "asr"
-    stages: list[StageConfig] = [
-        Qwen3ASRStageConfig(
-            name="asr",
-            process="asr",
-            factory_path=f"{_PKG}.stages.create_sglang_qwen3_asr_executor",
-            # Note (Jeffro): max_new_tokens is the floor for the per-request
-            # output budget. The request builder will scale the actual budget
-            # with audio duration.
-            factory=Qwen3ASRFactoryArgs(
-                max_new_tokens=128,
-                enable_pre_lm_encoder=True,
-                pre_lm_cache_max_entries=4096,
-                pre_lm_cache_size_bytes=2 * 1024**3,
-                pre_lm_max_batch_size=8,
-                pre_lm_max_batch_wait_ms=0,
-                request_build_max_workers=8,
-                request_build_max_pending=32,
-                prefill_coalesce_requests=16,
-                prefill_coalesce_wait_ms=40,
-                prefill_coalesce_when_idle=True,
-                prefill_coalesce_requires_pending_builds=True,
-            ),
-            engine=EngineArgs(
-                max_running_requests=64,
-                enable_torch_compile=True,
-                torch_compile_max_bs=2,
-            ),
-            gpu=0,
-            terminal=True,
-        )
-    ]
+    stages: list[StageConfig] = [asr_engine_stage()]
 
     def resolved_env_defaults(self) -> dict[str, str]:
         # Set before worker startup: torch_npu caches its Host queue settings.
@@ -151,4 +153,22 @@ class Qwen3ASRPipelineConfig(PipelineConfig):
         )
 
 
+class Qwen3ASRFrontendPipelineConfig(Qwen3ASRPipelineConfig):
+    entry_stage: str = "asr_frontend"
+    stages: list[StageConfig] = [
+        StageConfig(
+            name="asr_frontend",
+            process="asr_frontend",
+            factory_path=f"{_PKG}.stages.create_qwen3_asr_frontend_executor",
+            factory=FactoryArgs(max_concurrency=8),
+            next="asr",
+        ),
+        asr_engine_stage(),
+    ]
+
+
 EntryClass = Qwen3ASRPipelineConfig
+
+Variants = {
+    "frontend": Qwen3ASRFrontendPipelineConfig,
+}

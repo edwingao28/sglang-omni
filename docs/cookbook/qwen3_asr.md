@@ -538,7 +538,7 @@ Reading, and the resulting defaults:
   builds are queued, the request builder waits for encode and returns a
   ready request like the sync path; when pending+backlog exceeds the
   worker pool, it returns a deferred admission so workers can pull the
-  backlog. A cache hit still skips mel extraction entirely.
+  backlog. In the default pipeline a cache hit still skips mel extraction entirely; the `frontend` variant below computes the mel for every request.
 - **Pending 16 → 32 removes all concurrency-64 shedding** and lifts
   concurrency-8 throughput ~19 %; 64 adds nothing further. 32 is the default.
 - **`max_running_requests` 16 collapses concurrency 32** (queue-bound) with no
@@ -553,3 +553,19 @@ sgl-omni serve --model-path Qwen/Qwen3-ASR-1.7B \
 ```
 
 - Corpus WER stayed 0.0122 for every configuration at every level.
+
+### Audio frontend process
+
+By default the request-build workers decode the audio and compute its log-mel inside the `asr` stage process, so that work shares one Python interpreter with the SGLang scheduler loop. The `frontend` variant moves both steps to a CPU-only `asr_frontend` stage in its own process and sends the log-mel to the engine. The engine stage, its defaults and the requests it builds stay the same.
+
+```bash
+sgl-omni serve --model-path Qwen/Qwen3-ASR-1.7B --variant frontend
+```
+
+In a config file, select the variant with `config_cls: Qwen3ASRFrontendPipelineConfig`. `--asr_frontend.factory.max_concurrency` sets the number of frontend worker threads (default 8). The frontend holds no GPU memory, and every `--asr.*` option applies to the engine stage as before.
+
+Compared with the default pipeline, the variant costs:
+
+- A log-mel for every request, also when the engine's embedding cache already holds that audio, so repeated audio gains less.
+- A log-mel for a request that the engine then rejects for its context length, because the frontend runs before that check. The default pipeline checks first.
+- One more process with its own worker threads, so the server uses more CPU in total, and one more relay hop per request, from `asr_frontend` to `asr`.

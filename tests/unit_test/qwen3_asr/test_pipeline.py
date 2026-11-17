@@ -16,6 +16,7 @@ from sglang.srt.arg_groups.cuda_graph_hook import (
     generate_prefill_cuda_graph_batch_sizes,
 )
 
+import sglang_omni.config.manager as config_manager
 import sglang_omni.models.qwen3_asr.engine_builder as qwen3_asr_builder
 import sglang_omni.models.qwen3_asr.stages as qwen3_asr_stages
 import sglang_omni.scheduling.bootstrap as bootstrap
@@ -23,8 +24,12 @@ import sglang_omni.scheduling.omni_scheduler as omni_scheduler
 import sglang_omni.scheduling.sglang_backend as sglang_backend
 import sglang_omni.utils.cuda_graph_batch_validator as cuda_graph_batch_validator
 import sglang_omni.utils.device as device_utils
+from sglang_omni.config.runtime import resolve_stage_factory_args
 from sglang_omni.models.qwen3_asr import request_builders
-from sglang_omni.models.qwen3_asr.config import Qwen3ASRPipelineConfig
+from sglang_omni.models.qwen3_asr.config import (
+    Qwen3ASRFrontendPipelineConfig,
+    Qwen3ASRPipelineConfig,
+)
 from sglang_omni.models.qwen3_asr.engine_builder import Qwen3ASREngineBuilder
 from sglang_omni.models.qwen3_asr.stages import create_sglang_qwen3_asr_executor
 from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
@@ -477,6 +482,39 @@ def test_qwen3_asr_config_uses_batched_stage_with_64_running_requests() -> None:
         PIPELINE_CONFIG_REGISTRY.get_config("Qwen3ASRForConditionalGeneration")
         is Qwen3ASRPipelineConfig
     )
+
+
+def test_qwen3_asr_frontend_variant_adds_a_cpu_process_before_the_same_engine(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        config_manager,
+        "resolve_config_cls_for_model_path",
+        lambda model_path: Qwen3ASRPipelineConfig,
+    )
+    config = config_manager.ConfigManager.from_model_path(
+        "Qwen/Qwen3-ASR-1.7B", "frontend"
+    ).config
+    default = Qwen3ASRPipelineConfig(model_path="Qwen/Qwen3-ASR-1.7B")
+
+    assert type(config) is Qwen3ASRFrontendPipelineConfig
+    assert (
+        PIPELINE_CONFIG_REGISTRY.get_config_cls_by_name(
+            "Qwen3ASRFrontendPipelineConfig"
+        )
+        is Qwen3ASRFrontendPipelineConfig
+    )
+    frontend, engine = config.stages
+    assert config.entry_stage == frontend.name == "asr_frontend"
+    assert frontend.next == engine.name
+    assert frontend.process != engine.process
+    assert config.gpu_placement == {"asr": 0}
+    assert config.terminal_stages == ["asr"]
+    assert engine == default.stages[0]
+    assert resolve_stage_factory_args(frontend, config) == {
+        "model_path": "Qwen/Qwen3-ASR-1.7B",
+        "max_concurrency": 8,
+    }
 
 
 @pytest.mark.parametrize(

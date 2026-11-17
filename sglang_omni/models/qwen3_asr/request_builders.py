@@ -24,7 +24,9 @@ from functools import lru_cache
 from types import SimpleNamespace
 from typing import Callable
 
+import numpy as np
 import torch
+from numpy.typing import NDArray
 from sglang.srt.managers.schedule_batch import (
     Modality,
     MultimodalDataItem,
@@ -35,15 +37,17 @@ from sglang.srt.sampling.sampling_params import SamplingParams
 from transformers import PreTrainedTokenizerBase, WhisperFeatureExtractor
 
 from sglang_omni.models.qwen3_asr.encoder_service import Qwen3ASRPreLMEncoderService
-from sglang_omni.preprocessing.transcription import prepare_audio
+from sglang_omni.models.qwen3_asr.payload_types import Qwen3ASRPreparedAudio
+from sglang_omni.preprocessing.transcription import PreparedAudio, prepare_audio
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.message import OutgoingMessage
+from sglang_omni.scheduling.pipeline_state import load_state, store_state
 from sglang_omni.scheduling.sglang_backend import SGLangARRequestData
 from sglang_omni.scheduling.token_text_streaming import (
     make_token_text_stream_output_builder,
 )
 from sglang_omni.scheduling.types import DeferredAdmission, RequestOutput
-from sglang_omni.utils.audio import AudioDecodeError
+from sglang_omni.utils.audio import AudioDecodeError, audio_fingerprint_int
 
 from . import mrope_fast_path
 from .audio_lengths import (
@@ -145,6 +149,82 @@ def retained_streaming_prefix(
             pass
         return retained, decoded
     return [], ""
+
+
+def decode_request_audio(payload: StagePayload) -> PreparedAudio:
+    try:
+        return prepare_audio(
+            payload, source_name="Qwen3-ASR", target_sample_rate=_SAMPLE_RATE
+        )
+    except AudioDecodeError as exc:
+        raise ValueError(
+            "Qwen3-ASR could not decode the uploaded audio; provide a valid "
+            "audio file."
+        ) from exc
+
+
+def extract_log_mel(
+    feature_extractor: WhisperFeatureExtractor, waveform: NDArray[np.float32]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # note (Jeffro Qu): unlike Whisper's default 30s window, here we pad the mel to the clip's true length.
+    # WhisperFeatureExtractor defaults to padding="max_length", padding every clip to nb_max_frames=3000 (~30s),
+    # so a short clip pays the full 30s of mel FFT on silence.
+    # This is safe for Qwen3-ASR because its encoder is variable-length and keeps only the
+    # valid frames via feature_attention_mask; vanilla Whisper's fixed-length encoder would instead break on padding="longest" (see ref: transformers#26241).
+    # refs:
+    #  https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/feature_extraction_whisper.py
+    #  https://github.com/huggingface/transformers/issues/26241
+    extracted = feature_extractor(
+        waveform,
+        sampling_rate=_SAMPLE_RATE,
+        return_tensors="pt",
+        return_attention_mask=True,
+        padding="longest",
+        # note (Junnan Li): Qwen3-ASR's encoder accepts mel sequences beyond
+        # Whisper's 30-second window, so preprocessing must not truncate them.
+        truncation=False,
+    )
+    features = extracted.input_features
+    feature_attention_mask = getattr(extracted, "attention_mask", None)
+    if feature_attention_mask is None:
+        # WhisperFeatureExtractor normally returns one; fall back to all-valid.
+        feature_attention_mask = torch.ones(
+            (features.shape[0], features.shape[-1]), dtype=torch.long
+        )
+    else:
+        pass
+    return features, feature_attention_mask
+
+
+def prepare_audio_for_engine(
+    payload: StagePayload, *, feature_extractor: WhisperFeatureExtractor
+) -> StagePayload:
+    decoded_audio = decode_request_audio(payload)
+    mel_features, feature_attention_mask = extract_log_mel(
+        feature_extractor, decoded_audio.waveform
+    )
+    store_state(
+        payload,
+        Qwen3ASRPreparedAudio(
+            sample_rate=decoded_audio.sample_rate,
+            audio_fingerprint=decoded_audio.fingerprint,
+            audio_duration_s=decoded_audio.duration_s,
+            num_samples=len(decoded_audio.waveform),
+            mel_features=mel_features,
+            feature_attention_mask=feature_attention_mask,
+        ),
+    )
+    request_inputs = payload.request.inputs
+    if isinstance(request_inputs, dict):
+        inputs_without_uploaded_audio = {
+            name: value
+            for name, value in request_inputs.items()
+            if not isinstance(value, (bytes, bytearray, memoryview))
+        }
+        payload.request.inputs = inputs_without_uploaded_audio
+    else:
+        pass
+    return payload
 
 
 def make_qwen3_asr_scheduler_adapters(
@@ -269,18 +349,21 @@ def make_qwen3_asr_scheduler_adapters(
         raw_context = params.get("prompt")
         bias_context = str(raw_context).strip() if raw_context else None
         bias_context = bias_context or None
-        try:
-            prepared = prepare_audio(
-                payload, source_name="Qwen3-ASR", target_sample_rate=_SAMPLE_RATE
-            )
-        except AudioDecodeError as exc:
-            raise ValueError(
-                "Qwen3-ASR could not decode the uploaded audio; provide a valid "
-                "audio file."
-            ) from exc
-        audio = prepared.waveform
-        audio_duration_s = prepared.duration_s
-        fingerprint = prepared.fingerprint
+        prepared_audio = (
+            load_state(payload, Qwen3ASRPreparedAudio)
+            if isinstance(payload.data, dict) and "mel_features" in payload.data
+            else None
+        )
+        if prepared_audio is None:
+            decoded_audio = decode_request_audio(payload)
+            waveform = decoded_audio.waveform
+            audio_duration_s = decoded_audio.duration_s
+            fingerprint = decoded_audio.fingerprint
+            num_samples = len(waveform)
+        else:
+            audio_duration_s = prepared_audio.audio_duration_s
+            fingerprint = prepared_audio.audio_fingerprint
+            num_samples = prepared_audio.num_samples
 
         explicit_max_new_tokens = params.get("max_new_tokens")
         if explicit_max_new_tokens is not None:
@@ -305,7 +388,7 @@ def make_qwen3_asr_scheduler_adapters(
                 )
             else:
                 pass
-            estimated_mel_frames = len(audio) // hop_length
+            estimated_mel_frames = num_samples // hop_length
             estimated_audio_tokens = qwen3_asr_num_audio_tokens(estimated_mel_frames)
         else:
             pass
@@ -347,33 +430,13 @@ def make_qwen3_asr_scheduler_adapters(
             pass
 
         if cached_embedding is None:
-            # note (Jeffro Qu): unlike Whisper's default 30s window, here we pad the mel to the clip's true length.
-            # WhisperFeatureExtractor defaults to padding="max_length", padding every clip to nb_max_frames=3000 (~30s),
-            # so a short clip pays the full 30s of mel FFT on silence.
-            # This is safe for Qwen3-ASR because its encoder is variable-length and keeps only the
-            # valid frames via feature_attention_mask; vanilla Whisper's fixed-length encoder would instead break on padding="longest" (see ref: transformers#26241).
-            # refs:
-            #  https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/feature_extraction_whisper.py
-            #  https://github.com/huggingface/transformers/issues/26241
-            extracted = feature_extractor(
-                audio,
-                sampling_rate=_SAMPLE_RATE,
-                return_tensors="pt",
-                return_attention_mask=True,
-                padding="longest",
-                # note (Junnan Li): Qwen3-ASR's encoder accepts mel sequences beyond
-                # Whisper's 30-second window, so preprocessing must not truncate them.
-                truncation=False,
-            )
-            features = extracted.input_features
-            feature_attention_mask = getattr(extracted, "attention_mask", None)
-            if feature_attention_mask is None:
-                # WhisperFeatureExtractor normally returns one; fall back to all-valid.
-                feature_attention_mask = torch.ones(
-                    (features.shape[0], features.shape[-1]), dtype=torch.long
+            if prepared_audio is None:
+                features, feature_attention_mask = extract_log_mel(
+                    feature_extractor, waveform
                 )
             else:
-                pass
+                features = prepared_audio.mel_features
+                feature_attention_mask = prepared_audio.feature_attention_mask
             # note (Jeffro Qu): get_audio_feature uses the mask to select valid
             # frames; its no-mask branch transposes wrong, so the mask path must be taken.
             num_mel_frames = int(feature_attention_mask.sum().item())
@@ -403,7 +466,7 @@ def make_qwen3_asr_scheduler_adapters(
 
         audio_item = MultimodalDataItem(
             modality=Modality.AUDIO,
-            hash=prepared.fingerprint_int,
+            hash=audio_fingerprint_int(fingerprint),
             feature=features,
             model_specific_data={
                 "feature_attention_mask": feature_attention_mask,
@@ -697,4 +760,5 @@ __all__ = [
     "Qwen3ASRRequestData",
     "make_qwen3_asr_scheduler_adapters",
     "make_qwen3_asr_stream_output_builder",
+    "prepare_audio_for_engine",
 ]
