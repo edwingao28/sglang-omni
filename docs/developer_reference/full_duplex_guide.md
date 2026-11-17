@@ -1126,6 +1126,7 @@ Send 16 kHz mono PCM16 audio at real-time pace as `{"type": "input_audio_buffer.
 | `response.output_text.delta`, `response.output_audio.delta` | Reply text and reply audio, base64 PCM16 at 24 kHz mono. |
 | `sglang.response.progress` | In a profile that publishes its aligner's `session`: `text_end`, the length of the reply text whose audio has been produced, and `audio_ms`, where that audio ends in the reply's audio, so a client can mark the text as it plays. |
 | `sglang.response.heard` | After a `conversation.item.truncate`, in a profile that publishes its dialog's `session`: `text_end`, the length of the cut reply's text the history keeps, sent again whenever the cut moves, so a client can show what the history kept. |
+| `sglang.output_audio.paused`, `sglang.output_audio.resumed` | With the dialog's `on_overlap: pause`: the server holds the reply named by `response_id` while it decides whether what you said over it was meant for the assistant. Stop playback where it is and keep the audio you hold; at `resumed` play on from there. A reply that ends instead finishes with `response.done` and reason `interrupted`. |
 | `response.done` | The reply is complete; `response.status_details.reason` is `stop`, `empty_turn` when the utterance had no words, or `interrupted` when you spoke over it. |
 | `error` | The request or the session failed. |
 
@@ -1428,6 +1429,31 @@ Keeps the conversation history, opens a turn for each final transcript and sends
 | `system_prompt` | string | `You are a helpful voice assistant. Answer concisely.` | The system message; realtime `instructions` set it. |
 | `max_history_chars` | integer > 0 | `65536` | The bound on the history: a turn whose history plus utterance plus `max_text_chars` would exceed it fails the session. |
 | `max_text_chars` | integer > 0 | `16000` | The longest utterance transcript and the longest reply. |
+| `on_overlap` | `interrupt` or `pause` | `interrupt` | What speech over a reply does: end the reply at once, or pause it until the chat service says whether the speech was addressed to the assistant. |
+| `respond_margin` | number | `0.34` | With `on_overlap: pause`, the least log P(yes) - log P(no) of the chat service's answer that ends the paused reply. A higher value resumes more replies and answers fewer interruptions. The default was chosen for Qwen3.8-27B as the chat service. |
+| `decision_timeout_s` | number > 0 | `2` | With `on_overlap: pause`, the deadline of the whole request for that answer, from sending it to its last byte. A request that misses it ends the paused reply as if the speech was addressed. |
+
+(pause-on-overlap)=
+
+**Pause on overlap**
+
+
+By default any speech over a reply ends it, so a listener's "mm-hmm", a word to someone else in the room or a voice from a TV cuts the assistant off. With `on_overlap: pause` the dialog holds the reply instead: it publishes `reply.paused`, the Session stops delivering the reply's audio where the listener is ({ref}`Delivery pacing <delivery-pacing>`), and the client gets `sglang.output_audio.paused`. Generation goes on behind the pause. When the transcript of the speech arrives, the dialog asks the `openai_chat` node's service one yes/no question, with the last four history messages, the reply's text and the transcript, whether the speaker was talking to the assistant, as one greedy token with thinking off, and reads log P(yes) - log P(no) from the token's `top_logprobs`. At `respond_margin` or above, the reply ends as an interruption does and the speech is answered as the next turn. Below it, the reply resumes once you are silent (`reply.resumed`, `sglang.output_audio.resumed`) and the speech is dropped: it gets no answer and does not enter the history. Speech with no words resumes without a question. Further speech during the pause joins the question, and an answer about all of it decides. A service error, an answer without a yes or no among its candidates, or a request that takes longer than `decision_timeout_s` ends the reply, as the default does. So does a pause that is still open 1 s plus `decision_timeout_s` after you stopped speaking, 3 s by default, because no final transcript or no answer came: what you said is then answered when its transcript arrives. `response.cancel` during a pause ends the reply and the speech heard so far is answered. The speech that ends a paused reply is already waiting when the reply ends. If you heard part of the reply but its audio ended before the first boundary, the answer waits up to 250 ms for an `alignment` node with `heard_asr_url` to report the words you heard. When the report comes, the prompt shows that part of the reply between your two utterances. A cut this early usually gets no report. Under `method: forced` the aligner does not transcribe a sentence whose known word ends already reach the cut, and under `method: asr` a short heard span can fail to match the reply's text. Without a report in that time, or without such a node, the two utterances join in one user message. With the node and no report, the answer starts only after the full 250 ms.
+
+It is off in every bundled profile. To turn it on, set the options on the dialog node of a profile, or pass them at launch:
+
+```bash
+sgl-omni serve --config examples/streaming_cascade/profiles/qwen3-asr-qwen3.8-27b-vivian/launch.yaml --enable-realtime \
+  --session_nodes.dialog.on_overlap pause
+```
+
+It needs a graph that publishes the reply's audio, an `openai_chat` node that reads the dialog's messages, a chat service that returns `logprobs` with `top_logprobs`, and a client that holds playback at `sglang.output_audio.paused`: a client that ignores the event plays on through the audio it already holds, at most `max_output_lead_ms`, and then hears silence until the reply resumes. The pause adds one request of one token per overlapping utterance to the chat service. The dialog keeps asking the chat service its Session opened with; a `session.update` that changes only the `openai_chat` node does not move the question.
+
+The dialog pairs speech with its transcript by order, so the node it reads transcripts from must send one final transcript for every utterance, an empty one when it heard no words. `running_transcript` sends none for an utterance without words that the end of the input cuts, so a dialog that reads it cannot pause.
+
+The final transcript of an utterance also ends that utterance for the dialog. A reply paused under speech that the end of the input cuts therefore still resumes or ends as described above. This holds when the `commit` or `speech.stopped` that ends the speech is the client's EOS chunk, which the dialog takes only after the open turns end.
+
+The default `respond_margin` of 0.34 is a threshold chosen for Qwen3.8-27B as the chat service. Another chat model answers the question with other probabilities, so check `respond_margin` on your own recordings before you rely on it.
 
 (openai_chat)=
 
@@ -1558,6 +1584,7 @@ Each rule is followed by the error it raises.
 - Two different bounds on inputs from one source — `node '<name>' bounds its edge from '<source>' twice`.
 - A node takes `reply.progress` on control edges from two sources — `node '<name>' takes reply.progress from [...]; one source reports it`.
 - A node reads `reply.progress` of a source as data (the `alignment` kind does) while a control edge takes the same event from that source — `node '<name>' reads ['<source>:reply.progress'] as data, but a control edge takes them`.
+- A `dialog` with `on_overlap: pause` whose messages no `openai_chat` node reads — `node '<name>' pauses on overlap and needs an openai_chat node reading its messages`; in a graph that publishes no reply audio — `node '<name>' pauses on overlap and needs a graph that publishes its reply's audio`; or that reads a `running_transcript` node — `node '<name>' pauses on overlap, which is not supported with running_transcript`.
 - A `dialog` whose `interrupt` no node that publishes audio takes on a control edge with its `session` read by the dialog, in a profile that publishes audio or where some node takes that `interrupt` — `node '<name>' waits for reply.delivered after it interrupts a reply: ...`.
 - `session_publish` names an unknown node — `publish names unknown nodes [...]`.
 - `session_publish` lists a format the node does not produce — `node '<name>' does not produce [...]`.
@@ -1649,7 +1676,7 @@ Every failure ends the realtime session with an `error` event.
 - `max_text_chars` at or above `max_history_chars` loads, and then every turn fails with `conversation exceeds max_history_chars`.
 - A reasoning language model can still open a think block of its own with `chat_template_kwargs: {enable_thinking: false}`. With `--reasoning-parser` on its server the block goes to `reasoning_content`, which the cascade never reads; without it the block is spoken and kept in the history.
 - A reply cut by `max_tokens` (finish reason `length`) is spoken and kept as it is.
-- Speech always interrupts a running reply; `interrupt_response` does not change that.
+- Speech always interrupts a running reply, or pauses it with the dialog's `on_overlap: pause`; `interrupt_response` does not change that.
 
 (verifying-a-deployment)=
 
@@ -1763,6 +1790,8 @@ An `interrupt` naming a turn that reaches a node on a control edge first drops t
 A Session delivers reply audio in real time. For every node of the Session that publishes audio, an audio chunk leaves at most `max_output_lead_ms` ahead of the wall clock since the reply's first audio left, cut at that horizon, so the client never holds more than `max_output_lead_ms` of a reply however long its first audio took; the node's later audio and its `turn.done` wait behind it, and its other chunks, such as transcripts, reply text, speech boundaries and the confirmation of each input append, pass, so the client keeps appending while the reply plays. Once the input has ended everything leaves at once. Audio leaving together, at the input's end or when delivery catches up, is joined per turn into contiguous chunks of at most `max_output_lead_ms`, so a held 40 s reply reaches the client as about 40 chunks rather than one per generated chunk. A Session that is one stage route paces its output the same way. `max_output_lead_ms` is a field of the pipeline config (default 1000); an interruption cannot take back audio the client already holds, so it bounds how long the client may keep speaking after the user started.
 
 A node's `turn.done` leaves once the wall clock reaches the end of the turn's audio, when the client has played it, and not when its last audio left. When the Session releases a node's `turn.done`, it delivers it to the nodes reading it and returns it to the node itself as a `control`, so a node can keep its reply open, and interruptible, until the client has played the reply's audio: a user who starts speaking during its last `max_output_lead_ms` still interrupts it. A `turn.interrupted` the node publishes, or an `interrupt` control naming a turn, drops what the Session still holds of that turn, its `turn.done` included. Held audio counts against the Session's `max_output_bytes`. A `reply.progress` reaches the client only from a node that publishes `session` and whose `session` no node reads, the end of the route that builds the progress: with an aligner reading the speech node's `session`, the client hears the aligner's progress and not the speech node's, and without one it hears none.
+
+A node that publishes `reply.paused` for a turn holds that turn's audio and its `turn.done` on every node of the Session, including audio already released but not yet handed to the client, until it publishes `reply.resumed`; the turn's other chunks pass. The reply's clock skips the pause, so pacing and the held `turn.done` go on as if no time had passed. An interrupt of a paused turn reports as delivered (`reply.delivered`) no more than the audio that played before the pause. The realtime API forwards the two controls for the response the client is playing as `sglang.output_audio.paused` and `sglang.output_audio.resumed`.
 
 (session-api)=
 
