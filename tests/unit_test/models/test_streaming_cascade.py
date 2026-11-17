@@ -85,7 +85,7 @@ from sglang_omni.proto.streams import (
 from sglang_omni.scheduling.message import IncomingMessage
 from sglang_omni.scheduling.session import SessionScheduler
 from sglang_omni.utils.imports import import_string
-from tests.unit_test.fixtures.cascade_backends import CHAT_MODEL
+from tests.unit_test.fixtures.cascade_backends import CHAT_MODEL, SHORT_PROMPT_MAX_WORDS
 from tests.unit_test.fixtures.cascade_fakes import QUIET, build, drain
 from tests.unit_test.fixtures.session_outputs import control_chunk
 from tests.unit_test.fixtures.session_pipeline import (
@@ -1687,15 +1687,31 @@ async def test_the_chat_probe_streams_one_token_sampled_with_the_node_settings(
     llm = backends[0].component_graph().node("llm").component.model_dump()
     config = COMPONENTS.parse({**llm, "temperature": 0.7, "extra_body": {"top_p": 0.9}})
     await COMPONENTS.kind("openai_chat").probe(config)
-    [request] = backend_requests
-    assert [message["role"] for message in request.pop("messages")] == ["user"]
-    assert request == {
-        "model": CHAT_MODEL,
-        "stream": True,
-        "max_tokens": 1,
-        "temperature": 0.7,
-        "top_p": 0.9,
-    }
+    assert backend_requests
+    for request in backend_requests:
+        assert [message["role"] for message in request.pop("messages")] == ["user"]
+        assert request == {
+            "model": CHAT_MODEL,
+            "stream": True,
+            "max_tokens": 1,
+            "temperature": 0.7,
+            "top_p": 0.9,
+        }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backends", ["length_chat"], indirect=True)
+async def test_the_chat_probe_prefills_short_and_long_prompts_in_batches(
+    backends, backend_requests
+):
+    """A chat service that had prefilled one prompt at a time stalled for seconds on its first batch of prompts that wrote a state checkpoint and on its first batch that wrote none. The loopback answers the first warm-up prompts of a kind, short or long, only once 8 of that kind are in flight, and refuses a repeated prompt and one that meets the other kind in flight."""
+    llm = backends[0].component_graph().node("llm").component
+    await COMPONENTS.kind("openai_chat").probe(llm)
+    words = [
+        len(request["messages"][-1]["content"].split())
+        for request in backend_requests[1:]
+    ]
+    assert words and min(words) <= SHORT_PROMPT_MAX_WORDS < max(words)
 
 
 @pytest.mark.asyncio
@@ -1713,9 +1729,10 @@ async def test_the_chat_probe_preserves_the_real_request_minimum_tokens(
         }
     )
     await COMPONENTS.kind("openai_chat").probe(config)
-    [request] = backend_requests
-    assert request["max_tokens"] == 1 and request["min_tokens"] == 0
-    assert request["top_p"] == 0.9
+    assert backend_requests
+    for request in backend_requests:
+        assert request["max_tokens"] == 1 and request["min_tokens"] == 0
+        assert request["top_p"] == 0.9
     assert config.max_tokens == 32
     assert config.extra_body == {"min_tokens": minimum_tokens, "top_p": 0.9}
 

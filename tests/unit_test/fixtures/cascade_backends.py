@@ -5,6 +5,8 @@ import base64
 import json
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
@@ -16,6 +18,10 @@ from sglang_omni.models.streaming_cascade.config import StreamingCascadePipeline
 
 SPEECH_SAMPLES = np.array([0, 16384, -16384], dtype="<i2")
 CHAT_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
+# note (wenyao): a warm-up prompt of more words than this is long: it is over 64 tokens, and a chat service that checkpoints its state every 64 tokens takes another prefill kernel for it.
+SHORT_PROMPT_MAX_WORDS = 64
+# note (wenyao): a warm-up batch needs this many prompts in flight at once, so that each of 2 data-parallel ranks still prefills 3 together after prefilling one alone; a model with 32 state heads needs 3 sequences for the fused prefill kernel on an H200.
+WARM_UP_BATCH_MIN_PROMPTS = 8
 
 
 @pytest.fixture
@@ -33,6 +39,10 @@ def backends(request, backend_requests):
     scenario = request.param
     audio_sent = threading.Event()
     received_audio, received_words, received_messages = [], [], []
+    batching = threading.Condition()
+    batched_kinds: set[str] = set()
+    in_flight = {"short": 0, "long": 0}
+    warm_up_prompts: set[str] = set()
 
     class Handler(BaseHTTPRequestHandler):
         def send(self, content_type: str, body: bytes = b"", **headers) -> None:
@@ -104,15 +114,15 @@ def backends(request, backend_requests):
                 pass
             backend_requests.append(request)
             self.send("text/event-stream")
-            if request["max_tokens"] == 1 and request["messages"] == [
-                {"role": "user", "content": "Hi"}
-            ]:
-                self.event({"delta": {"content": "Hi"}, "finish_reason": None})
+            if request["max_tokens"] == 1:
+                prompt = request["messages"][-1]["content"]
                 finish_reason = {
                     "failed_probe": "abort",
                     "length_chat": "length",
                 }.get(scenario, "stop")
-                self.event({"delta": {}, "finish_reason": finish_reason})
+                with nullcontext() if prompt == "Hi" else self.batched(prompt):
+                    self.event({"delta": {"content": "Hi"}, "finish_reason": None})
+                    self.event({"delta": {}, "finish_reason": finish_reason})
                 self.wfile.write(b"data: [DONE]\n\n")
                 return
             else:
@@ -135,6 +145,31 @@ def backends(request, backend_requests):
                     pass
             self.event({"delta": {}, "finish_reason": finish_reason})
             self.wfile.write(b"data: [DONE]\n\n")
+
+        @contextmanager
+        def batched(self, prompt: str) -> Iterator[None]:
+            """Answer the first warm-up prompts of a kind, short or long, only once WARM_UP_BATCH_MIN_PROMPTS of that kind are in flight, and refuse a repeated prompt and one that meets the other kind in flight. A prompt is in flight until the last line of its answer."""
+            if len(prompt.split()) > SHORT_PROMPT_MAX_WORDS:
+                kind, other = "long", "short"
+            else:
+                kind, other = "short", "long"
+            with batching:
+                assert prompt not in warm_up_prompts, "a warm-up prompt must be new"
+                warm_up_prompts.add(prompt)
+                assert not in_flight[
+                    other
+                ], f"a {kind} warm-up prompt must not be in flight with a {other} one"
+                in_flight[kind] += 1
+                batching.notify_all()
+                assert batching.wait_for(
+                    lambda: in_flight[kind] >= WARM_UP_BATCH_MIN_PROMPTS
+                    or kind in batched_kinds,
+                    3,
+                ), f"{WARM_UP_BATCH_MIN_PROMPTS} {kind} warm-up prompts must be in flight at once"
+                batched_kinds.add(kind)
+            yield
+            with batching:
+                in_flight[kind] -= 1
 
         def event(self, choice: dict) -> None:
             data = json.dumps({"choices": [choice]})
