@@ -43,6 +43,7 @@ def record_session(
     rejected_updates: int = 0,
     http_denied: bool = False,
     is_admission_rejected: bool = False,
+    clock_offset_s: float = 0.0,
 ) -> Path:
     """Write a paced 80 ms session whose unit k completes at unit_done_s[k].
 
@@ -63,8 +64,8 @@ def record_session(
                     {
                         "event_id": f"input{seq}",
                         "seq": seq,
-                        "start_s": START_S + seq * 0.08,
-                        "completed_s": START_S + seq * 0.08,
+                        "start_s": clock_offset_s + START_S + seq * 0.08,
+                        "completed_s": clock_offset_s + START_S + seq * 0.08,
                     }
                     for seq in range(0 if is_admission_rejected else packets)
                 ]
@@ -170,7 +171,10 @@ def record_session(
         pass
     records.sort(key=lambda record: record["time_s"])
     (variant_dir / "continuous.jsonl").write_text(
-        "".join(json.dumps(record) + "\n" for record in records)
+        "".join(
+            json.dumps({**record, "time_s": record["time_s"] + clock_offset_s}) + "\n"
+            for record in records
+        )
     )
     return variant_dir
 
@@ -185,6 +189,8 @@ def record_run(
     reply_audio_s: list[float] | None = None,
     rejected_updates: int = 0,
     rejected_session_index: int | None = None,
+    input_pacing_violations: int = 0,
+    clock_offset_s: float = 0.0,
 ) -> Path:
     """Write a complete recording whose sessions are (status, unit_done_s) pairs."""
     samples = []
@@ -199,6 +205,7 @@ def record_run(
             rejected_updates=rejected_updates,
             http_denied=index < admission_denials,
             is_admission_rejected=is_admission_rejected,
+            clock_offset_s=clock_offset_s,
         )
         variant_state = {"directory": directory, "status": status}
         if is_admission_rejected:
@@ -216,7 +223,7 @@ def record_run(
                 "status": "complete",
                 "load": {
                     "concurrency": concurrency,
-                    "input_pacing_violations": 0,
+                    "input_pacing_violations": input_pacing_violations,
                     "variants_with_admission_denials": admission_denials,
                 },
                 "samples": samples,
@@ -329,7 +336,7 @@ def test_reply_latency_starts_at_the_unit_with_the_first_audio(tmp_path: Path) -
 
 def test_level_counts_every_unit_of_a_failed_session_as_missed(tmp_path: Path) -> None:
     level = summarize_level(
-        record_run(tmp_path / "run", 2, [("pass", ON_TIME), ("fail", [101.16])]),
+        [record_run(tmp_path / "run", 2, [("pass", ON_TIME), ("fail", [101.16])])],
         PLAYBACK_RESERVE_S,
     )
 
@@ -360,7 +367,7 @@ def test_level_counts_rejected_sessions_apart_from_failures(tmp_path: Path) -> N
     run["samples"][2]["variants"]["input"]["failure_kind"] = "runtime"
     run_path.write_text(json.dumps(run))
     report = serving_report(
-        [run_dir],
+        [[run_dir]],
         PLAYBACK_RESERVE_S,
     )
     level = report["levels"][0]
@@ -422,7 +429,7 @@ def test_rejection_fails_targets_without_counting_unit_misses(
         sessions,
         rejected_session_index=len(sessions) - 1,
     )
-    report = serving_report([run_dir], PLAYBACK_RESERVE_S)
+    report = serving_report([[run_dir]], PLAYBACK_RESERVE_S)
     level = report["levels"][0]
     assert level["sessions"] == len(sessions)
     assert level["sessions_failed"] == 0
@@ -462,7 +469,7 @@ def test_failed_trace_with_bad_rows_preserves_report(
     trace_path = run_dir / variant["directory"] / "continuous.jsonl"
     with trace_path.open("a" if valid_rows else "w") as trace_file:
         trace_file.write('{"direction":\n')
-    report = serving_report([run_dir], PLAYBACK_RESERVE_S)
+    report = serving_report([[run_dir]], PLAYBACK_RESERVE_S)
     level = report["levels"][0]
     assert level["sessions"] == 1
     assert level["sessions_failed"] == 1
@@ -488,7 +495,7 @@ def test_failed_session_uses_trace_when_admission_counts_are_unavailable(
     variant.update(failure_kind="runtime", admission=None)
     run_path.write_text(json.dumps(run))
 
-    level = summarize_level(run_dir, PLAYBACK_RESERVE_S)
+    level = summarize_level([run_dir], PLAYBACK_RESERVE_S)
     assert level["sessions_failed"] == 1
     assert level["session_admission_rejection_events"] == 1
 
@@ -497,9 +504,9 @@ def test_capacity_is_the_level_below_the_first_unmet_target(tmp_path: Path) -> N
     passing = [("pass", ON_TIME)]
     report = serving_report(
         [
-            record_run(tmp_path / "c4", 4, passing, admission_denials=1),
-            record_run(tmp_path / "c1", 1, passing),
-            record_run(tmp_path / "c2", 2, passing),
+            [record_run(tmp_path / "c4", 4, passing, admission_denials=1)],
+            [record_run(tmp_path / "c1", 1, passing)],
+            [record_run(tmp_path / "c2", 2, passing)],
         ],
         PLAYBACK_RESERVE_S,
     )
@@ -514,11 +521,64 @@ def test_capacity_is_unbounded_when_every_level_meets_the_targets(
     tmp_path: Path,
 ) -> None:
     report = serving_report(
-        [record_run(tmp_path / "c1", 1, [("pass", ON_TIME)])], PLAYBACK_RESERVE_S
+        [[record_run(tmp_path / "c1", 1, [("pass", ON_TIME)])]], PLAYBACK_RESERVE_S
     )
 
     assert report["max_concurrency_meeting_targets"] == 1
     assert report["capacity_bounded"] is False
+
+
+def test_report_pools_the_runs_of_one_level(tmp_path: Path) -> None:
+    runs = [
+        record_run(
+            tmp_path / "a",
+            1,
+            [("pass", ON_TIME)],
+            reply_audio_s=[104.0],
+            input_pacing_violations=1,
+        ),
+        record_run(
+            tmp_path / "b",
+            1,
+            [("pass", ON_TIME), ("fail", [101.16])],
+            reply_audio_s=[103.0],
+            input_pacing_violations=2,
+            clock_offset_s=1000.0,
+        ),
+    ]
+    code = benchmark_duplex_serving.main(
+        [
+            "report",
+            "--run",
+            ",".join(str(run_dir) for run_dir in runs),
+            "--output",
+            str(tmp_path / "serving.json"),
+        ]
+    )
+
+    assert code == 0
+    (level,) = json.loads((tmp_path / "serving.json").read_text())["levels"]
+    assert level["run"] == ",".join(str(run_dir) for run_dir in runs)
+    assert level["concurrency"] == 2
+    # Spans 101.16-104.0 in run a and 101.16-103.0 twice in run b, over run a's 2.84 s.
+    assert level["mean_open_sessions"] == pytest.approx(6.52 / 2.84)
+    assert level["input_pacing_violations"] == 3
+    assert level["sessions"] == 3
+    assert level["sessions_failed"] == 1
+    assert level["units_expected"] == 9
+    assert level["units_missed"] == 3
+    assert level["first_audio_latency_s"]["count"] == 2
+    assert level["unmet_targets"] == [
+        "no failed sessions",
+        "no input pacing violations",
+        "unit miss rate at most 1%",
+    ]
+    with pytest.raises(ValueError, match="more than once"):
+        serving_report([[runs[0], runs[0]]], PLAYBACK_RESERVE_S)
+    with pytest.raises(SystemExit):
+        benchmark_duplex_serving.main(
+            ["report", "--run", f"{runs[0]},", "--output", str(tmp_path / "x.json")]
+        )
 
 
 def test_turn_based_reply_starts_at_response_created(tmp_path: Path) -> None:
@@ -546,13 +606,15 @@ def test_turn_based_reply_starts_at_response_created(tmp_path: Path) -> None:
 
 def test_turn_based_level_is_judged_by_reply_real_time_factor(tmp_path: Path) -> None:
     level = summarize_level(
-        record_run(
-            tmp_path / "run",
-            1,
-            [("pass", [])],
-            profile=TURN_BASED_PROFILE,
-            reply_audio_s=[102.8, 104.0],
-        ),
+        [
+            record_run(
+                tmp_path / "run",
+                1,
+                [("pass", [])],
+                profile=TURN_BASED_PROFILE,
+                reply_audio_s=[102.8, 104.0],
+            )
+        ],
         PLAYBACK_RESERVE_S,
     )
 

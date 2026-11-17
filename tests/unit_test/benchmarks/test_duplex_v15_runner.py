@@ -654,7 +654,7 @@ def test_mixed_admission_outcomes_reach_reports_and_reference_export(
     assert load["admission_denial_events"] == 1 + 2 * rejected_updates
     assert load["variants_rejected"] == final_rejections
     assert load["variants_failed"] == runtime_failures
-    level = summarize_level(output, 0.08)
+    level = summarize_level([output], 0.08)
     assert level["sessions_rejected"] == final_rejections
     assert level["sessions_failed"] == runtime_failures
     assert level["sessions_with_admission_events"] == 2
@@ -718,7 +718,7 @@ def test_reconstruction_failure_preserves_admission_counts(
     assert load["session_admission_rejection_events"] == (
         8 if transport == "session" else 0
     )
-    level = summarize_level(output, 0.08)
+    level = summarize_level([output], 0.08)
     assert level["sessions_failed"] == 2
     assert level["sessions_rejected"] == 0
     assert level["admission_denials"] == (2 if transport == "http" else 0)
