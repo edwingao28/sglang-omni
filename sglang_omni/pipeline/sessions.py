@@ -647,6 +647,11 @@ class CoordinatorSessions:
                         pass
                     session.in_flight_append = "submitted"
                     session.wake.set()
+                    # note (wenyao): A close that began during the submit settles the appends once the read task has ended, which can be before this one is among them.
+                    if session.is_closing:
+                        self.settle_submitted_appends(session)
+                    else:
+                        pass
                     await self.finish_session_operation(session, operation, request_id)
                     self.emit_session_output(
                         session,
@@ -980,6 +985,15 @@ class CoordinatorSessions:
         session.is_closed = True
         session.output_wake.set()
 
+    def settle_submitted_appends(self, session: Session) -> None:
+        """Settle the appends a closing session still waits on: the close drops their reply, and the pump's release then aborts them at every owner."""
+        for request_id in session.submitted_appends:
+            future = self.completion_futures.get(request_id)
+            if future is not None and not future.done():
+                future.set_result(None)
+            else:
+                pass
+
     async def cleanup_session(self, session: Session) -> None:
         self.begin_session_close(session)
         cleanup_deadline_s = (
@@ -990,6 +1004,7 @@ class CoordinatorSessions:
             await asyncio.gather(session.read_task, return_exceptions=True)
         else:
             pass
+        self.settle_submitted_appends(session)
         if session.pump is not None and session.pump is not asyncio.current_task():
             try:
                 await asyncio.wait_for(
