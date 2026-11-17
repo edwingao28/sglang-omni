@@ -653,8 +653,6 @@ class Qwen3OmniSessionPipelineConfig(AudioSessionPipelineConfig):
             else:
                 pass
             return kwargs
-        elif stage_name == "code2wav":
-            return {}
         elif stage_name == "dialog":
             return {
                 "max_open_sessions": self.max_sessions,

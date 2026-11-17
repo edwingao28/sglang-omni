@@ -44,6 +44,7 @@ from sglang_omni.scheduling.streaming_vocoder import (
 )
 from sglang_omni.utils.audio_payload import audio_waveform_payload
 from sglang_omni.utils.cuda_staging import PinnedTransferSlot
+from sglang_omni.utils.gpu_memory import gpu_startup_lock
 from sglang_omni.utils.snake_beta import fuse_vocoder_decoder
 
 logger = logging.getLogger(__name__)
@@ -234,6 +235,7 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         codec_eos_token_id: int = 2150,
         initial_codec_chunk_frames: int = 0,
         max_replay_rows: int = 8,
+        max_open_sessions: int | None = None,
         enable_output_overlap: bool = True,
         enable_cuda_graph: bool = False,
         cuda_graph_runner: Code2WavCudaGraphRunner | None = None,
@@ -261,6 +263,12 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
             max(int(initial_codec_chunk_frames), 0), int(stream_chunk_size)
         )
         self.max_replay_rows = max(int(max_replay_rows), 1)
+        # note (wenyao): a session has one reply at a time and each replay row is one reply, so no replay has more rows than open sessions.
+        self.warm_up_rows = (
+            self.max_replay_rows
+            if max_open_sessions is None
+            else min(self.max_replay_rows, max_open_sessions)
+        )
         self.enable_output_overlap = bool(enable_output_overlap)
         self.eos_lazy_scan = self.enable_output_overlap
         self.pipeline_active = self.eos_lazy_scan and self.device.type == "cuda"
@@ -279,6 +287,61 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
             torch.get_device_module(self.device).set_stream(self.decode_stream)
         else:
             pass
+
+    def warm_up_serving_thread(self) -> None:
+        super().warm_up_serving_thread()
+        if not (current_platform.is_cuda() and self.device.type == "cuda"):
+            logger.info(
+                f"Code2Wav window warm-up skipped on {self.device}: its startup cost is measured on NVIDIA CUDA only"
+            )
+        elif self.cuda_graph_runner is not None:
+            logger.info(
+                "Code2Wav window warm-up skipped: this stage decodes through captured graphs"
+            )
+        elif self.codec_pool is not None:
+            logger.info(
+                "Code2Wav window warm-up skipped: streams decode from codec state slots"
+            )
+        else:
+            # note (wenyao): the largest windows reserve more than the stage budget until the warm-up returns them, which a stage that loads on this device meanwhile could count as its own load.
+            with gpu_startup_lock(self.device.index):
+                self.warm_up_window_shapes()
+
+    def warm_up_window_shapes(self) -> None:
+        """Decode one zero window of each threshold shape, so no stream waits for the first decode of the process or of its shape."""
+        start_seconds = time.monotonic()
+        window_shapes = window_graph_keys(
+            self.stream_chunk_size,
+            self.left_context_size,
+            self.warm_up_rows,
+            self.initial_codec_chunk_frames,
+        )
+        warmed_shape_count = 0
+        try:
+            for window_shape in window_shapes:
+                self.forward_codes(
+                    torch.zeros(
+                        (
+                            window_shape.batch_size,
+                            int(self.model.config.num_quantizers),
+                            window_shape.frames,
+                        ),
+                        dtype=torch.long,
+                        device=self.device,
+                    )
+                )
+                warmed_shape_count += 1
+        except torch.OutOfMemoryError as exc:
+            # note (wenyao): the same shortage on a serving stage fails one replay, so it does not stop the start; any other error would fail every replay of its shape and stays fatal.
+            logger.warning(
+                f"Code2Wav window warm-up ran out of device memory at {window_shape.batch_size} rows of {window_shape.frames} frames, so the remaining window shapes pay their first decode while serving: {exc}"
+            )
+        finally:
+            # note (wenyao): releasing the cached blocks returns what the largest windows reserved, and a shape stays warm without them.
+            current_platform.empty_cache()
+        logger.info(
+            f"Code2Wav warmed {warmed_shape_count} window shapes in {time.monotonic() - start_seconds:.1f} s"
+        )
 
     def wait_codes_ready(self, state: Code2WavStreamState) -> None:
         """Order the decode stream after the producer of the request's newest chunk."""
@@ -1237,6 +1300,7 @@ def create_code2wav_scheduler(
     left_context_size: int = 25,
     initial_codec_chunk_frames: int = 0,
     max_replay_rows: int = 8,
+    max_open_sessions: int | None = None,
     enable_output_overlap: bool = True,
     enable_cuda_graph: bool = False,
     total_gpu_memory_fraction: float | None = None,
@@ -1366,6 +1430,7 @@ def create_code2wav_scheduler(
         left_context_size=left_context_size,
         initial_codec_chunk_frames=initial_codec_chunk_frames,
         max_replay_rows=max_replay_rows,
+        max_open_sessions=max_open_sessions,
         enable_output_overlap=enable_output_overlap,
         enable_cuda_graph=enable_cuda_graph,
         cuda_graph_runner=cuda_graph_runner,
