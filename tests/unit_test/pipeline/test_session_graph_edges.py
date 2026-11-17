@@ -177,6 +177,28 @@ class FrontHooks(SessionHooks):
         return payload
 
 
+class WatchHooks(SessionHooks):
+    """Logs each session control it reads."""
+
+    def __init__(self, name: str, events: Queue[StageEvent]) -> None:
+        self.name = name
+        self.events = events
+
+    def open(self, session_identity: SessionIdentity, request: OmniRequest) -> None:
+        pass
+
+    def close(self, session_identity: SessionIdentity) -> None:
+        pass
+
+    def append(
+        self, chunk: TimedChunk, payload: StagePayload, context: SessionContext
+    ) -> StagePayload:
+        self.events.put(
+            ("append", self.name, context.session_identity.id, control_type(chunk))
+        )
+        return payload
+
+
 class ToolHooks(SessionHooks):
     """Answers each tool call with an empty tool_response of the call's turn."""
 
@@ -213,6 +235,8 @@ def create_edge_stage(
         hooks = FrontHooks()
     elif name == "tool":
         hooks = ToolHooks()
+    elif name == "watch":
+        hooks = WatchHooks(name, events)
     else:
         hooks = EdgeHooks(name, events, gates)
     return SessionScheduler(hooks, max_open_sessions=max_open_sessions)
@@ -241,16 +265,18 @@ def cascade_graph(order: tuple[str, ...] = ("front", "llm", "tts")) -> SessionGr
     return SessionGraph({name: nodes[name] for name in order}, {"tts": ("text",)})
 
 
-def dialog_graph() -> SessionGraph:
+def dialog_graph(*, watched: bool = False) -> SessionGraph:
     """A dialog-like front that publishes its turn controls and feeds the llm, which takes its interrupt as a preempting control."""
     interrupt = ControlEdge("front", INTERRUPT, should_preempt=True)
-    return SessionGraph(
-        {
-            "front": SessionNode(("front",), ("input:pcm16",)),
-            "llm": SessionNode(("llm",), ("front:text",), controls=(interrupt,)),
-        },
-        {"front": (SESSION_CONTROL,), "llm": ("text",)},
-    )
+    nodes = {
+        "front": SessionNode(("front",), ("input:pcm16",)),
+        "llm": SessionNode(("llm",), ("front:text",), controls=(interrupt,)),
+    }
+    if watched:
+        nodes["watch"] = SessionNode(("watch",), (f"front:{SESSION_CONTROL}",))
+    else:
+        pass
+    return SessionGraph(nodes, {"front": (SESSION_CONTROL,), "llm": ("text",)})
 
 
 def edge_graph(edge: DataEdge) -> SessionGraph:
@@ -480,6 +506,49 @@ async def test_an_owner_slow_to_take_an_interrupt_holds_neither_the_input_acks_n
             pass
         assert output.payload == {"text": "llm(new)"}
         assert log.of("append", "llm") == ["text:new"]
+        await outputs.aclose()
+
+
+@pytest.mark.asyncio
+async def test_the_client_hears_a_stop_its_readers_hear_only_after_the_owner_takes_the_interrupt(
+    tmp_path,
+):
+    """When another node also read the front's session controls, the client heard turn.interrupted only after an owner slow to take the interrupt had taken it."""
+    async with open_graph(
+        tmp_path, dialog_graph(watched=True), ("front", "llm", "watch")
+    ) as (coordinator, identity, gates, log):
+        outputs = coordinator.session_outputs(identity)
+
+        async def hear_the_stop() -> int | None:
+            while control_type(output := await anext(outputs)) != TURN_INTERRUPTED:
+                pass
+            return output.turn
+
+        gates.hold("llm", "control")
+        try:
+            await append(coordinator, identity, speech_chunk(0, turn=1))
+            await wait_until(lambda: "llm" in log.names("control"))
+            hearing = asyncio.create_task(hear_the_stop())
+            heard_while_held, _ = await asyncio.wait(
+                {hearing}, timeout=OUTPUT_TIMEOUT_S
+            )
+            await settle()
+            read_while_held = log.of("append", "watch")
+        finally:
+            gates.release("llm", "control")
+        assert heard_while_held == {hearing}
+        assert await hearing == 1
+        assert read_while_held == []
+        await wait_until(lambda: log.of("append", "watch") == [TURN_INTERRUPTED])
+        await append(
+            coordinator, identity, speech_chunk(1, turn=2, payload={"text": "new"})
+        )
+        heard_before_the_next_input_is_confirmed: list[str | None] = []
+        while (
+            output := await asyncio.wait_for(anext(outputs), OUTPUT_TIMEOUT_S)
+        ).kind != "input_done" or output.input_seq != 1:
+            heard_before_the_next_input_is_confirmed.append(control_type(output))
+        assert TURN_INTERRUPTED not in heard_before_the_next_input_is_confirmed
         await outputs.aclose()
 
 
