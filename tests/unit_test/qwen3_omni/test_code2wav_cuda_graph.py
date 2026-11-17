@@ -887,38 +887,57 @@ def test_tier1_publishes_full_matrix_within_budget() -> None:
     json.dumps(stats, allow_nan=False)
 
 
-def test_tier1_budget_violation_republishes_greedy_prefix() -> None:
+@pytest.mark.parametrize("failure", ["budget", "capture_oom", "post_capture_oom"])
+def test_tier1_capacity_failure_on_a_later_key_skips_only_that_key(
+    failure: str,
+) -> None:
+    """A later key that did not fit took every key after it down untried, and an
+    out-of-memory error right after its capture kept the failing key instead, so
+    each retry failed alike until the whole tier was dropped."""
     backend = SequencedBackend(
         snapshots=[
             (100, 120),  # before
             (100, 120),  # attempt 1 baseline
             (300, 340),  # after b4t20
-            (400, 440),  # after b4t10
-            (560, 600),  # b2t20 pushes footprint past the 400 budget
+            # b4t10 pushes footprint past the 400 budget
+            *([(560, 600)] if failure == "budget" else []),
             (100, 120),  # attempt 2 baseline
             (300, 340),  # after b4t20
-            (400, 440),  # after b4t10
-            (420, 460),  # final combined footprint
+            (330, 370),  # after b2t20
+            (340, 380),  # after b2t10
+            (360, 400),  # final combined footprint
         ],
+        errors_at=(
+            {1: torch.OutOfMemoryError("fake b4t10 capture OOM")}
+            if failure == "capture_oom"
+            else None
+        ),
     )
+    if failure == "post_capture_oom":
+        synchronize = backend.synchronize
+
+        def synchronize_after_capture(device: torch.device) -> None:
+            if tuple(backend.graphs[-1].static_input.shape) == (4, 16, 10):
+                raise torch.OutOfMemoryError("fake b4t10 post-capture OOM")
+            synchronize(device)
+
+        backend.synchronize = synchronize_after_capture
     runner = build_tiered_runner(backend)
 
     stats = runner.stats()
     tier1 = stats["memory"]["tier1"]
     assert tier1["attempts"] == 2
-    assert tier1["published_key_count"] == 2
     assert tier1["skipped_keys"] == [
-        {"batch_size": 2, "frames": 10, "decode": "window"},
-        {"batch_size": 2, "frames": 20, "decode": "window"},
+        {"batch_size": 4, "frames": 10, "decode": "window"},
     ]
     assert backend.pool_calls == 2
-    assert runner.available_batch_sizes(20) == (4, 1)
-    assert runner.available_batch_sizes(10) == (4, 1)
-    assert stats["build"]["published_graph_count"] == 4
+    assert runner.available_batch_sizes(20) == (4, 2, 1)
+    assert runner.available_batch_sizes(10) == (2, 1)
+    assert stats["build"]["published_graph_count"] == 5
 
-    hit = runner.run(make_codes(backend, 4, 20))
+    hit = runner.run(make_codes(backend, 2, 10))
     assert hit.execution_mode == "cuda_graph"
-    miss = runner.run(make_codes(backend, 2, 20))
+    miss = runner.run(make_codes(backend, 4, 10))
     assert miss.execution_mode == "eager"
     assert miss.fallback_reason == "key_miss"
 
