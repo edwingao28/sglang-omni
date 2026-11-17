@@ -203,30 +203,39 @@ def score_session(
     }
 
 
-def summarize_level(run_dir: Path, playback_reserve_s: float) -> dict[str, JsonValue]:
-    """Pool every attempted session of one recording, made at one concurrency."""
-    manifest, run, _ = load_run(run_dir)
-    if run["status"] != "complete":
-        raise ValueError(f"{run_dir} is not a complete recording")
+def summarize_level(
+    run_dirs: list[Path], playback_reserve_s: float
+) -> dict[str, JsonValue]:
+    """Pool every attempted session of the runs that make up one concurrency level."""
+    runs = [(run_dir, *load_run(run_dir)[:2]) for run_dir in run_dirs]
+    for run_dir, _, run in runs:
+        if run["status"] != "complete":
+            raise ValueError(f"{run_dir} is not a complete recording")
+        else:
+            pass
+    profiles = {manifest["profile"] for _, manifest, _ in runs}
+    if len(profiles) != 1:
+        raise ValueError(f"the runs of one level must share a profile, got {profiles}")
     else:
         pass
-    profile = manifest["profile"]
+    (profile,) = profiles
     unit_ms = PROFILES[profile].native_unit_ms
     is_native = PROFILES[profile].protocol == "native"
     attempted = [
-        variant_state
+        (run_dir, variant_state)
+        for run_dir, _, run in runs
         for sample in run["samples"]
         for variant_state in sample["variants"].values()
         if variant_state["status"] in SCORED_STATUSES + FAILED_STATUSES
     ]
     sessions = [
         score_session(run_dir / variant_state["directory"], profile, playback_reserve_s)
-        for variant_state in attempted
+        for run_dir, variant_state in attempted
         if variant_state["status"] in SCORED_STATUSES
     ]
     failed_variants = [
-        variant_state
-        for variant_state in attempted
+        (run_dir, variant_state)
+        for run_dir, variant_state in attempted
         if variant_state["status"] in FAILED_STATUSES
         and variant_state.get("failure_kind") != "admission_rejected"
     ]
@@ -234,14 +243,14 @@ def summarize_level(run_dir: Path, playback_reserve_s: float) -> dict[str, JsonV
     # cannot lower the miss rate.
     failed_units = sum(
         input_units(run_dir / variant_state["directory"], unit_ms)
-        for variant_state in failed_variants
+        for run_dir, variant_state in failed_variants
     )
-    trace_spans_s: list[tuple[float, float]] = []
+    run_trace_spans_s: dict[Path, list[tuple[float, float]]] = {}
     sessions_with_admission_events = 0
     sessions_with_http_denials = 0
     sessions_with_admission_rejections = 0
     http_admission_denial_events = session_admission_rejection_events = 0
-    for variant_state in attempted:
+    for run_dir, variant_state in attempted:
         variant_dir = run_dir / variant_state["directory"]
         admission = variant_state.get("admission")
         trace_start_s: float | None = None
@@ -273,7 +282,9 @@ def summarize_level(run_dir: Path, playback_reserve_s: float) -> dict[str, JsonV
             pass
         if trace_start_s is not None:
             assert trace_end_s is not None
-            trace_spans_s.append((trace_start_s, trace_end_s))
+            run_trace_spans_s.setdefault(run_dir, []).append(
+                (trace_start_s, trace_end_s)
+            )
         else:
             pass
         http_admission_denial_events += http_denials
@@ -282,11 +293,12 @@ def summarize_level(run_dir: Path, playback_reserve_s: float) -> dict[str, JsonV
         sessions_with_http_denials += bool(http_denials)
         sessions_with_admission_rejections += bool(session_rejections)
     replies = [reply for session in sessions for reply in session["replies"]]
-    load = run["load"]
+    loads = [run["load"] for _, _, run in runs]
+    input_pacing_violations = sum(load["input_pacing_violations"] for load in loads)
     sessions_failed = len(failed_variants)
     sessions_rejected = sum(
         variant_state.get("failure_kind") == "admission_rejected"
-        for variant_state in attempted
+        for _, variant_state in attempted
     )
     # note (jeffro): a native reply comes out one unit per input unit, so its
     # real-time factor tracks the input pace.
@@ -320,17 +332,29 @@ def summarize_level(run_dir: Path, playback_reserve_s: float) -> dict[str, JsonV
             real_time_factor["p90"] is None
             or real_time_factor["p90"] >= MAX_REPLY_REAL_TIME_FACTOR,
         )
-    elapsed_s = max((end_s for _, end_s in trace_spans_s), default=0.0) - min(
-        (start_s for start_s, _ in trace_spans_s), default=0.0
+    # note (wenyao): a run's trace clock is its own recorder process's, so the level's
+    # window is its longest run, not a span across the runs' clocks.
+    elapsed_s = max(
+        (
+            max(end_s for _, end_s in trace_spans_s)
+            - min(start_s for start_s, _ in trace_spans_s)
+            for trace_spans_s in run_trace_spans_s.values()
+        ),
+        default=0.0,
     )
     return {
-        "run": str(run_dir),
+        "run": ",".join(str(run_dir) for run_dir in run_dirs),
         "profile": profile,
-        "concurrency": load["concurrency"],
+        "concurrency": sum(load["concurrency"] for load in loads),
         # note (jeffro): sessions start as slots free up, so the first and last ones
         # of a recording run with fewer neighbours than the concurrency.
         "mean_open_sessions": (
-            sum(end_s - start_s for start_s, end_s in trace_spans_s) / elapsed_s
+            sum(
+                end_s - start_s
+                for trace_spans_s in run_trace_spans_s.values()
+                for start_s, end_s in trace_spans_s
+            )
+            / elapsed_s
             if elapsed_s > 0
             else None
         ),
@@ -344,7 +368,7 @@ def summarize_level(run_dir: Path, playback_reserve_s: float) -> dict[str, JsonV
         "session_admission_rejection_events": session_admission_rejection_events,
         "admission_denial_events": http_admission_denial_events
         + session_admission_rejection_events,
-        "input_pacing_violations": load["input_pacing_violations"],
+        "input_pacing_violations": input_pacing_violations,
         "units_expected": units_expected,
         "units_missed": units_missed,
         "unit_miss_rate": unit_miss_rate,
@@ -373,7 +397,7 @@ def summarize_level(run_dir: Path, playback_reserve_s: float) -> dict[str, JsonV
                 ("no failed sessions", sessions_failed > 0),
                 ("no admission denials", sessions_with_http_denials > 0),
                 ("no admission rejections", sessions_with_admission_rejections > 0),
-                ("no input pacing violations", load["input_pacing_violations"] > 0),
+                ("no input pacing violations", input_pacing_violations > 0),
                 pacing_target,
             )
             if is_unmet
@@ -382,18 +406,30 @@ def summarize_level(run_dir: Path, playback_reserve_s: float) -> dict[str, JsonV
 
 
 def serving_report(
-    run_dirs: list[Path], playback_reserve_s: float
+    run_dirs_per_level: list[list[Path]], playback_reserve_s: float
 ) -> dict[str, JsonValue]:
     """Concurrency levels of one system and the highest one that meets the targets."""
+    reported_run_dirs = [
+        run_dir.resolve()
+        for level_run_dirs in run_dirs_per_level
+        for run_dir in level_run_dirs
+    ]
+    if len(set(reported_run_dirs)) != len(reported_run_dirs):
+        raise ValueError("a recorded run was passed more than once")
+    else:
+        pass
     levels = sorted(
-        (summarize_level(run_dir, playback_reserve_s) for run_dir in run_dirs),
+        (
+            summarize_level(run_dirs, playback_reserve_s)
+            for run_dirs in run_dirs_per_level
+        ),
         key=lambda level: level["concurrency"],
     )
     concurrencies = [level["concurrency"] for level in levels]
     if len({level["profile"] for level in levels}) != 1:
         raise ValueError("every recording must use the same profile")
     elif len(set(concurrencies)) != len(concurrencies):
-        raise ValueError(f"each concurrency needs one recording, got {concurrencies}")
+        raise ValueError(f"each concurrency needs one level, got {concurrencies}")
     else:
         pass
     meeting = list(

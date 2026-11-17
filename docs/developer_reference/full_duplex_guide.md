@@ -648,7 +648,7 @@ python -m benchmarks.eval.benchmark_duplex_serving sweep \
   --max-per-subset 4
 ```
 
-The options after `--` go unchanged to the `record` command of `benchmark_duplex_v15` (or `benchmark_duplex_v10` with `--dataset v1.0`); the sweep adds `--concurrency N` and `--output <output>/concurrency-N` for each level. It writes `serving.json`, `SERVING.md` and one run directory per level, and keeps going when a level has failed sessions, since those are part of the result. `report --run <run> --run <run> ... --output serving.json` builds the same table from runs that are already recorded.
+The options after `--` go unchanged to the `record` command of `benchmark_duplex_v15` (or `benchmark_duplex_v10` with `--dataset v1.0`); the sweep adds `--concurrency N` and `--output <output>/concurrency-N` for each level. It writes `serving.json`, `SERVING.md` and one run directory per level, and keeps going when a level has failed sessions, since those are part of the result. `report --run <run> --run <run> ... --output serving.json` builds the same table from runs that are already recorded. A level recorded as several runs at the same time, such as one per server replica or one client process per 128 sessions, takes them in one `--run` separated by commas: its concurrency and counts add up over the runs, its percentiles cover every run's sessions, and its mean open sessions are averaged over the longest run.
 
 Each level is one row:
 

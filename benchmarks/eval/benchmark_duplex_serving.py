@@ -90,6 +90,16 @@ def concurrency_levels(text: str) -> list[int]:
         return sorted(levels)
 
 
+def level_run_dirs(text: str) -> list[Path]:
+    parts = text.split(",")
+    if "" in parts:
+        raise argparse.ArgumentTypeError(
+            f"expected run directories separated by single commas, got {text!r}"
+        )
+    else:
+        return [Path(part) for part in parts]
+
+
 def report(args: argparse.Namespace) -> int:
     serving = serving_report(args.run, args.playback_reserve_ms / 1000)
     write_json(args.output, serving)
@@ -119,7 +129,9 @@ def sweep(args: argparse.Namespace) -> int:
             ]
         )
         run_dirs.append(run_dir)
-    serving = serving_report(run_dirs, args.playback_reserve_ms / 1000)
+    serving = serving_report(
+        [[run_dir] for run_dir in run_dirs], args.playback_reserve_ms / 1000
+    )
     write_json(args.output / "serving.json", serving)
     table = format_table(serving)
     (args.output / "SERVING.md").write_text(table)
@@ -143,10 +155,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     report_parser.add_argument(
         "--run",
-        type=Path,
+        type=level_run_dirs,
         action="append",
         required=True,
-        help="Recorded run directory, one per concurrency level",
+        help="Recorded run directory of one concurrency level, or the comma-separated "
+        "runs recorded at the same time that make up the level",
     )
     report_parser.add_argument(
         "--output", type=Path, required=True, help="serving.json path"
