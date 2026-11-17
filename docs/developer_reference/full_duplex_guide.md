@@ -72,6 +72,7 @@ sgl-omni config resolve --model-path openbmb/MiniCPM-o-4_5 --variant session
 | `speech.gather_window_ms` | 22.5 | How long an idle speech stage waits for the other conversations' next second so it can decode them together; the wait ends once every open conversation has one. `0` decodes what is ready |
 | `stages.thinker/talker.engine.enable_torch_compile` | `false` | Compiles every decode graph batch size; adds minutes to startup |
 | `sampling` | `MiniCPMODuplexSampling` in `sglang_omni/models/minicpm_o/native_config.py` | Default sampling when a session does not set its own; `--sampling.<field>` changes one, such as `--sampling.temperature 0.5` |
+| `sampling.stop_owed_speech_on_user_voice` | `true` | When the model ends its turn, the talker can still owe up to 3 s of speech, and the user's voice stops it. `false` keeps speaking it while the user talks; a client stop or a new reply still ends it. A `/v1/realtime` session cannot set it |
 | `vision` | `MiniCPMODuplexVision` in the same file | Camera-frame limits per unit (1 s of audio); `--vision.<field>` changes one, such as `--vision.max_frames_per_unit 2` |
 | `window.sliding_window_mode` | `basic` | The checkpoint's `DuplexWindowConfig` mode: `basic` drops the oldest units of a long conversation; `off` keeps every unit and closes the session when its history fills |
 | `window.basic_window_high_tokens` / `window.basic_window_low_tokens` | 8000 / 6000 | History length that starts a drop, and the length the drop goes down to |

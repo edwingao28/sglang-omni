@@ -72,7 +72,7 @@ def stages() -> list[StageConfig]:
 
 
 class MiniCPMODuplexSampling(BaseModel):
-    """Deployment defaults for the thinker duplex sampler; a session may override them."""
+    """Deployment defaults for a duplex session's sampling and turn-taking; a /v1/realtime session may override all but stop_owed_speech_on_user_voice."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -87,6 +87,8 @@ class MiniCPMODuplexSampling(BaseModel):
     repetition_window_size: int = Field(default=512, ge=1)
     talker_temperature: float = Field(default=0.8, ge=0, le=2)
     talker_repetition_penalty: float = Field(default=1.05, ge=1)
+    stop_owed_speech_on_user_voice: bool = True
+    "The user's voice stops the speech a reply the model ended still owes; false keeps speaking it while the user talks, and a client stop or a new reply ends it either way."
 
 
 class MiniCPMODuplexVision(BaseModel):

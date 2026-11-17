@@ -34,7 +34,7 @@ from sglang_omni.serve.realtime.output import (
     TextFinished,
 )
 from sglang_omni.serve.realtime.schema import JsonObject, SessionConfiguration
-from sglang_omni.serve.realtime.types import InteractionAdapter, Unit
+from sglang_omni.serve.realtime.types import InteractionAdapter, ProtocolError, Unit
 from tests.unit_test.fixtures.session_client import FakeSessionClient
 from tests.unit_test.serve.test_realtime_reference_audio import wav_reference
 
@@ -541,7 +541,9 @@ async def open_session_params(
 async def test_session_overrides_stay_local_to_the_session() -> None:
     config = MiniCPMODuplexPipelineConfig(
         model_path="unused",
-        sampling=MiniCPMODuplexSampling(greedy=True, temperature=0.3),
+        sampling=MiniCPMODuplexSampling(
+            greedy=True, temperature=0.3, stop_owed_speech_on_user_voice=False
+        ),
     )
     override = MiniCPMODuplexSampling(
         greedy=False,
@@ -555,7 +557,7 @@ async def test_session_overrides_stay_local_to_the_session() -> None:
         repetition_window_size=64,
         talker_temperature=0.6,
         talker_repetition_penalty=1.1,
-    ).model_dump()
+    ).model_dump(exclude={"stop_owed_speech_on_user_voice"})
     overridden = await open_session_params(
         config,
         {
@@ -569,6 +571,7 @@ async def test_session_overrides_stay_local_to_the_session() -> None:
     assert overridden == {
         "instructions": "be brief",
         **override,
+        "stop_owed_speech_on_user_voice": False,
         "reference_audio": audio,
         "tts_reference_audio": audio,
         "max_slice_nums": 1,
@@ -579,6 +582,23 @@ async def test_session_overrides_stay_local_to_the_session() -> None:
         "max_slice_nums": 1,
     }
     assert config.sampling.temperature == 0.3
+
+
+@pytest.mark.asyncio
+async def test_a_realtime_session_cannot_set_whether_the_users_voice_stops_the_owed_speech() -> (
+    None
+):
+    """stop_owed_speech_on_user_voice changes turn-taking, so a /v1/realtime session cannot set it: the capabilities leave it out, and a realtime session that sends it is refused."""
+    config = MiniCPMODuplexPipelineConfig(model_path="unused")
+    capabilities = build_realtime_deployment(Mock(), config).capabilities
+    assert "stop_owed_speech_on_user_voice" not in (
+        capabilities.to_granted_capabilities()["sampling_parameters"]
+    )
+    with pytest.raises(ProtocolError) as exc_info:
+        await open_session_params(
+            config, {"sampling": {"stop_owed_speech_on_user_voice": False}}
+        )
+    assert exc_info.value.param.startswith("session.sglang.sampling")
 
 
 def test_stage_reference_precedence_is_per_session(

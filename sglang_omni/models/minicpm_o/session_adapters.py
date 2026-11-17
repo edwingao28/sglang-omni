@@ -713,7 +713,11 @@ def build_realtime_deployment(
             supports_reference_audio=True,
             supports_truncate=True,
             supports_cancel=True,
-            sampling_parameters=tuple(MiniCPMODuplexSampling.model_fields),
+            sampling_parameters=tuple(
+                sampling_parameter
+                for sampling_parameter in MiniCPMODuplexSampling.model_fields
+                if sampling_parameter != "stop_owed_speech_on_user_voice"
+            ),
         ),
         factory,
         limits=runtime_limits_for_pipeline(config),

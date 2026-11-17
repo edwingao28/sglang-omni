@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A reply the model ends keeps speaking the text the talker still owes; a client stop, the user's voice or a new reply ends it at once, and a reply cut short ends incomplete."""
+"""A reply the model ends keeps speaking the text the talker still owes; a client stop, the user's voice (unless the deployment turns that off) or a new reply ends it at once, and a reply cut short ends incomplete."""
 
 from types import SimpleNamespace
 from typing import NamedTuple
@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from sglang_omni.models.minicpm_o.components.tts_runtime import CODEC_CHUNK_SIZE
+from sglang_omni.models.minicpm_o.native_config import MiniCPMODuplexSampling
 from sglang_omni.models.minicpm_o.session_adapters import OutputConverter
 from sglang_omni.models.minicpm_o.talker_session import TalkerAdapter
 from sglang_omni.proto.session import OutputChunk, SessionIdentity, TimedChunk
@@ -59,7 +60,7 @@ def talker_model() -> SimpleNamespace:
     )
 
 
-def run_talker(units: list[Unit]) -> list[Spoken]:
+def run_talker(units: list[Unit], **sampling_overrides: bool) -> list[Spoken]:
     adapter = TalkerAdapter(talker_model())
     adapter.open(IDENTITY, None)
     spoken = []
@@ -68,7 +69,7 @@ def run_talker(units: list[Unit]) -> list[Spoken]:
         payload = SimpleNamespace(
             request_id="unit",
             request=SimpleNamespace(
-                params=dict(talker_temperature=0.8, talker_repetition_penalty=1.05)
+                params=MiniCPMODuplexSampling(**sampling_overrides).model_dump()
             ),
             data=dict(
                 text="hi" if unit.is_speaking else "",
@@ -116,10 +117,11 @@ def run_talker(units: list[Unit]) -> list[Spoken]:
 
 
 @pytest.mark.parametrize(
-    ("units", "expected"),
+    ("units", "sampling_overrides", "expected"),
     [
         (
             [REPLY, OWING_TURN_END, Unit(False, FULL), Unit(False, 10), Unit(False)],
+            {},
             [
                 Spoken(True, 1, False, False),
                 Spoken(True, 1, False, False),
@@ -137,6 +139,7 @@ def run_talker(units: list[Unit]) -> list[Spoken]:
                 Unit(False, FULL),
                 Unit(False),
             ],
+            {},
             [
                 Spoken(True, 1, False, False),
                 Spoken(True, 1, False, False),
@@ -148,6 +151,7 @@ def run_talker(units: list[Unit]) -> list[Spoken]:
         ),
         (
             [REPLY, OWING_TURN_END, Unit(False, hears_user=True), Unit(False)],
+            {},
             [
                 Spoken(True, 1, False, False),
                 Spoken(True, 1, False, False),
@@ -157,6 +161,16 @@ def run_talker(units: list[Unit]) -> list[Spoken]:
         ),
         (
             [REPLY, OWING_TURN_END, Unit(False, is_interrupted=True)],
+            {},
+            [
+                Spoken(True, 1, False, False),
+                Spoken(True, 1, False, False),
+                Spoken(False, 0, True, True),
+            ],
+        ),
+        (
+            [REPLY, OWING_TURN_END, Unit(False, is_interrupted=True)],
+            dict(stop_owed_speech_on_user_voice=False),
             [
                 Spoken(True, 1, False, False),
                 Spoken(True, 1, False, False),
@@ -169,6 +183,7 @@ def run_talker(units: list[Unit]) -> list[Spoken]:
                 OWING_TURN_END,
                 Unit(False, is_input_end=True, is_interrupted=True),
             ],
+            {},
             [
                 Spoken(True, 1, False, False),
                 Spoken(True, 1, False, False),
@@ -177,10 +192,23 @@ def run_talker(units: list[Unit]) -> list[Spoken]:
         ),
         (
             [REPLY, Unit(False, is_interrupted=True)],
+            {},
             [Spoken(True, 1, False, False), Spoken(False, 0, True, True)],
         ),
         (
             [REPLY, OWING_TURN_END, Unit(True, FULL)],
+            {},
+            [
+                Spoken(True, 1, False, False),
+                Spoken(True, 1, False, False),
+                Spoken(
+                    True, 1, False, False, ends_previous_turn=True, reset_history=True
+                ),
+            ],
+        ),
+        (
+            [REPLY, OWING_TURN_END, Unit(True, FULL)],
+            dict(stop_owed_speech_on_user_voice=False),
             [
                 Spoken(True, 1, False, False),
                 Spoken(True, 1, False, False),
@@ -196,6 +224,7 @@ def run_talker(units: list[Unit]) -> list[Spoken]:
                 Unit(False),
                 Unit(False, is_input_end=True),
             ],
+            {},
             [
                 Spoken(True, 1, False, False),
                 Spoken(True, 1, True, False),
@@ -205,6 +234,7 @@ def run_talker(units: list[Unit]) -> list[Spoken]:
         ),
         (
             [REPLY, Unit(False, 60, is_input_end=True)],
+            {},
             [
                 Spoken(True, 1, False, False),
                 Spoken(True, 4, True, False, masks_chunk_boundary_eos=True),
@@ -212,6 +242,7 @@ def run_talker(units: list[Unit]) -> list[Spoken]:
         ),
         (
             [REPLY, Unit(False, 4 * FULL + 1, is_input_end=True)],
+            {},
             [
                 Spoken(True, 1, False, False),
                 Spoken(True, 4, True, True, masks_chunk_boundary_eos=True),
@@ -224,6 +255,7 @@ def run_talker(units: list[Unit]) -> list[Spoken]:
                 Unit(False, FULL),
                 Unit(False, 50, is_input_end=True),
             ],
+            {},
             [
                 Spoken(True, 1, False, False),
                 Spoken(True, 1, False, False),
@@ -237,9 +269,11 @@ def run_talker(units: list[Unit]) -> list[Spoken]:
         "owed-text-past-the-drain-budget-ends-incomplete",
         "the-users-voice-stops-the-owed-speech",
         "a-client-stop-stops-the-owed-speech",
+        "a-client-stop-stops-the-owed-speech-kept-through-the-users-voice",
         "a-stop-at-the-input-end-stops-the-owed-speech",
         "a-client-stop-mid-reply-speaks-nothing-more",
         "a-new-reply-ends-the-owed-speech-first",
+        "a-new-reply-ends-the-owed-speech-kept-through-the-users-voice",
         "a-turn-spoken-to-the-codec-eos-owes-nothing",
         "input-end-mid-reply-speaks-what-is-owed-in-one-request",
         "a-codec-token-in-the-windows-extra-slot-still-owes-speech",
@@ -247,10 +281,23 @@ def run_talker(units: list[Unit]) -> list[Spoken]:
     ],
 )
 def test_a_reply_the_model_ends_speaks_the_text_the_talker_still_owes(
-    units: list[Unit], expected: list[Spoken]
+    units: list[Unit], sampling_overrides: dict[str, bool], expected: list[Spoken]
 ) -> None:
     """When the model ended its turn, or the input ended, while the talker still owed text, the talker dropped that text and the reply ended mid-sentence."""
-    assert run_talker(units) == expected
+    assert run_talker(units, **sampling_overrides) == expected
+
+
+def test_a_deployment_can_keep_the_owed_speech_through_the_users_voice() -> None:
+    """With stop_owed_speech_on_user_voice off, the user's voice no longer stops the speech a reply the model ended still owes; the talker speaks it to the codec EOS."""
+    assert run_talker(
+        [REPLY, OWING_TURN_END, Unit(False, FULL, hears_user=True), Unit(False, 10)],
+        stop_owed_speech_on_user_voice=False,
+    ) == [
+        Spoken(True, 1, False, False),
+        Spoken(True, 1, False, False),
+        Spoken(True, 1, False, False),
+        Spoken(True, 1, True, False),
+    ]
 
 
 def voice(text: str, *, end_of_turn: bool, is_speech_cut: bool) -> OutputChunk:

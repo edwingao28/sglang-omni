@@ -83,7 +83,11 @@ class TalkerAdapter(ARSessionAdapter):
             pass
         is_turn_open = not state.is_turn_start
         is_drain_stopped = state.drain_units_left > 0 and (
-            thinker_result["is_interrupted"] or thinker_result["hears_user"]
+            thinker_result["is_interrupted"]
+            or (
+                thinker_result["hears_user"]
+                and payload.request.params["stop_owed_speech_on_user_voice"]
+            )
         )
         is_turn_end = thinker_result["end_of_turn"] or chunk.eos or is_drain_stopped
         unit_kind: TalkerUnitKind | None
