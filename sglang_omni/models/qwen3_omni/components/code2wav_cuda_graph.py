@@ -503,9 +503,11 @@ class Code2WavCudaGraphRunner:
         the combined footprint after tier 0, whose members are too small to be
         worth shrinking individually) excludes the largest remaining
         batch-size class — small keys share the peak blocks, so only dropping
-        a class meaningfully shrinks the pool. Non-capacity failures on a
-        tier-1 key abandon the tier: shrinking cannot fix a correctness
-        problem, and the atomic tier stays published either way.
+        a class meaningfully shrinks the pool. A violation by a later key
+        excludes that key alone: the peak blocks already fit, so the keys
+        after it are still tried. Non-capacity failures on a tier-1 key
+        abandon the tier: shrinking cannot fix a correctness problem, and the
+        atomic tier stays published either way.
         """
         temporary: dict[GraphKey, CapturedGraph] = {}
         pool: tuple[int, int] | None = None
@@ -516,6 +518,8 @@ class Code2WavCudaGraphRunner:
         error_reason: str | None = None
         tier0_started = False
         capturing: tuple[GraphKey, str] | None = None
+        # note (wenyao): an out-of-memory error before the first capture counts against the first key.
+        index = 0
         try:
             with self.device_api.device_context(self.device):
                 pool = self.device_api.graph_pool_handle(self.device)
@@ -584,7 +588,7 @@ class Code2WavCudaGraphRunner:
             elif tier0_started:
                 combined_violation = True
             else:
-                violation_index = len(temporary)
+                violation_index = index
         except Exception as exc:
             reason = (
                 str(exc)
@@ -641,7 +645,7 @@ class Code2WavCudaGraphRunner:
             oversized_batch = remaining[0].batch_size
             remaining = [key for key in remaining if key.batch_size < oversized_batch]
         else:
-            remaining = remaining[:violation_index]
+            remaining.pop(violation_index)
         return ("shrink", remaining)
 
     def footprint_since(self, before: dict[str, int]) -> int:
