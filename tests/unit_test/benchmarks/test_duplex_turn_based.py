@@ -766,7 +766,13 @@ def with_progress(
 
 
 @pytest.mark.parametrize(
-    "event_type", ["sglang.response.progress", "sglang.response.heard"]
+    "event_type",
+    [
+        "sglang.response.progress",
+        "sglang.response.heard",
+        "sglang.output_audio.paused",
+        "sglang.output_audio.resumed",
+    ],
 )
 def test_progress_reports_must_name_a_created_response(event_type: str) -> None:
     first = receive_events(turn_based_trace(), "response.created")[0]

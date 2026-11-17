@@ -63,8 +63,14 @@ REPLY_DELIVERED = "reply.delivered"
 REPLY_HEARD = "reply.heard"
 # {"language"?: str}; the synthesizer starts the audio of the reply's next sentence, spoken in language when it tags one
 REPLY_SENTENCE = "reply.sentence"
+# A dialog stopped the reply of the chunk's turn where the listener is: the graph holds the turn's audio and its turn.done, and the client holds playback.
+REPLY_PAUSED = "reply.paused"
+# The paused reply of the chunk's turn plays on from where it stopped.
+REPLY_RESUMED = "reply.resumed"
 # Controls between nodes; a graph delivers them to readers and control edges, never to the client.
 NODE_CONTROLS = frozenset({REPLY_DELIVERED, REPLY_SENTENCE})
+# Controls the graph applies to every pacer, turns being graph-wide, before publishing them.
+FLOOR_CONTROLS = frozenset({REPLY_PAUSED, REPLY_RESUMED})
 # Reports a node makes on its own output; the client hears a report only from a node whose output no node reads as data, the end of the route that builds it.
 REPORT_CONTROLS = frozenset({REPLY_PROGRESS})
 

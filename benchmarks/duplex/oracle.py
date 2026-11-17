@@ -492,10 +492,13 @@ def evaluate_trace(
             elif turn_based and event_type in (
                 "sglang.response.progress",
                 "sglang.response.heard",
+                "sglang.output_audio.paused",
+                "sglang.output_audio.resumed",
             ):
                 # note (luojiaxuan): a server with an alignment node reports how far
                 # a reply's delivered audio covers its text; it changes no state.
                 # note (Haoling Pu): sglang.response.heard, sent after a truncate, changes no state either.
+                # note (wenyao): neither do sglang.output_audio.paused and sglang.output_audio.resumed, sent by a dialog that pauses a reply under speech.
                 check(
                     event.response_id in response_states,
                     f"{event_type}: unknown response",

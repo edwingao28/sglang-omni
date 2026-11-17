@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import random
 from dataclasses import replace
+from itertools import groupby
 from multiprocessing.queues import Queue
 
 import pytest
@@ -39,6 +40,7 @@ from sglang_omni.proto.streams import (
     INTERRUPT,
     PCM16,
     REPLY_DELIVERED,
+    control_type,
 )
 from sglang_omni.scheduling.session import (
     ChunkEmitter,
@@ -1146,6 +1148,71 @@ async def test_an_interrupt_drops_the_turn_output_the_client_has_not_taken():
         ("speaker", {"type": REPLY_DELIVERED, "audio_ms": 100}),
     ]
     assert graph.output_bytes == 0
+    await outputs.aclose()
+
+
+def speaker_control(kind: str, turn: int) -> OutputChunk:
+    return replace(
+        speaker_audio(turn, 0),
+        modality="control",
+        duration_ms=0,
+        payload={"type": kind},
+        format="session",
+    )
+
+
+def dialog_control(kind: str, turn: int) -> OutputChunk:
+    return replace(
+        reply_output("session", {"type": kind}, turn),
+        session_identity=SessionIdentity("graph:dialog", 1),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_paused_reply_sends_the_client_nothing_until_it_resumes():
+    runner = NodeOutputsRunner([])
+    graph = paced_speaker_runtime(runner)
+
+    async def route(name: str, node_outputs: list[OutputChunk]) -> None:
+        runner.node_outputs = node_outputs
+        await runner.route_graph_outputs(graph, name)
+
+    delivery = asyncio.create_task(runner.deliver_paced_outputs(graph, "speaker"))
+    outputs = runner.graph_outputs(graph)
+    await route(
+        "speaker",
+        [
+            speaker_control("turn.started", 1),
+            speaker_audio(1, 0),
+            speaker_audio(1, 100),
+        ],
+    )
+    taken = await collect(outputs, 2)
+    await route("dialog", [dialog_control("reply.paused", 1)])
+    taken += await collect(outputs, 1)
+    await route(
+        "speaker",
+        [speaker_audio(1, 200), speaker_audio(1, 300), speaker_control("turn.done", 1)],
+    )
+    later = asyncio.get_running_loop().time() + 10
+    assert graph.pacers["speaker"].release(later) == []
+    await route("dialog", [dialog_control("reply.resumed", 1)])
+    while not taken or control_type(taken[-1]) != "turn.done":
+        taken += await collect(outputs, 1)
+    delivery.cancel()
+    await asyncio.gather(delivery, return_exceptions=True)
+    kinds = [control_type(output) or output.format for output in taken]
+    assert [kind for kind, _ in groupby(kinds)] == [
+        "turn.started",
+        "pcm16",
+        "reply.paused",
+        "reply.resumed",
+        "pcm16",
+        "turn.done",
+    ]
+    assert (
+        sum(output.duration_ms for output in taken if output.format == "pcm16") == 400
+    )
     await outputs.aclose()
 
 
