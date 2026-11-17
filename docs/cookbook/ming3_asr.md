@@ -108,7 +108,16 @@ curl -X POST http://127.0.0.1:8000/v1/audio/transcriptions \
   -F response_format=verbose_json
 ```
 
-An upload longer than 30 seconds is split into 30-second clips, and the clip transcripts are joined.
+## Long Audio
+
+An upload longer than 30 seconds is split into 30-second clips, and the clip transcripts are joined. The shared `audio_chunking` flags are described in [ASR Model Usage](../basic_usage/asr.md#long-audio); this pipeline ships with these values:
+
+| Name | Default |
+|---|---|
+| `--audio_chunking.max_audio_clip_s` | `30`. It can only be lowered: 30 s is the model's native clip limit. |
+| `--audio_chunking.max_concurrent_chunks` | `8` |
+| `--audio_chunking.max_total_audio_s` | `3600` |
+| `--audio_chunking.max_concurrent_long_audio_requests` | `thinker.engine.max_running_requests × processes.thinker.num_replicas // (2 × max_concurrent_chunks)`, at least 1; `4` with the stock defaults |
 
 ## Stream transcription
 
