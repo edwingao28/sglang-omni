@@ -12,7 +12,7 @@ from sglang_omni.config.schema import replica_instance_name
 from sglang_omni.pipeline.coordinator import Coordinator
 from sglang_omni.pipeline.types import SessionIdleTimeoutError, SessionOutputBudgetError
 from sglang_omni.proto import OmniRequest
-from sglang_omni.proto.messages import CompleteMessage
+from sglang_omni.proto.messages import CompleteMessage, SubmitMessage
 from sglang_omni.proto.session import SessionLimits, TimedChunk
 from tests.unit_test.fixtures.session_pipeline import (
     PipelineResources,
@@ -51,6 +51,72 @@ async def test_timeout_cancel_noop_waits_before_close(linear_pair):
         OmniRequest(None), stages=["source", "sink"]
     )
     await coordinator.close_session(second)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_close_aborts_the_append_in_flight(
+    linear_pair: PipelineResources,
+) -> None:
+    """A close waited for an append still in flight at its owners until the append ended, and an append that outlasted the operation timeout failed the session instead of closing it."""
+    coordinator, events, _ = linear_pair
+    session_identity = await coordinator.open_session(
+        OmniRequest(None, {"delay": 30}), stages=["source", "sink"]
+    )
+    session = coordinator.sessions[session_identity.id]
+    session.limits = SessionLimits(operation_timeout_s=2)
+    output = coordinator.session_outputs(session_identity)
+    waiting = asyncio.create_task(anext(output))
+    await coordinator.append_session(session_identity, chunk(0))
+    await wait_until(lambda: bool(session.submitted_appends))
+    await wait_until(
+        lambda: ("append", "sink", session_identity.id, 0) in event_log(events)
+    )
+    await asyncio.wait_for(coordinator.close_session(session_identity), 1)
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(waiting, 5)
+    assert session_identity.id not in coordinator.sessions
+    log = event_log(events)
+    cancelled = next(i for i, e in enumerate(log) if e[:2] == ("cancelled", "sink"))
+    closed = [(i, e[1]) for i, e in enumerate(log) if e[0] == "close"]
+    assert [owner for _, owner in closed] == ["sink", "source"]
+    assert cancelled < closed[0][0]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_close_aborts_the_append_still_being_submitted(
+    linear_pair: PipelineResources, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A close that arrived while an append was still being submitted waited for that append's reply, and past the operation timeout it failed with every owner still reserved."""
+    coordinator, events, _ = linear_pair
+    session_identity = await coordinator.open_session(
+        OmniRequest(None, {"delay": 30}), stages=["source", "sink"]
+    )
+    session = coordinator.sessions[session_identity.id]
+    session.limits = SessionLimits(operation_timeout_s=2)
+    output = coordinator.session_outputs(session_identity)
+    waiting = asyncio.create_task(anext(output))
+    submit_to_stage = coordinator.control_plane.submit_to_stage
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def hold_submit(
+        stage_name: str, stage_endpoint: str, message: SubmitMessage
+    ) -> None:
+        held.set()
+        await release.wait()
+        await submit_to_stage(stage_name, stage_endpoint, message)
+
+    monkeypatch.setattr(coordinator.control_plane, "submit_to_stage", hold_submit)
+    await coordinator.append_session(session_identity, chunk(0))
+    await asyncio.wait_for(held.wait(), 5)
+    closing = asyncio.create_task(coordinator.close_session(session_identity))
+    # note (wenyao): The close ends the read before it settles the submitted appends, and it resumes from the read in the loop turn this wait returns in, a turn before the released submit does.
+    await asyncio.wait({session.read_task}, timeout=5)
+    release.set()
+    await asyncio.wait_for(closing, 1)
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(waiting, 5)
+    assert session_identity.id not in coordinator.sessions
+    assert [e[1] for e in event_log(events) if e[0] == "close"] == ["sink", "source"]
 
 
 @pytest.mark.asyncio(loop_scope="session")
