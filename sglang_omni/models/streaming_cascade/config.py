@@ -24,8 +24,14 @@ from sglang_omni.models.nemotron3_5_asr.config import (
     Nemotron3_5ASRPipelineConfig,
     Nemotron3_5ASRStageConfig,
 )
+from sglang_omni.models.streaming_cascade.alignment import AlignmentConfig
 from sglang_omni.models.streaming_cascade.base import ComponentConfig
 from sglang_omni.models.streaming_cascade.components import COMPONENTS
+from sglang_omni.models.streaming_cascade.dialog import DialogConfig
+from sglang_omni.models.streaming_cascade.generators import OpenAIChatGeneratorConfig
+from sglang_omni.models.streaming_cascade.running_transcript import (
+    RunningTranscriptConfig,
+)
 from sglang_omni.models.turn_detection.node import TURN_DETECTION_STAGE
 from sglang_omni.models.vad.node import VAD_STAGE
 from sglang_omni.proto.session import (
@@ -41,6 +47,7 @@ from sglang_omni.proto.streams import (
     COMMIT,
     CONFIGURE,
     INTERRUPT,
+    MESSAGES,
     PCM16,
     REPLY_DELIVERED,
     REPLY_PROGRESS,
@@ -231,6 +238,7 @@ class ComponentGraphConfig(BaseModel):
         self.check_turn_roles()
         self.check_progress()
         self.check_delivery()
+        self.check_overlap()
         return self
 
     def check_names(self) -> None:
@@ -379,6 +387,47 @@ class ComponentGraphConfig(BaseModel):
             else:
                 pass
 
+    def check_overlap(self) -> None:
+        """A dialog that pauses on overlap holds the audio of its reply, asks the chat service that writes it, and waits for one final transcript per utterance."""
+        for node in self.nodes:
+            if (
+                not isinstance(node.component, DialogConfig)
+                or node.component.on_overlap != "pause"
+            ):
+                continue
+            else:
+                self.chat_reader(node.name)
+            if not self.delivery_reporters(node.name):
+                raise ValueError(
+                    f"node {node.name!r} pauses on overlap and needs a graph that publishes its reply's audio"
+                )
+            elif any(
+                isinstance(other.component, RunningTranscriptConfig)
+                and other.name in node.edges()
+                for other in self.nodes
+            ):
+                # note (wenyao): running_transcript sends no final transcript for an utterance without words that the end of the input cuts, and a paused reply would wait for it.
+                raise ValueError(
+                    f"node {node.name!r} pauses on overlap, which is not supported with running_transcript"
+                )
+            else:
+                pass
+
+    def chat_reader(self, name: str) -> OpenAIChatGeneratorConfig:
+        """The openai_chat node that reads the messages of dialog `name`."""
+        readers = [
+            other.component
+            for other in self.nodes
+            if isinstance(other.component, OpenAIChatGeneratorConfig)
+            and MESSAGES in other.edges().get(name, frozenset())
+        ]
+        if not readers:
+            raise ValueError(
+                f"node {name!r} pauses on overlap and needs an openai_chat node reading its messages"
+            )
+        else:
+            return readers[0]
+
     def interrupt_takers(self, name: str) -> list[NodeSettings]:
         """The nodes that take node `name`'s interrupt on a control edge."""
         return [
@@ -398,6 +447,21 @@ class ComponentGraphConfig(BaseModel):
             for other in self.interrupt_takers(name)
             if AUDIO_FORMATS & set(self.publish.get(other.name, ()))
             and SESSION_CONTROL in node.edges().get(other.name, frozenset())
+        ]
+
+    def heard_cut_reporters(self, name: str) -> list[str]:
+        """The alignment nodes that recognize the audio of the sentence at a cut and report the text heard to node `name` on a control edge."""
+        sources = {
+            edge.source
+            for edge in self.node(name).controls
+            if edge.event == REPLY_PROGRESS
+        }
+        return [
+            other.name
+            for other in self.nodes
+            if other.name in sources
+            and isinstance(other.component, AlignmentConfig)
+            and other.component.hears()
         ]
 
     def node(self, name: str) -> NodeSettings:

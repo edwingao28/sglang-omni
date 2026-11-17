@@ -19,6 +19,8 @@ from sglang_omni.proto.streams import (
     INTERRUPT,
     PCM16,
     PCM_F32,
+    REPLY_PAUSED,
+    REPLY_RESUMED,
     SPEECH_STARTED,
     SPEECH_STOPPED,
     TEXT_DELTA,
@@ -140,13 +142,14 @@ class Conversation:
 
 
 @asynccontextmanager
-async def conversation(config):
+async def conversation(config, **params):
     runner = MultiProcessPipelineRunner(config)
     await runner.start()
     session = None
     try:
         identity = await runner.coordinator.open_session(
-            OmniRequest(None), limits=SessionLimits(operation_timeout_s=10)
+            OmniRequest(None, params=params),
+            limits=SessionLimits(operation_timeout_s=10),
         )
         session = Conversation(runner.coordinator, identity)
         yield session
@@ -264,6 +267,45 @@ async def test_control_eos_during_reply_drains_its_feedback(backends):
         ]
         assert (TURN_DONE, 1) in events and (TURN_DONE, 2) in events
         assert session.error is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "backends, floor_events",
+    [
+        ("slow_first", [(REPLY_PAUSED, 1), (REPLY_RESUMED, 1), (TURN_DONE, 1)]),
+        (
+            "slow_first_addressed",
+            [(REPLY_PAUSED, 1), (TURN_INTERRUPTED, 1), (TURN_DONE, 2)],
+        ),
+        (
+            "slow_first_unjudged",
+            [(REPLY_PAUSED, 1), (TURN_INTERRUPTED, 1), (TURN_DONE, 2)],
+        ),
+    ],
+    indirect=["backends"],
+    ids=["not addressed", "addressed", "the judge fails"],
+)
+async def test_a_control_eos_that_ends_speech_over_a_paused_reply_drains(
+    backends, floor_events
+):
+    """A client EOS chunk whose commit ends speech over a paused reply left the reply paused and the EOS unconfirmed. The reply resumes when the chat service calls the speech not addressed; when it calls it addressed, or fails, the reply ends and the speech is answered as the next turn."""
+    pause = {"dialog": {"on_overlap": "pause"}}
+    async with conversation(backends[0], nodes=pause) as session:
+        await session.audio()
+        await session.command(COMMIT)
+        await session.until(
+            lambda: any(o.format == TEXT_DELTA for o in session.outputs)
+        )
+        await session.command(SPEECH_STARTED, t_ms=session.clock)
+        await session.audio()
+        await session.append(replace(control_chunk(COMMIT, session.clock), eos=True))
+        floor = (REPLY_PAUSED, REPLY_RESUMED, TURN_DONE, TURN_INTERRUPTED)
+        assert [
+            (control_type(o), o.turn)
+            for o in session.outputs
+            if control_type(o) in floor
+        ] == floor_events
 
 
 @pytest.mark.asyncio

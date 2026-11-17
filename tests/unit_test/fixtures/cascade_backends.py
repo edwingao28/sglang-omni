@@ -16,6 +16,8 @@ from sglang_omni.models.streaming_cascade.config import StreamingCascadePipeline
 
 SPEECH_SAMPLES = np.array([0, 16384, -16384], dtype="<i2")
 CHAT_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
+# The one candidate token of the chat service's answer to the addressee question by scenario, None for a request that fails; every other scenario answers no.
+JUDGE_TOKENS = {"slow_first_addressed": "yes", "slow_first_unjudged": None}
 
 
 @pytest.fixture
@@ -29,6 +31,7 @@ def backends(request, backend_requests):
 
     In the streaming scenario the chat holds its reply until the
     speech service has sent audio, so a cascade that waits for the whole reply fails.
+    A scenario whose name starts with slow_first holds the first reply after its first delta.
     """
     scenario = request.param
     audio_sent = threading.Event()
@@ -103,7 +106,11 @@ def backends(request, backend_requests):
             else:
                 pass
             backend_requests.append(request)
-            self.send("text/event-stream")
+            if "top_logprobs" in request:
+                self.judge()
+                return
+            else:
+                self.send("text/event-stream")
             if request["max_tokens"] == 1 and request["messages"] == [
                 {"role": "user", "content": "Hi"}
             ]:
@@ -125,7 +132,7 @@ def backends(request, backend_requests):
                 self.event({"delta": delta, "finish_reason": None})
                 if (
                     delta.get("content") == "Hel"
-                    and scenario == "slow_first"
+                    and scenario.startswith("slow_first")
                     and len(received_messages) == 1
                 ):
                     time.sleep(0.5)
@@ -135,6 +142,18 @@ def backends(request, backend_requests):
                     pass
             self.event({"delta": {}, "finish_reason": finish_reason})
             self.wfile.write(b"data: [DONE]\n\n")
+
+        def judge(self) -> None:
+            token = JUDGE_TOKENS.get(scenario, "no")
+            if token is None:
+                self.send_response(500)
+                self.end_headers()
+            else:
+                candidates = [{"token": token, "logprob": 0.0}]
+                choice = {"logprobs": {"content": [{"top_logprobs": candidates}]}}
+                self.send(
+                    "application/json", json.dumps({"choices": [choice]}).encode()
+                )
 
         def event(self, choice: dict) -> None:
             data = json.dumps({"choices": [choice]})

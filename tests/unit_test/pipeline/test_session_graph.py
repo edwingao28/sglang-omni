@@ -10,10 +10,14 @@ from dataclasses import replace
 from itertools import groupby
 from multiprocessing.queues import Queue
 
+import httpx
 import pytest
 
 from sglang_omni.admission import QueueFullError
 from sglang_omni.config.schema import SessionControlEdgeConfig
+from sglang_omni.models.streaming_cascade.addressee import AddresseeJudge
+from sglang_omni.models.streaming_cascade.base import text_chunk, transcript_chunk
+from sglang_omni.models.streaming_cascade.generators import OpenAIChatGeneratorConfig
 from sglang_omni.pipeline.coordinator import Coordinator
 from sglang_omni.pipeline.session_delivery import DeliveryPacer
 from sglang_omni.pipeline.session_graph import SessionGraphRunner
@@ -34,12 +38,16 @@ from sglang_omni.proto.session import (
 )
 from sglang_omni.proto.streams import (
     AUDIO,
+    COMMIT,
     CONTROL,
     IMAGE,
     IMAGE_FRAME,
     INTERRUPT,
     PCM16,
     REPLY_DELIVERED,
+    REPLY_PAUSED,
+    SPEECH_STARTED,
+    SPEECH_STOPPED,
     control_type,
 )
 from sglang_omni.scheduling.session import (
@@ -48,6 +56,7 @@ from sglang_omni.scheduling.session import (
     SessionHooks,
     SessionScheduler,
 )
+from tests.unit_test.fixtures.cascade_fakes import build, drain
 from tests.unit_test.fixtures.session_outputs import control_chunk
 from tests.unit_test.fixtures.session_pipeline import (
     VAD_FACTORY,
@@ -1214,6 +1223,88 @@ async def test_a_paused_reply_sends_the_client_nothing_until_it_resumes():
         sum(output.duration_ms for output in taken if output.format == "pcm16") == 400
     )
     await outputs.aclose()
+
+
+@pytest.mark.asyncio
+async def test_the_client_eos_waits_for_the_speech_that_ended_a_paused_reply():
+    """When speech over a paused reply ended it, the dialog published turn.interrupted before turn.queued, so the graph handed the dialog a waiting client EOS between the two while that speech was still unanswered."""
+    dialog = build({"kind": "dialog", "on_overlap": "pause"})
+    chat = OpenAIChatGeneratorConfig(base_url="http://127.0.0.1:8000/v1", model="chat")
+    dialog.judge = AddresseeJudge(chat, dialog.config.decision_timeout_s)
+    dialog.judge.client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(503))
+    )
+    emitted = await drain(
+        dialog,
+        [
+            transcript_chunk("question", True),
+            text_chunk("Hello world.", 1),
+            control_chunk(SPEECH_STARTED),
+            control_chunk(SPEECH_STOPPED),
+            transcript_chunk("no, stop", True),
+            lambda: dialog.judging,
+        ],
+    )
+    paused = [control_type(chunk) for chunk in emitted].index(REPLY_PAUSED)
+    runner = NodeOutputsRunner([])
+    graph = replace(
+        paced_speaker_runtime(runner),
+        graph=SessionGraph(
+            nodes={
+                "dialog": SessionNode(
+                    ("dialog",),
+                    (
+                        "input:session",
+                        DataEdge(
+                            "speaker:session", feedback=True, overflow="drop_oldest"
+                        ),
+                    ),
+                ),
+                "speaker": SessionNode(
+                    ("speaker",),
+                    ("dialog:messages",),
+                    controls=(ControlEdge("dialog", INTERRUPT),),
+                ),
+                "listener": SessionNode(("listener",), ("dialog:session",)),
+            },
+            publish={"speaker": ("pcm16", "session"), "dialog": ("session",)},
+        ),
+    )
+    dialog_node = Session(
+        session_identity=graph.nodes["dialog"],
+        request=OmniRequest(None),
+        stages=("dialog",),
+        bindings={},
+        limits=SessionLimits(),
+        is_node=True,
+    )
+    runner.sessions[dialog_node.session_identity.id] = dialog_node
+
+    async def one_scheduling_point_apart(session_identity):
+        for output in runner.node_outputs:
+            await asyncio.sleep(0)
+            yield output
+
+    runner.session_outputs = one_scheduling_point_apart
+
+    async def route(chunks: list[TimedChunk]) -> None:
+        runner.node_outputs = [
+            reply_output(chunk.format, chunk.payload, chunk.turn) for chunk in chunks
+        ]
+        await runner.route_graph_outputs(graph, "dialog")
+        await asyncio.sleep(0)
+
+    forwarder = asyncio.create_task(runner.forward_graph_inputs(graph, "dialog"))
+    await route(emitted[: paused + 1])
+    runner.append_graph(graph, replace(control_chunk(COMMIT), eos=True))
+    await route(emitted[paused + 1 :])
+    forwarder.cancel()
+    await asyncio.gather(forwarder, return_exceptions=True)
+    assert graph.open_turns == {2}
+    assert [
+        (control_type(pending.chunk), pending.chunk.eos)
+        for pending in dialog_node.pending
+    ] == [(REPLY_DELIVERED, False)]
 
 
 QUEUED_AUDIO_OF_TURN_1 = (speaker_audio(1, 0), 0, "speaker")

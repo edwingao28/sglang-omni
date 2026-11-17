@@ -5,6 +5,7 @@ import asyncio
 import base64
 import io
 import json
+import math
 import re
 import threading
 import time
@@ -21,6 +22,13 @@ from sglang_omni.admission import QueueFullError
 from sglang_omni.audio.segmentation import UtteranceSegmenter
 from sglang_omni.config.manager import ConfigManager
 from sglang_omni.config.runtime import resolve_stage_factory_args
+from sglang_omni.models.streaming_cascade.addressee import (
+    QUESTION,
+    AddresseeJudge,
+    TopLogprob,
+    addressed_margin,
+    addressee_messages,
+)
 from sglang_omni.models.streaming_cascade.alignment import AlignmentConfig
 from sglang_omni.models.streaming_cascade.base import (
     ChatMessage,
@@ -45,7 +53,10 @@ from sglang_omni.models.streaming_cascade.dialog import (
     DialogConfig,
     heard_prefix,
 )
-from sglang_omni.models.streaming_cascade.generators import ChatDelta
+from sglang_omni.models.streaming_cascade.generators import (
+    ChatDelta,
+    OpenAIChatGeneratorConfig,
+)
 from sglang_omni.models.streaming_cascade.numerals import spoken_text
 from sglang_omni.models.streaming_cascade.recognizers import probe_realtime_service
 from sglang_omni.models.streaming_cascade.running_transcript import (
@@ -66,7 +77,9 @@ from sglang_omni.proto.streams import (
     PCM_F32,
     REPLY_DELIVERED,
     REPLY_HEARD,
+    REPLY_PAUSED,
     REPLY_PROGRESS,
+    REPLY_RESUMED,
     REPLY_SENTENCE,
     SESSION_CONTROL,
     SPEECH_STARTED,
@@ -1105,6 +1118,467 @@ async def test_a_dialog_without_audio_answers_the_next_utterance_after_a_cancell
         ("system", dialog.config.system_prompt),
         ("user", "question next"),
     ]
+
+
+def judge_response(logprobs: dict[str, float]) -> httpx.Response:
+    """A chat completion of one token whose top log-probs are logprobs."""
+    top = [{"token": token, "logprob": value} for token, value in logprobs.items()]
+    return httpx.Response(
+        200,
+        json={
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": top[0]["token"]},
+                    "logprobs": {"content": [{**top[0], "top_logprobs": top}]},
+                    "finish_reason": "length",
+                }
+            ]
+        },
+    )
+
+
+NOT_ADDRESSED = {"no": math.log(0.9), "yes": math.log(0.05), " no": math.log(0.05)}
+ADDRESSED = {"yes": math.log(0.9), "no": math.log(0.1)}
+# A yes that leads no by log(0.55 / 0.45) = 0.2, less than the default respond_margin of 0.34.
+WEAK_YES = {"yes": math.log(0.55), "no": math.log(0.45)}
+
+
+def never_answered():
+    """The answer of a chat service that keeps the request open."""
+    return asyncio.Event().wait()
+
+
+def answered_after(gate: asyncio.Event, logprobs: dict[str, float]):
+    """The answer of a chat service that holds each request until gate is set, so a test decides what the dialog hears before the verdict."""
+
+    async def answer() -> httpx.Response:
+        await gate.wait()
+        return judge_response(logprobs)
+
+    return answer
+
+
+def pausing_dialog(
+    answer, settings: ComponentGraphConfig | None = None, **options: float
+) -> tuple[Dialog, list[dict]]:
+    """A dialog that pauses on overlap with these options, placed in the graph of settings when given, its judge's service answering with answer (a response, an exception to raise, or a function called per request for a response or an awaitable of one), and the requests the service received."""
+    dialog = build({"kind": "dialog", "on_overlap": "pause", **options})
+    if settings is None:
+        pass
+    else:
+        dialog.place(settings, "dialog")
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request):
+        requests.append(json.loads(request.content))
+        if isinstance(answer, Exception):
+            raise answer
+        elif callable(answer):
+            return answer()
+        else:
+            return answer
+
+    chat = OpenAIChatGeneratorConfig(
+        **HTTP_SERVICE,
+        extra_body={
+            "chat_template_kwargs": {"enable_thinking": True},
+            "logprobs": False,
+        },
+    )
+    dialog.judge = AddresseeJudge(chat, dialog.config.decision_timeout_s)
+    dialog.judge.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return dialog, requests
+
+
+async def until(condition) -> None:
+    """Yield to the event loop until condition holds; one that never holds fails the test instead of hanging it."""
+
+    async def poll() -> None:
+        while not condition():
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(poll(), 5)
+
+
+def spoken_over(*heard: TimedChunk) -> list[TimedChunk]:
+    """A reply to "question" with one utterance spoken over it, then what the dialog hears next."""
+    return [
+        transcript_chunk("question", True),
+        text_chunk("Hello world.", 1),
+        control_chunk(SPEECH_STARTED),
+        control_chunk(SPEECH_STOPPED),
+        *heard,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_speech_over_a_paused_reply_that_was_not_addressed_resumes_it():
+    """The default respond_margin is the threshold the policy was measured with, so a yes that leads no by less than it does not end the reply."""
+    dialog, requests = pausing_dialog(judge_response(WEAK_YES))
+    outputs = await drain(
+        dialog,
+        [
+            *spoken_over(transcript_chunk("mm-hmm", True)),
+            lambda: dialog.judging,
+            control_chunk(TURN_DONE, turn=1),
+        ],
+    )
+    assert [control_type(o) for o in outputs] == [
+        TURN_QUEUED,
+        TURN_STARTED,
+        None,
+        REPLY_PAUSED,
+        REPLY_RESUMED,
+    ]
+    assert history(dialog)[1:] == [("user", "question"), ("assistant", "Hello world.")]
+    [request] = requests
+    assert (
+        request["max_tokens"],
+        request["temperature"],
+        request["stream"],
+        request["logprobs"],
+        request["top_logprobs"],
+        request["chat_template_kwargs"],
+    ) == (1, 0, False, True, 20, {"enable_thinking": False})
+    assert request["messages"] == [
+        {"role": "system", "content": QUESTION},
+        {
+            "role": "user",
+            "content": 'User: question\nAssistant (speaking): Hello world.\nHeard while speaking: "mm-hmm"',
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_speech_over_a_paused_reply_that_was_addressed_ends_it_and_is_answered_next():
+    dialog, requests = pausing_dialog(judge_response(ADDRESSED))
+    outputs = await drain(
+        dialog,
+        [
+            *spoken_over(transcript_chunk("no, stop", True)),
+            lambda: dialog.judging,
+            control_chunk(REPLY_DELIVERED, turn=1, audio_ms=0),
+        ],
+    )
+    assert [(control_type(o), o.turn) for o in outputs] == [
+        (TURN_QUEUED, 1),
+        (TURN_STARTED, 1),
+        (None, 1),
+        (REPLY_PAUSED, 1),
+        (TURN_QUEUED, 2),
+        (INTERRUPT, 1),
+        (TURN_INTERRUPTED, 1),
+        (TURN_STARTED, 2),
+        (None, 2),
+    ]
+    assert prompts(outputs)[-1] == [
+        ("system", dialog.config.system_prompt),
+        ("user", "question no, stop"),
+    ]
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "heard, wait_s, note, history",
+    [
+        (
+            control_chunk(REPLY_PROGRESS, turn=1, text_end=3, audio_ms=600),
+            3600.0,
+            f" {CUT_REPLY_NOTE}",
+            [("user", "question"), ("assistant", "One…"), ("user", "wait, what?")],
+        ),
+        (None, 0.0, "", [("user", "question wait, what?")]),
+    ],
+    ids=["the aligner reports the cut", "the aligner reports nothing"],
+)
+async def test_speech_that_ends_a_paused_reply_is_answered_with_the_part_of_it_the_aligner_heard(
+    monkeypatch, heard, wait_s, note, history
+):
+    """The answer was built when the graph reported the delivered audio, before the aligner's cut of the reply arrived: a reply cut inside its first sentence left no entry, and the model got the two utterances joined as one question."""
+    # Neither case races the clock: only the report can end a wait of an hour, and a wait of no length has run out before the dialog takes its next chunk.
+    monkeypatch.setattr(
+        "sglang_omni.models.streaming_cascade.dialog.HEARD_CUT_WAIT_S", wait_s
+    )
+    pause = {"nodes": {"dialog": {"on_overlap": "pause"}}}
+    settings = profile_config("qwen3-asr-qwen3.8-27b-vivian").component_graph()
+    dialog, _ = pausing_dialog(judge_response(ADDRESSED), settings.apply(pause))
+    replaceable: list[bool] = []
+
+    async def see_replaceable() -> None:
+        replaceable.append(dialog.can_replace())
+
+    outputs = await drain(
+        dialog,
+        [
+            transcript_chunk("question", True),
+            text_chunk(REPLY, 1),
+            lambda: dialog.control(
+                control_chunk(REPLY_PROGRESS, turn=1, text_end=8, audio_ms=1000)
+            ),
+            control_chunk(SPEECH_STARTED),
+            control_chunk(SPEECH_STOPPED),
+            transcript_chunk("wait, what?", True),
+            lambda: dialog.judging,
+            control_chunk(REPLY_DELIVERED, turn=1, audio_ms=600),
+            # A session update that replaced the dialog here would end the wait with it and leave the waiting speech unanswered.
+            see_replaceable,
+            # The aligner's report follows the delivered audio, or the input stays open until the wait for one has run out.
+            (
+                (lambda: until(lambda: dialog.reply_turn == 2))
+                if heard is None
+                else (lambda: dialog.control(heard))
+            ),
+        ],
+    )
+    assert prompts(outputs)[-1] == [
+        ("system", f"{dialog.config.system_prompt}{note}"),
+        *history,
+    ]
+    assert replaceable == [False] and dialog.can_replace()
+
+
+@pytest.mark.asyncio
+async def test_a_second_overlap_while_paused_is_judged_with_the_first():
+    is_speaking_again = asyncio.Event()
+
+    async def hear_the_first_verdict() -> None:
+        is_speaking_again.set()
+        await dialog.judging
+
+    dialog, requests = pausing_dialog(answered_after(is_speaking_again, NOT_ADDRESSED))
+    outputs = await drain(
+        dialog,
+        [
+            *spoken_over(transcript_chunk("a", True)),
+            control_chunk(SPEECH_STARTED),
+            hear_the_first_verdict,
+            control_chunk(SPEECH_STOPPED),
+            transcript_chunk("b", True),
+            lambda: dialog.judging,
+        ],
+    )
+    assert [control_type(o) for o in outputs][3:] == [REPLY_PAUSED, REPLY_RESUMED]
+    assert [
+        request["messages"][1]["content"].splitlines()[-1] for request in requests
+    ] == [
+        'Heard while speaking: "a"',
+        'Heard while speaking: "a b"',
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_transcript_over_a_paused_reply_resumes_it_without_asking():
+    dialog, requests = pausing_dialog(judge_response(ADDRESSED))
+    outputs = await drain(dialog, spoken_over(transcript_chunk("", True)))
+    assert [control_type(o) for o in outputs][3:] == [REPLY_PAUSED, REPLY_RESUMED]
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_speech_that_starts_as_the_input_ends_resumes_the_reply_it_paused():
+    dialog, requests = pausing_dialog(judge_response(ADDRESSED))
+    outputs = await drain(
+        dialog,
+        [
+            transcript_chunk("question", True),
+            text_chunk("Hello world.", 1),
+            control_chunk(SPEECH_STARTED),
+        ],
+    )
+    assert [control_type(o) for o in outputs][3:] == [REPLY_PAUSED, REPLY_RESUMED]
+    assert requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx.ReadTimeout("slow"),
+        never_answered,
+        httpx.Response(200, text="not a completion"),
+        httpx.Response(200, json={"choices": []}),
+    ],
+    ids=["a step timed out", "no answer by the deadline", "unreadable", "no choice"],
+)
+async def test_a_judge_without_an_answer_ends_the_paused_reply(answer):
+    """A judge request that fails, misses its deadline or returns no verdict ends the paused reply. The row no answer by the deadline runs on a mock transport that never answers and applies no HTTP timeout, so it checks that the judge's own deadline of decision_timeout_s ends the request."""
+    dialog, requests = pausing_dialog(answer, decision_timeout_s=0.01)
+    outputs = await drain(
+        dialog,
+        [
+            *spoken_over(transcript_chunk("hm", True)),
+            lambda: asyncio.wait_for(dialog.judging, 5),
+        ],
+    )
+    assert [(control_type(o), o.turn) for o in outputs][3:] == [
+        (REPLY_PAUSED, 1),
+        (TURN_QUEUED, 2),
+        (INTERRUPT, 1),
+        (TURN_INTERRUPTED, 1),
+    ]
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "speech",
+    [
+        [control_chunk(SPEECH_STARTED)],
+        [
+            control_chunk(SPEECH_STARTED),
+            control_chunk(SPEECH_STOPPED),
+            control_chunk(SPEECH_STARTED),
+        ],
+    ],
+    ids=["one utterance", "speech that stops and starts again"],
+)
+async def test_a_reply_paused_past_its_limit_after_the_speech_over_it_ended_ends_as_an_interrupt(
+    monkeypatch, speech
+):
+    """A paused reply waited without limit for the final transcript of the speech over it, so when none came the reply neither played on nor ended. The limit counts from the end of that speech, and speech that starts again drops it: the reply stays paused however long the user speaks."""
+    monkeypatch.setattr(
+        "sglang_omni.models.streaming_cascade.dialog.FINAL_TRANSCRIPT_WAIT_S", 0.0
+    )
+    dialog, _ = pausing_dialog(judge_response(NOT_ADDRESSED), decision_timeout_s=0.001)
+    replaceable: list[bool] = []
+
+    async def speak_for_twenty_limits() -> None:
+        await asyncio.sleep(0.02)
+        replaceable.append(dialog.can_replace())
+
+    outputs = await drain(
+        dialog,
+        [
+            transcript_chunk("question", True),
+            text_chunk("Hello world.", 1),
+            *speech,
+            speak_for_twenty_limits,
+            control_chunk(SPEECH_STOPPED),
+            lambda: until(dialog.can_replace),
+            transcript_chunk("wait", True),
+            control_chunk(REPLY_DELIVERED, turn=1, audio_ms=0),
+        ],
+    )
+    assert replaceable == [False]
+    assert [(control_type(o), o.turn) for o in outputs][3:] == [
+        (REPLY_PAUSED, 1),
+        (INTERRUPT, 1),
+        (TURN_INTERRUPTED, 1),
+        (TURN_QUEUED, 2),
+        (TURN_STARTED, 2),
+        (None, 2),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_reply_plays_on_past_the_limit_of_its_pause(monkeypatch):
+    """The resume ends the pause's limit too: a limit left running would end the resumed reply as an interrupt, or fail the session once the reply had ended."""
+    monkeypatch.setattr(
+        "sglang_omni.models.streaming_cascade.dialog.FINAL_TRANSCRIPT_WAIT_S", 0.0
+    )
+    dialog, _ = pausing_dialog(judge_response(ADDRESSED), decision_timeout_s=0.001)
+
+    async def play_for_twenty_limits() -> None:
+        await asyncio.sleep(0.02)
+
+    outputs = await drain(
+        dialog,
+        [
+            *spoken_over(transcript_chunk("", True)),
+            play_for_twenty_limits,
+            text_chunk(" More.", 1),
+            control_chunk(TURN_DONE, turn=1),
+        ],
+    )
+    assert [control_type(o) for o in outputs][3:] == [REPLY_PAUSED, REPLY_RESUMED]
+    assert history(dialog)[1:] == [
+        ("user", "question"),
+        ("assistant", "Hello world. More."),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_client_cancel_while_paused_answers_the_speech_heard_whatever_the_verdict():
+    is_cancelled = asyncio.Event()
+
+    async def cancel_then_hear_the_verdict() -> None:
+        await dialog.control(control_chunk(INTERRUPT))
+        is_cancelled.set()
+        await dialog.judging
+
+    dialog, _ = pausing_dialog(answered_after(is_cancelled, NOT_ADDRESSED))
+    outputs = await drain(
+        dialog,
+        [
+            *spoken_over(transcript_chunk("wait", True)),
+            cancel_then_hear_the_verdict,
+        ],
+    )
+    assert [(control_type(o), o.turn) for o in outputs][3:] == [
+        (REPLY_PAUSED, 1),
+        (TURN_QUEUED, 2),
+        (INTERRUPT, 1),
+        (TURN_INTERRUPTED, 1),
+    ]
+    assert dialog.waiting[0][1] == "wait" and not dialog.floor.is_paused
+
+
+def test_addressee_messages_show_the_recent_history_the_reply_and_the_speech():
+    history_messages = [
+        ChatMessage(role="system", content="Be terse."),
+        ChatMessage(role="user", content="old"),
+        ChatMessage(role="assistant", content="older reply"),
+        ChatMessage(role="user", content="one"),
+        ChatMessage(role="assistant", content="two"),
+        ChatMessage(role="user", content="three"),
+    ]
+    assert addressee_messages(history_messages, "Four five.", ["six", "seven"]) == [
+        ChatMessage(role="system", content=QUESTION),
+        ChatMessage(
+            role="user",
+            content='Assistant: older reply\nUser: one\nAssistant: two\nUser: three\nAssistant (speaking): Four five.\nHeard while speaking: "six seven"',
+        ),
+    ]
+
+
+def test_the_margin_sums_each_side_over_its_labels_and_needs_one_of_them():
+    def margin(logprobs: dict[str, float]) -> float | None:
+        return addressed_margin(
+            [
+                TopLogprob(token=token, logprob=value)
+                for token, value in logprobs.items()
+            ]
+        )
+
+    assert margin(
+        {"yes": math.log(0.3), " Yes": math.log(0.2), "no": math.log(0.1)}
+    ) == pytest.approx(math.log(0.5) - math.log(0.1))
+    assert margin({"No": -0.1}) == -math.inf
+    assert margin({"yes": -0.1, "maybe": -3.0}) == math.inf
+    assert margin({"maybe": -3.0}) is None
+
+
+def test_a_dialog_pauses_on_overlap_only_in_a_graph_that_can_hold_and_judge_its_reply():
+    pause = {"nodes": {"dialog": {"on_overlap": "pause"}}}
+    settings = profile_config("nemotron-qwen3-tts").component_graph().apply(pause)
+    assert settings.chat_reader("dialog") == settings.node("llm").component
+    with pytest.raises(ValueError, match="not supported with running_transcript"):
+        profile_config("nemotron-stage-qwen3-tts").component_graph().apply(pause)
+    text_only = yaml.safe_load(TEXT_ONLY)
+    with pytest.raises(ValueError, match="publishes its reply's audio"):
+        ComponentGraphConfig.model_validate(text_only).apply(pause)
+    text_only["nodes"].append(
+        {
+            "name": "aside",
+            "kind": "dialog",
+            "on_overlap": "pause",
+            "inputs": ["asr", "llm"],
+        }
+    )
+    text_only["publish"]["aside"] = ["session"]
+    with pytest.raises(ValueError, match="needs an openai_chat node reading"):
+        ComponentGraphConfig.model_validate(text_only)
 
 
 def dialog_stage(identity):
