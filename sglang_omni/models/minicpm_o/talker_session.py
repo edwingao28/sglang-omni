@@ -168,9 +168,9 @@ class TalkerAdapter(ARSessionAdapter):
                 else 0
             ),
             temperature=payload.request.params["talker_temperature"],
-            # note (luojiaxuan): The official duplex loop samples codec tokens without top-p or top-k and penalizes repeats over the unit's own last 16 tokens, which the runner applies from rep_penalty.
-            top_p=1.0,
-            top_k=-1,
+            top_p=float(payload.request.params["talker_top_p"]),
+            top_k=int(payload.request.params["talker_top_k"]),
+            # note (luojiaxuan): The official duplex loop penalizes repeats over the unit's own last 16 tokens, which the runner applies from rep_penalty.
             repetition_penalty=1.0,
             stop_token_ids=[self.model.codec_eos_id],
         )

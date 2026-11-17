@@ -555,6 +555,8 @@ async def test_session_overrides_stay_local_to_the_session() -> None:
         repetition_window_size=64,
         talker_temperature=0.6,
         talker_repetition_penalty=1.1,
+        talker_top_k=25,
+        talker_top_p=0.85,
     ).model_dump()
     overridden = await open_session_params(
         config,

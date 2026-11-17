@@ -6,8 +6,10 @@ from typing import NamedTuple
 
 import pytest
 import torch
+from sglang.srt.sampling.sampling_params import TOP_K_ALL
 
 from sglang_omni.models.minicpm_o.components.tts_runtime import CODEC_CHUNK_SIZE
+from sglang_omni.models.minicpm_o.native_config import MiniCPMODuplexSampling
 from sglang_omni.models.minicpm_o.session_adapters import OutputConverter
 from sglang_omni.models.minicpm_o.talker_session import TalkerAdapter
 from sglang_omni.proto.session import OutputChunk, SessionIdentity, TimedChunk
@@ -59,32 +61,36 @@ def talker_model() -> SimpleNamespace:
     )
 
 
+def talker_payload(unit: Unit, **sampling_overrides: float | str) -> SimpleNamespace:
+    # note (luojiaxuan): A unit without speech is a listening unit, or the thinker's result for an input end on a unit boundary.
+    return SimpleNamespace(
+        request_id="unit",
+        request=SimpleNamespace(
+            params={**MiniCPMODuplexSampling().model_dump(), **sampling_overrides}
+        ),
+        data=dict(
+            text="hi" if unit.is_speaking else "",
+            talker_conditions=(
+                [(2, torch.zeros(HIDDEN_SIZE), unit.is_model_turn_end)]
+                if unit.is_speaking
+                else []
+            ),
+            is_listen=not unit.is_speaking,
+            end_of_turn=unit.is_model_turn_end
+            or unit.is_interrupted
+            or (unit.is_input_end and not unit.is_speaking),
+            is_interrupted=unit.is_interrupted,
+            hears_user=unit.hears_user,
+        ),
+    )
+
+
 def run_talker(units: list[Unit]) -> list[Spoken]:
     adapter = TalkerAdapter(talker_model())
     adapter.open(IDENTITY, None)
     spoken = []
     for unit in units:
-        # note (luojiaxuan): A unit without speech is a listening unit, or the thinker's result for an input end on a unit boundary.
-        payload = SimpleNamespace(
-            request_id="unit",
-            request=SimpleNamespace(
-                params=dict(talker_temperature=0.8, talker_repetition_penalty=1.05)
-            ),
-            data=dict(
-                text="hi" if unit.is_speaking else "",
-                talker_conditions=(
-                    [(2, torch.zeros(HIDDEN_SIZE), unit.is_model_turn_end)]
-                    if unit.is_speaking
-                    else []
-                ),
-                is_listen=not unit.is_speaking,
-                end_of_turn=unit.is_model_turn_end
-                or unit.is_interrupted
-                or (unit.is_input_end and not unit.is_speaking),
-                is_interrupted=unit.is_interrupted,
-                hears_user=unit.hears_user,
-            ),
-        )
+        payload = talker_payload(unit)
         chunk = TimedChunk("text", 0, 1000, 0, None, eos=unit.is_input_end)
         preparation = adapter.prepare_unit(IDENTITY, chunk, payload)
         if preparation.bypass_generation:
@@ -251,6 +257,35 @@ def test_a_reply_the_model_ends_speaks_the_text_the_talker_still_owes(
 ) -> None:
     """When the model ended its turn, or the input ended, while the talker still owed text, the talker dropped that text and the reply ended mid-sentence."""
     assert run_talker(units) == expected
+
+
+@pytest.mark.parametrize(
+    ("sampling_overrides", "top_p", "top_k"),
+    [
+        ({}, 1.0, TOP_K_ALL),
+        ({"talker_top_p": 0.85, "talker_top_k": 4}, 0.85, 4),
+        ({"talker_top_k": 4.0}, 1.0, 4),
+        ({"talker_top_p": "0.85", "talker_top_k": "4"}, 0.85, 4),
+    ],
+    ids=[
+        "unset-samples-the-whole-codebook",
+        "the-sessions-top-p-and-top-k",
+        "a-top-k-sent-as-a-float",
+        "a-top-p-and-top-k-sent-as-text",
+    ],
+)
+def test_the_talker_samples_codec_tokens_with_the_sessions_top_p_and_top_k(
+    sampling_overrides: dict[str, float | str], top_p: float, top_k: int
+) -> None:
+    """A session's talker top-p and top-k reach the codec sampler; unset, it samples the whole codebook as the official duplex loop does. A top-k a /v1/session client sent as 4.0 reached SGLang's PyTorch sampler as a float and failed torch.topk for every session in the talker batch; text failed the talker's request."""
+    adapter = TalkerAdapter(talker_model())
+    adapter.open(IDENTITY, None)
+    payload = talker_payload(REPLY, **sampling_overrides)
+    chunk = TimedChunk("text", 0, 1000, 0, None)
+    adapter.prepare_unit(IDENTITY, chunk, payload)
+    sampling_params = adapter.build(IDENTITY, chunk, payload).req.sampling_params
+    assert (sampling_params.top_p, sampling_params.top_k) == (top_p, top_k)
+    assert isinstance(sampling_params.top_k, int)
 
 
 def voice(text: str, *, end_of_turn: bool, is_speech_cut: bool) -> OutputChunk:

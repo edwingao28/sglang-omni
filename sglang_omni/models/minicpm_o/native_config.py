@@ -3,7 +3,14 @@
 
 from typing import ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    field_validator,
+    model_validator,
+)
 
 from sglang_omni.admission import REQUEST_TO_TOKEN_SLOTS_RESERVED_FOR_RETAINED_KV
 from sglang_omni.config import (
@@ -23,6 +30,8 @@ TALKER_CONTEXT_LENGTH = 4096
 FORWARD_FLOOR_MS = 45
 # note (wenyao): The thinker writes text faster than the talker speaks it, so a turn the model ends can still owe speech; at most this many more units speak it.
 MAX_DRAIN_UNITS = 3
+# note (wenyao): SGLang's top-k for the whole vocabulary, so no larger value samples differently; a talker batch holds top-k as int32, and a value past its range fails the batch for every session in it.
+MAX_TALKER_TOP_K = 1 << 30
 
 
 def stages() -> list[StageConfig]:
@@ -87,6 +96,17 @@ class MiniCPMODuplexSampling(BaseModel):
     repetition_window_size: int = Field(default=512, ge=1)
     talker_temperature: float = Field(default=0.8, ge=0, le=2)
     talker_repetition_penalty: float = Field(default=1.05, ge=1)
+    # note (luojiaxuan): The official duplex loop samples codec tokens without top-p or top-k.
+    talker_top_k: int = Field(default=-1, ge=-1, le=MAX_TALKER_TOP_K)
+    talker_top_p: float = Field(default=1.0, gt=0, le=1)
+
+    @field_validator("talker_top_k")
+    @classmethod
+    def talker_top_k_disabled_or_positive(cls, talker_top_k: int) -> int:
+        if talker_top_k == 0:
+            raise ValueError("talker_top_k must be -1 (disabled) or at least 1")
+        else:
+            return talker_top_k
 
 
 class MiniCPMODuplexVision(BaseModel):

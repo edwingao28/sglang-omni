@@ -13,6 +13,7 @@ from unittest.mock import Mock
 import pytest
 from click.testing import Result
 from pydantic import JsonValue, ValidationError
+from sglang.srt.sampling.sampling_params import TOP_K_ALL
 from transformers import AutoConfig
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from typer.testing import CliRunner
@@ -33,6 +34,7 @@ from sglang_omni.models.minicpm_o.native_config import (
     TALKER_CONTEXT_LENGTH,
     THINKER_CONTEXT_LENGTH,
     MiniCPMODuplexPipelineConfig,
+    MiniCPMODuplexSampling,
     MiniCPMODuplexVision,
 )
 from sglang_omni.models.minicpm_o.native_stages import SpeechHooks
@@ -438,6 +440,16 @@ for name in ("MiniCPMODuplexPipelineConfig", "MiniCPMOPipelineConfig", "MiniCPMO
 def test_vision_limits_must_fit_one_frame(limits: dict[str, int]) -> None:
     with pytest.raises(ValidationError):
         MiniCPMODuplexVision(**limits)
+
+
+def test_duplex_sampling_refuses_a_talker_top_k_the_sampler_refuses() -> None:
+    """SGLang's sampler refuses a top_k of 0 and holds a talker batch's top_k as int32; the config refuses both at load or session open rather than when the talker samples a unit."""
+    with pytest.raises(ValidationError, match=r"-1 \(disabled\) or at least 1"):
+        MiniCPMODuplexSampling(talker_top_k=0)
+    with pytest.raises(ValidationError, match=f"less than or equal to {TOP_K_ALL}"):
+        MiniCPMODuplexSampling(talker_top_k=2**31)
+    assert MiniCPMODuplexSampling(talker_top_k=1).talker_top_k == 1
+    assert MiniCPMODuplexSampling(talker_top_k=TOP_K_ALL).talker_top_k == TOP_K_ALL
 
 
 def test_duplex_deployment_grants_images_by_slice_count() -> None:

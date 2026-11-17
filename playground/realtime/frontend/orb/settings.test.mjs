@@ -124,6 +124,8 @@ test("MiniCPM-o renders every declared knob with a neutral placeholder and sends
     { name: "repetition_window_size", label: "Repetition window", placeholder: "default", min: "1" },
     { name: "talker_temperature", label: "Voice temperature", placeholder: "default", min: "0" },
     { name: "talker_repetition_penalty", label: "Voice repetition penalty", placeholder: "default", min: "1" },
+    { name: "talker_top_k", label: "Voice top K", placeholder: "default", min: "-1" },
+    { name: "talker_top_p", label: "Voice top P", placeholder: "default", min: "0.01" },
   ]);
   assert.equal(ui.greedyRow.hidden, false);
   assert.equal(ui.voiceRow.hidden, false);
